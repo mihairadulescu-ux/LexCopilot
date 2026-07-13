@@ -107,14 +107,13 @@ def upload_to_drive(service, filename, content_bytes):
 
 
 def get_or_refresh_soap_session(force_refresh=False):
-    """Menține sesiunea și loghează clar când se cere un token nou cu adevărat."""
     global _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY
     
     if _GLOBAL_SOAP_CLIENT and _GLOBAL_TOKEN_KEY and not force_refresh:
         return _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY
 
     if force_refresh:
-        print("🔄 [TOKEN] ⚠️ REÎMPROSPĂTARE FORȚATĂ SOLICITATĂ! Se re-interoghează WSDL-ul...")
+        print("🔄 [TOKEN] ⚠️ REÎMPROSPĂTARE FORȚATĂ! Se re-interoghează WSDL-ul guvernamental...")
     else:
         print("🔌 [TOKEN] Primul apel al rulării. Se inițializează sesiunea inițială...")
 
@@ -132,8 +131,8 @@ def get_or_refresh_soap_session(force_refresh=False):
                 print(f"🔑 [TOKEN] Token NOU generat cu succes: {token[:8]}...")
                 return _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY
         except Exception as e:
-            wait_time = 15 * attempt
-            print(f"🚨 [GetToken Err] Serverul Just.ro a respins alocarea token-ului (Tentativa {attempt}/5). Reîncercăm în {wait_time}s... Eroare: {e}")
+            wait_time = 20 * attempt
+            print(f"🚨 [GetToken Err] Serverul Just.ro refuză alocarea token-ului (Tentativa {attempt}/5). Reîncercăm în {wait_time}s... Eroare: {e}")
             time.sleep(wait_time)
             
     raise ConnectionError("💥 Serverul Just.ro refuză complet generarea de tokenuri noi în acest moment.")
@@ -179,17 +178,17 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
         
         for attempt in range(0, max_retries + 1):
             try:
-                # Preluăm sesiunea curentă
-                client, history, token_key = get_or_refresh_soap_session(force_refresh=(attempt > 2))
+                # IMPORTANT (Recomandare ChatGPT): Nu mai cerem force_refresh pe baza numărului de încercări!
+                # Lăsăm token-ul global neatins, pentru că eroarea 504/502 nu este vina lui.
+                client, history, token_key = get_or_refresh_soap_session(force_refresh=False)
 
-                # Log-ul de diagnosticare propus de ChatGPT
-                print(f"--- {prefix_log} An {target_year} / Pagina {current_page} | Token activ: {token_key[:8]}... (Încercare {attempt}) ---")
+                print(f"--- {prefix_log} An {target_year} / Pagina {current_page} | Token activ: {token_key[:8]}... (Încercare {attempt}/{max_retries}) ---")
 
                 if attempt > 0:
-                    base_wait = 5.0
-                    max_wait = 120.0
+                    base_wait = 10.0  # Mărim puțin timpul de bază pentru erori de rețea severe
+                    max_wait = 180.0
                     wait_time = min(max_wait, base_wait * (2 ** attempt)) + random.uniform(0.0, 5.0)
-                    print(f"⏳ [Backoff Jitter] Așteptăm {wait_time:.2f} secunde înainte de reîncercare...")
+                    print(f"⏳ [Backoff Jitter] Probleme de server detectate. Așteptăm {wait_time:.2f} secunde...")
                     time.sleep(wait_time)
 
                 composite_type = client.get_type(composite_type_name)
@@ -199,19 +198,24 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
                     SearchAn=str(target_year),
                 )
 
-                # Aici se execută interogarea propriu-zisă pe baza lor de date
                 client.service.Search(SearchModel=search_model, tokenKey=token_key)
                 retry_success = True
                 break
             except Exception as soap_error:
                 error_str = str(soap_error).lower()
-                print(f"⚠️ [Search Err] Eroare la Search() pe pagina {current_page}: {soap_error}")
+                print(f"⚠️ [Search Err] Serverul a răspuns cu eroare pe pagina {current_page}: {soap_error}")
                 
-                if "token" in error_str or "session" in error_str or "expired" in error_str:
+                # IMPLEMENTARE RECOMANDARE CHATGPT:
+                # Tratăm 502, 504 și Timeout ca probleme stricte de infrastructură backend. NU distrugem token-ul!
+                if "504" in error_str or "502" in error_str or "timed out" in error_str or "timeout" in error_str:
+                    print("🌐 [Diagnostic] Eroare pură de infrastructură/rețea (Nginx/Timeout). Token-ul este valid în continuare. Se aplică doar Backoff.")
+                # Doar dacă eroarea indică explicit o sesiune invalidă/expirată pe bune, refacem token-ul
+                elif "token" in error_str or "session" in error_str or "expired" in error_str:
+                    print("🔑 [Diagnostic] Sesiunea a expirat la nivel de aplicație. Se solicită token nou...")
                     get_or_refresh_soap_session(force_refresh=True)
 
         if not retry_success:
-            print(f"🛑 Pagina {current_page} ({target_year}) a epuizat încercările de backoff. O sărim temporar.")
+            print(f"🛑 Pagina {current_page} ({target_year}) a epuizat cele {max_retries} încercări de backoff din cauza blocajului Just.ro. O sărim pentru această rulare.")
             if not is_gap_repair:
                 consecutive_empty_pages = 0
             continue
@@ -244,7 +248,7 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
 
 def download_laws_local():
     try:
-        print(f"🚀 Pornire motor industrial optimizat...")
+        print(f"🚀 Pornire motor industrial optimizat de producție...")
         drive_service = get_drive_service()
         global_drive_db = pre_scan_entire_drive(drive_service)
         
