@@ -36,5 +36,6 @@ jobs:
       - name: Rulare Descarcare PDF
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          PYTHONUNBUFFERED: "1"
         run: |
           python crawler_pdf.py ${{ matrix.start_year }} ${{ matrix.end_year }}
