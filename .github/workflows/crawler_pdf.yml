@@ -14,10 +14,10 @@ jobs:
       matrix:
         # Aici setezi ce ani vrei să ruleze în paralel. Acum este pus pe 2023 și 2024.
         include:
+          - start_year: 2022
+            end_year: 2022
           - start_year: 2023
             end_year: 2023
-          - start_year: 2024
-            end_year: 2024
 
     steps:
       - name: Checkout Code
