@@ -16,14 +16,12 @@ GOOGLE_DRIVE_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
 START_YEAR = 1900
-END_YEAR = 2026  # Anul curent conform specificațiilor curente
+END_YEAR = 2026
 
 
 def get_drive_service():
     """Autentifică robotul în Google Drive (compatibil Local și Cloud/GitHub Actions)."""
     scopes = ["https://www.googleapis.com/auth/drive.file"]
-    
-    # Verificăm dacă suntem pe GitHub Actions (unde injectăm cheia ca variabilă de mediu)
     github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     
     if github_secret:
@@ -38,11 +36,12 @@ def get_drive_service():
     return build("drive", "v3", credentials=creds)
 
 
-def get_already_downloaded_pages(service, target_year):
-    """Scanează folderul Google Drive și returnează paginile deja descărcate PENTRU UN AN ANUME."""
-    pages = set()
+def pre_scan_entire_drive(service):
+    """Scanează folderul Google Drive O SINGURĂ DATĂ și grupează paginile pe ani în memorie."""
+    print("📂 [Magistrală] Se inițiază scanarea globală a folderului Google Drive...")
+    database = {}
     page_token = None
-    query = f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and name contains 'brut_legislatie_{target_year}_pag' and trashed = false"
+    query = f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and name contains 'brut_legislatie_' and trashed = false"
 
     try:
         while True:
@@ -57,18 +56,24 @@ def get_already_downloaded_pages(service, target_year):
 
             for file in response.get('files', []):
                 name = file.get('name', '')
-                match = re.search(r"pag(\d+)\.xml", name)
+                # Căutăm structura brut_legislatie_AN_pagPAGINA.xml
+                match = re.search(r"brut_legislatie_(\d+)_pag(\d+)\.xml", name)
                 if match:
-                    pages.add(int(match.group(1)))
+                    an = int(match.group(1))
+                    pagina = int(match.group(2))
+                    if an not in database:
+                        database[an] = set()
+                    database[an].add(pagina)
 
             page_token = response.get('nextPageToken', None)
             if not page_token:
                 break
-
-        return pages
+        
+        print(f"✅ Scanare completă! Am mapat istoricul pentru {len(database)} ani diferiți.")
+        return database
     except Exception as e:
-        print(f"⚠️ Atenție: Nu am putut scana complet folderul din Drive ({e}). Continuăm cu riscul de duplicare.")
-        return set()
+        print(f"⚠️ Erroare la scanarea globală ({e}). Robotul va lucra pe curat.")
+        return {}
 
 
 def upload_to_drive(service, filename, content_bytes):
@@ -92,20 +97,14 @@ def upload_to_drive(service, filename, content_bytes):
 def create_fresh_soap_client():
     """Creează o instanță curată de client SOAP cu timeout-uri robuste extinse."""
     history = HistoryPlugin()
-    # Punct critic de control: timeout inițial extins la 90 de secunde, operațiune la 120 secunde
     transport = Transport(timeout=90, operation_timeout=120)  
     client = Client(WSDL_URL, transport=transport, plugins=[history])
     return client, history
 
 
-def download_year(drive_service, composite_type_name, target_year):
-    """
-    Descarcă toate paginile pentru UN singur an folosind o coadă dinamică 
-    cu protecție totală împotriva erorilor de rețea / Read Timeout.
-    """
+def download_year(drive_service, composite_type_name, target_year, downloaded_pages):
+    """Descarcă toate paginile pentru UN singur an folosind baza de date pre-scanată."""
     print(f"\n{'='*70}\n📅 AN INDUSTRIAL: {target_year}\n{'='*70}")
-
-    downloaded_pages = get_already_downloaded_pages(drive_service, target_year)
     
     pages_to_process = []
     if downloaded_pages:
@@ -128,7 +127,6 @@ def download_year(drive_service, composite_type_name, target_year):
     files_saved = 0
     consecutive_empty_pages = 0
 
-    # Inițializare client SOAP
     client = None
     history = None
     token_key = None
@@ -141,7 +139,7 @@ def download_year(drive_service, composite_type_name, target_year):
         except Exception as e:
             print(f"🚨 [Init Err] Serverul Just.ro nu răspunde la inițializare pentru {target_year} (Tentativa {init_attempt}/5): {e}")
             if init_attempt == 5:
-                print(f"🛑 Abandonăm anul {target_year} temporar din cauza indisponibilității serverului.")
+                print(f"🛑 Abandonăm anul {target_year} temporar.")
                 return 0
             time.sleep(30 * init_attempt)
 
@@ -169,8 +167,6 @@ def download_year(drive_service, composite_type_name, target_year):
                     wait_time = 30 * attempt
                     print(f"⏳ [Așteptare Recovery] Reîncercare {attempt}/{max_retries} peste {wait_time}s...")
                     time.sleep(wait_time)
-                    
-                    print("🔄 Resetare fizică client SOAP și re-autentificare preventivă...")
                     client, history = create_fresh_soap_client()
                     token_key = client.service.GetToken()
 
@@ -188,11 +184,11 @@ def download_year(drive_service, composite_type_name, target_year):
                 retry_success = True
                 break
             except Exception as soap_error:
-                print(f"⚠️ Eroare detectată la interogare la pagina {current_page}: {soap_error}")
-                token_key = None  # Resetăm token-ul preventiv pentru următorul retry
+                print(f"⚠️ Eroare detectată la pagina {current_page}: {soap_error}")
+                token_key = None
 
         if not retry_success:
-            print(f"🛑 Pagina {current_page} ({target_year}) a eșuat critic după toate tentativele. Trecem mai departe.")
+            print(f"🛑 Pagina {current_page} ({target_year}) a eșuat critic. Trecem mai departe.")
             if not is_gap_repair:
                 consecutive_empty_pages = 0
             continue
@@ -218,22 +214,27 @@ def download_year(drive_service, composite_type_name, target_year):
             if success:
                 files_saved += 1
 
-        time.sleep(3.0)  # Întârziere preventivă între pagini pentru stabilitate
+        time.sleep(3.0)
 
     return files_saved
 
 
 def download_laws_local():
-    """Rulează descărcarea istorică industrială generală fără întreruperi la erori globale."""
     try:
         print(f"🚀 Pornire motor industrial auto-reparabil: {START_YEAR}–{END_YEAR}...")
         drive_service = get_drive_service()
+        
+        # O SINGURĂ SCANARE PENTRU TOATĂ VIAȚA RUN-ULUI
+        global_drive_db = pre_scan_entire_drive(drive_service)
+        
         composite_type_name = "{http://schemas.datacontract.org/2004/07/FreeWebService}CompositeType"
         total_files_all_years = 0
         
         for year in range(START_YEAR, END_YEAR + 1):
             try:
-                files_saved = download_year(drive_service, composite_type_name, year)
+                # Extragem paginile deja existente pentru anul curent direct din baza de date locală
+                downloaded_pages = global_drive_db.get(year, set())
+                files_saved = download_year(drive_service, composite_type_name, year, downloaded_pages)
                 total_files_all_years += files_saved
             except Exception as year_error:
                 print(f"💥 Eroare catastrofală izolată pentru anul {year}: {year_error}. Trecem la anul următor.")
@@ -242,7 +243,7 @@ def download_laws_local():
         print(f"\n🎉🎉 MOTOARE DE COLECTARE OPRITE. Total fișiere noi injectate în Drive: {total_files_all_years}")
 
     except Exception as e:
-        print(f"💥 Eroare critică la nivelul magistralei principale de inițializare Google Drive: {str(e)}")
+        print(f"💥 Eroare critică la nivelul magistralei principale: {str(e)}")
 
 
 if __name__ == "__main__":
