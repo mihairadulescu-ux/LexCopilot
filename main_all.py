@@ -1,4 +1,4 @@
-import os
+mport os
 import time
 import re
 import random
@@ -15,21 +15,20 @@ from zeep import Client
 from zeep.transports import Transport
 from zeep.plugins import HistoryPlugin
 
-# CONFIGURĂRI ELEMENTE DE BAZ RETEAUA INDUSTRIALĂ
+# CONFIGURĂRI ELEMENTE DE BAZĂ REȚEAUA INDUSTRIALĂ
 GOOGLE_DRIVE_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
-START_YEAR = 1900
-END_YEAR = 2026
+START_YEAR = 2024
+END_YEAR = 2024
 
-# Variabile globale pentru persistența token-ului (Buna practică din raport)
+# Variabile globale pentru persistența token-ului
 _GLOBAL_SOAP_CLIENT = None
 _GLOBAL_SOAP_HISTORY = None
 _GLOBAL_TOKEN_KEY = None
 
 
 def get_drive_service():
-    """Autentifică robotul în Google Drive folosind o metodă compatibilă de timeout."""
     scopes = ["https://www.googleapis.com/auth/drive.file"]
     github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     httplib2.Http(timeout=20)
@@ -41,7 +40,7 @@ def get_drive_service():
             creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=scopes)
             custom_request = Request(google.auth.transport.requests.AuthorizedSession(creds))
             custom_request.timeout = 20
-            print("🔑 [Cloud Mode] Conexiune stabilita cu succes la Google Drive API.")
+            print("🔑 [Cloud Mode] Conexiune stabilită cu succes la Google Drive API.")
             return build("drive", "v3", credentials=creds)
         except Exception as json_err:
             print(f"❌ Eroare critică la citirea cheii din GitHub Secrets: {json_err}")
@@ -54,7 +53,6 @@ def get_drive_service():
 
 
 def pre_scan_entire_drive(service):
-    """Scanează folderul Google Drive O SINGURĂ DATĂ la pornire."""
     print("📂 [Magistrală] Se inițiază scanarea globală a folderului Google Drive...")
     database = {}
     page_token = None
@@ -92,7 +90,6 @@ def pre_scan_entire_drive(service):
 
 
 def upload_to_drive(service, filename, content_bytes):
-    """Încarcă fișierul XML în Shared Drive."""
     try:
         file_metadata = {"name": filename, "parents": [GOOGLE_DRIVE_FOLDER_ID]}
         media = MediaInMemoryUpload(content_bytes, mimetype="application/xml", resumable=True)
@@ -110,21 +107,20 @@ def upload_to_drive(service, filename, content_bytes):
 
 
 def get_or_refresh_soap_session(force_refresh=False):
-    """Menține un singur token persistent global pentru a preveni blocarea bazei Just.ro."""
+    """Menține sesiunea și loghează clar când se cere un token nou cu adevărat."""
     global _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY
     
     if _GLOBAL_SOAP_CLIENT and _GLOBAL_TOKEN_KEY and not force_refresh:
         return _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY
 
     if force_refresh:
-        print("🔄 [Sesiune] S-a solicitat reîmprospătarea forțată a token-ului de acces...")
+        print("🔄 [TOKEN] ⚠️ REÎMPROSPĂTARE FORȚATĂ SOLICITATĂ! Se re-interoghează WSDL-ul...")
     else:
-        print("🔌 [Sesiune] Se inițializează conexiunea primară cu serverul SOAP Just.ro...")
+        print("🔌 [TOKEN] Primul apel al rulării. Se inițializează sesiunea inițială...")
 
     history = HistoryPlugin()
     transport = Transport(timeout=90, operation_timeout=120)
     
-    # Algoritm exponențial simplu pentru momentele când endpoint-ul de GetToken este căzut
     for attempt in range(1, 6):
         try:
             client = Client(WSDL_URL, transport=transport, plugins=[history])
@@ -133,7 +129,7 @@ def get_or_refresh_soap_session(force_refresh=False):
                 _GLOBAL_SOAP_CLIENT = client
                 _GLOBAL_SOAP_HISTORY = history
                 _GLOBAL_TOKEN_KEY = token
-                print(f"🔑 [Sesiune] Token nou generat cu succes: {token[:8]}... Sesiune salvată local.")
+                print(f"🔑 [TOKEN] Token NOU generat cu succes: {token[:8]}...")
                 return _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY
         except Exception as e:
             wait_time = 15 * attempt
@@ -144,7 +140,6 @@ def get_or_refresh_soap_session(force_refresh=False):
 
 
 def download_year(drive_service, composite_type_name, target_year, downloaded_pages):
-    """Descarcă paginile unui an folosind token-ul global reutilizabil."""
     print(f"\n{'='*70}\n📅 AN INDUSTRIAL: {target_year}\n{'='*70}")
     
     pages_to_process = []
@@ -178,22 +173,23 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
             continue
 
         prefix_log = "[REPARARE]" if is_gap_repair else "[AVANS]"
-        print(f"--- {prefix_log} An {target_year} / Pagina {current_page} ---")
-
+        
         retry_success = False
         max_retries = 5
         
         for attempt in range(0, max_retries + 1):
             try:
-                # Obținem conexiunea curentă persistentă (fără a cere token nou de pomană)
+                # Preluăm sesiunea curentă
                 client, history, token_key = get_or_refresh_soap_session(force_refresh=(attempt > 2))
 
+                # Log-ul de diagnosticare propus de ChatGPT
+                print(f"--- {prefix_log} An {target_year} / Pagina {current_page} | Token activ: {token_key[:8]}... (Încercare {attempt}) ---")
+
                 if attempt > 0:
-                    # Implementare matematică Backoff Exponențial cu Jitter (recomandarea din Raportul Tehnic)
                     base_wait = 5.0
                     max_wait = 120.0
                     wait_time = min(max_wait, base_wait * (2 ** attempt)) + random.uniform(0.0, 5.0)
-                    print(f"⏳ [Backoff Jitter] Reîncercare {attempt}/{max_retries} programată peste {wait_time:.2f} secunde...")
+                    print(f"⏳ [Backoff Jitter] Așteptăm {wait_time:.2f} secunde înainte de reîncercare...")
                     time.sleep(wait_time)
 
                 composite_type = client.get_type(composite_type_name)
@@ -203,14 +199,14 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
                     SearchAn=str(target_year),
                 )
 
+                # Aici se execută interogarea propriu-zisă pe baza lor de date
                 client.service.Search(SearchModel=search_model, tokenKey=token_key)
                 retry_success = True
                 break
             except Exception as soap_error:
                 error_str = str(soap_error).lower()
-                print(f"⚠️ Problemă întâmpinată la pagina {current_page}: {soap_error}")
+                print(f"⚠️ [Search Err] Eroare la Search() pe pagina {current_page}: {soap_error}")
                 
-                # Dacă eroarea indică explicit o problemă de expirare token, forțăm resetarea sesiunii la următorul loop
                 if "token" in error_str or "session" in error_str or "expired" in error_str:
                     get_or_refresh_soap_session(force_refresh=True)
 
@@ -241,7 +237,6 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
             if success:
                 files_saved += 1
 
-        # Pauză preventivă strictă (Rate limiting preventiv pe client conform recomandării din raport)
         time.sleep(random.uniform(3.0, 5.0))
 
     return files_saved
@@ -249,13 +244,10 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
 
 def download_laws_local():
     try:
-        print(f"🚀 Pornire motor industrial optimizat conform directivelor de infrastructură...")
+        print(f"🚀 Pornire motor industrial optimizat...")
         drive_service = get_drive_service()
-        
-        # O singură scanare la început
         global_drive_db = pre_scan_entire_drive(drive_service)
         
-        # Forțăm o primă conectare SOAP stabilă pentru a stabili token-ul global persistent
         get_or_refresh_soap_session(force_refresh=False)
         
         composite_type_name = "{http://schemas.datacontract.org/2004/07/FreeWebService}CompositeType"
