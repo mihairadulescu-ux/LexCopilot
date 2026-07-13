@@ -1,0 +1,31 @@
+name: Executie Robot Legislatie Industrial
+
+on:
+  schedule:
+    # Rulează în fiecare noapte la ora 02:00 AM (ora României, adică 00:00 UTC)
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    # Ne permite să pornim robotul și manual, dintr-un buton
+
+jobs:
+  run-crawler:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 1. Descarcă codul din repository
+      uses: actions/checkout@v4
+
+    - name: 2. Instalează Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: 3. Instalează dependențele electronice
+      run: |
+        python -m pip install --upgrade pip
+        pip install lxml google-oauth2-tool google-auth-oauthlib google-api-python-client zeep
+
+    - name: 4. Pornește Motorul de Colectare
+      env:
+        GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      run: python main_all.py
