@@ -99,7 +99,13 @@ def descarca_monitoare_pdf(an_start=2000, an_stop=2026):
             limita_erori = 10 # 10 numere consecutive lipsă = an terminat
             
             while True:
-                variante_numar = [str(numar_curent), f"{numar_curent}Bis"]
+                variante_numar = [
+                    str(numar_curent), 
+                    f"{numar_curent}Bis", 
+                    f"{numar_curent}Tris",
+                    f"{numar_curent}Quater",
+                    f"{numar_curent}S"
+                ]
                 document_gasit_pe_server = False
                 
                 for varianta in variante_numar:
