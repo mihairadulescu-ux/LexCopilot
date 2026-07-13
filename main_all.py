@@ -20,20 +20,29 @@ END_YEAR = 2026
 
 
 def get_drive_service():
-    """Autentifică robotul în Google Drive (compatibil Local și Cloud/GitHub Actions)."""
+    """Autentifică robotul în Google Drive cu timeout explicit pentru a preveni blocajele în cloud."""
+    import httplib2
     scopes = ["https://www.googleapis.com/auth/drive.file"]
     github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     
+    # Transport HTTP securizat: refuză să aștepte mai mult de 20 de secunde
+    http_transport = httplib2.Http(timeout=20)
+    
     if github_secret:
-        print("🤖 [Cloud Mode] Autentificare în Google Drive folosind GitHub Secrets...")
-        service_account_info = json.loads(github_secret)
-        creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=scopes)
+        print("🤖 [Cloud Mode] Se încarcă cheia din GitHub Secrets...")
+        try:
+            service_account_info = json.loads(github_secret)
+            creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=scopes)
+            print("🔑 [Cloud Mode] Cheia JSON a fost parsat cu succes! Se conectează la Google Drive API...")
+            return build("drive", "v3", credentials=creds, http=http_transport)
+        except Exception as json_err:
+            print(f"❌ Eroare critică la citirea cheii secrete din GitHub (Format JSON invalid?): {json_err}")
+            raise json_err
     else:
         print("💻 [Local Mode] Autentificare în Google Drive folosind service_account.json local...")
         credentials_path = "service_account.json"
         creds = service_account.Credentials.from_service_account_file(credentials_path, scopes=scopes)
-        
-    return build("drive", "v3", credentials=creds)
+        return build("drive", "v3", credentials=creds, http=http_transport)
 
 
 def pre_scan_entire_drive(service):
@@ -56,7 +65,6 @@ def pre_scan_entire_drive(service):
 
             for file in response.get('files', []):
                 name = file.get('name', '')
-                # Căutăm structura brut_legislatie_AN_pagPAGINA.xml
                 match = re.search(r"brut_legislatie_(\d+)_pag(\d+)\.xml", name)
                 if match:
                     an = int(match.group(1))
@@ -72,7 +80,7 @@ def pre_scan_entire_drive(service):
         print(f"✅ Scanare completă! Am mapat istoricul pentru {len(database)} ani diferiți.")
         return database
     except Exception as e:
-        print(f"⚠️ Erroare la scanarea globală ({e}). Robotul va lucra pe curat.")
+        print(f"⚠️ Eroare la scanarea globală ({e}). Robotul va lucra pe curat.")
         return {}
 
 
@@ -210,7 +218,7 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
                 consecutive_empty_pages = 0
                 
             filename = f"brut_legislatie_{target_year}_pag{current_page}.xml"
-            success = upload_to_drive(drive_service, filename, raw_xml_bytes)
+            success = upload_to_drive(service=drive_service, filename=filename, content_bytes=raw_xml_bytes)
             if success:
                 files_saved += 1
 
@@ -220,11 +228,12 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
 
 
 def download_laws_local():
+    global drive_service
     try:
         print(f"🚀 Pornire motor industrial auto-reparabil: {START_YEAR}–{END_YEAR}...")
         drive_service = get_drive_service()
         
-        # O SINGURĂ SCANARE PENTRU TOATĂ VIAȚA RUN-ULUI
+        # O SINGURĂ SCANARE GLOBALĂ
         global_drive_db = pre_scan_entire_drive(drive_service)
         
         composite_type_name = "{http://schemas.datacontract.org/2004/07/FreeWebService}CompositeType"
@@ -232,7 +241,6 @@ def download_laws_local():
         
         for year in range(START_YEAR, END_YEAR + 1):
             try:
-                # Extragem paginile deja existente pentru anul curent direct din baza de date locală
                 downloaded_pages = global_drive_db.get(year, set())
                 files_saved = download_year(drive_service, composite_type_name, year, downloaded_pages)
                 total_files_all_years += files_saved
