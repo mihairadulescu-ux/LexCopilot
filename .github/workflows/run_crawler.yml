@@ -1,9 +1,8 @@
 name: Executie Robot Legislatie Industrial
 
-on:
-  schedule:
-    # Rulează în fiecare noapte la ora 02:00 AM (ora României, adică 00:00 UTC)
-    - cron: '0 0 * * *'
+on:schedule:
+    # Rulează în fiecare seară la ora 22:00 (ora României, adică 19:00 UTC)
+    - cron: '0 19 * * *'
   workflow_dispatch:
     # Ne permite să pornim robotul și manual, dintr-un buton
 
