@@ -9,7 +9,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 # ======================================================================
-# CONFIGURARE GOOGLE DRIVE (FOLDER PROPRIU PENTRU PDF-URI ORIGINALE)
+# CONFIGURARE GOOGLE DRIVE (FOLDER NOU PDF - COMPATIBILITATE MAXIMĂ)
 # ======================================================================
 GOOGLE_DRIVE_FOLDER_ID = "1c8SEo8UrQVe6qgzPFGLXJFiMyLeI-r8D"
 
@@ -24,14 +24,20 @@ def instantiaza_drive():
     return build("drive", "v3", credentials=creds)
 
 def adu_fisiere_existente_in_drive(drive_service, folder_id):
-    """Scanează cloud-ul și returnează lista fișierelor deja descărcate anterior."""
+    """Scanează cloud-ul folosind setările de compatibilitate extinsă."""
     existente = set()
     page_token = None
     query = f"'{folder_id}' in parents and trashed = false"
     
     while True:
         response = drive_service.files().list(
-            q=query, fields="nextPageToken, files(name)", pageToken=page_token, pageSize=1000
+            q=query, 
+            fields="nextPageToken, files(name)", 
+            pageToken=page_token, 
+            pageSize=1000,
+            # Forțează motorul Google să caute folderul în toate locațiile accesibile de robot:
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
         ).execute()
         for f in response.get("files", []):
             existente.add(f["name"])
@@ -41,18 +47,24 @@ def adu_fisiere_existente_in_drive(drive_service, folder_id):
     return existente
 
 def incarca_in_drive(drive_service, cale_locala, folder_id):
-    """Încarcă PDF-ul în Drive și îl șterge de pe disc ca să lase spațiul curat."""
+    """Încarcă PDF-ul în Drive cu permisiuni forțate și îl șterge local după succes."""
     nume_fisier = cale_locala.name
     metadata = {'name': nume_fisier, 'parents': [folder_id]}
     media = MediaFileUpload(str(cale_locala), mimetype='application/pdf', resumable=True)
     
     try:
-        file_drive = drive_service.files().create(body=metadata, media_body=media, fields='id').execute()
+        file_drive = drive_service.files().create(
+            body=metadata, 
+            media_body=media, 
+            fields='id',
+            # Forțează upload-ul chiar dacă folderul este într-un Shared Drive sau are reguli stricte:
+            supportsAllDrives=True
+        ).execute()
         if file_drive.get('id'):
             cale_locala.unlink() # Ștergere locală după succes
             return True
     except Exception as e:
-        print(f"❌ [Drive Err] Nu s-a putut încărca {nume_fisier}: {e}")
+        print(f"❌ [Drive Err] Nu s-a putut încărca {nume_fisier}: {e}", flush=True)
     return False
 
 # ======================================================================
@@ -65,13 +77,13 @@ def descarca_monitoare_pdf(an_start=2000, an_stop=2026):
         "Referer": "https://monitoruloficial.ro/e-monitor/"
     }
     
-    print("🔄 Conectare la Google Drive și preluare index...")
+    print("🔄 Conectare la Google Drive și preluare index...", flush=True)
     try:
         drive_service = instantiaza_drive()
         fisiere_drive = adu_fisiere_existente_in_drive(drive_service, GOOGLE_DRIVE_FOLDER_ID)
-        print(f"📊 Detectate {len(fisiere_drive)} PDF-uri salvate deja în cloud.")
+        print(f"📊 Detectate {len(fisiere_drive)} PDF-uri salvate deja în cloud.", flush=True)
     except Exception as e:
-        print(f"🛑 Eroare critică la inițializarea Google Drive: {e}")
+        print(f"🛑 Eroare critică la inițializarea Google Drive: {e}", flush=True)
         return
 
     # Folder temporar pe mașina GitHub Actions
@@ -80,14 +92,13 @@ def descarca_monitoare_pdf(an_start=2000, an_stop=2026):
     
     with httpx.Client(headers=headers, timeout=30.0, follow_redirects=True) as client:
         for an in range(an_start, an_stop + 1):
-            print(f"\n=================== PROCESĂM ANUL {an} ===================")
+            print(f"\n=================== PROCESĂM ANUL {an} ===================", flush=True)
             
             numar_curent = 1
             erori_consecutive = 0
             limita_erori = 10 # 10 numere consecutive lipsă = an terminat
             
             while True:
-                # Căutăm numărul standard și varianta lui Bis
                 variante_numar = [str(numar_curent), f"{numar_curent}Bis"]
                 document_gasit_pe_server = False
                 
@@ -96,9 +107,9 @@ def descarca_monitoare_pdf(an_start=2000, an_stop=2026):
                     cale_finala_locala = director_temp / nume_fisier
                     cale_temporara = director_temp / f"{nume_fisier}.part"
                     
-                    # Verificare idempotență (Sari peste dacă e deja în Drive)
+                    # Sari peste dacă e deja în Drive
                     if nume_fisier in fisiere_drive:
-                        print(f"☁️ [Există în Drive] {nume_fisier}")
+                        print(f"☁️ [Există în Drive] {nume_fisier}", flush=True)
                         document_gasit_pe_server = True
                         if varianta == str(numar_curent):
                             erori_consecutive = 0
@@ -109,11 +120,10 @@ def descarca_monitoare_pdf(an_start=2000, an_stop=2026):
                     try:
                         with client.stream("GET", url) as response:
                             if response.status_code == 404:
-                                continue # Trece la Bis sau la numărul următor
+                                continue
                             
-                            # Tratăm micro-erorile de rețea ca să nu altereze istoricul de final de an
                             if response.status_code in [500, 502, 503, 504]:
-                                print(f"⚠️ [Server Error {response.status_code}] La {varianta}/{an}. Se va reîncerca la rularea următoare.")
+                                print(f"⚠️ [Server Error {response.status_code}] La {varianta}/{an}. Se va reîncerca ulterior.", flush=True)
                                 document_gasit_pe_server = True 
                                 continue
                                 
@@ -133,17 +143,17 @@ def descarca_monitoare_pdf(an_start=2000, an_stop=2026):
                                     f_temp.write(chunk)
                             
                             cale_temporara.replace(cale_finala_locala)
-                            print(f"📥 Descărcat local: {nume_fisier}")
+                            print(f"📥 Descărcat local: {nume_fisier}", flush=True)
                             
-                            # Sincronizare Cloud imediată
+                            # Sincronizare Cloud
                             if incarca_in_drive(drive_service, cale_finala_locala, GOOGLE_DRIVE_FOLDER_ID):
-                                print(f"✅ [Sincronizat Drive] {nume_fisier}")
+                                print(f"✅ [Sincronizat Drive] {nume_fisier}", flush=True)
                             
-                            # Pauza politicoasă (între 5 și 8 secunde)
+                            # Pauza politicoasă
                             time.sleep(random.uniform(5.0, 8.0))
                             
                     except Exception as e:
-                        print(f"❌ [Eroare] Număr {varianta}/{an}: {e}")
+                        print(f"❌ [Eroare] Număr {varianta}/{an}: {e}", flush=True)
                         if cale_temporara.exists():
                             cale_temporara.unlink()
                         time.sleep(6.0)
@@ -152,13 +162,12 @@ def descarca_monitoare_pdf(an_start=2000, an_stop=2026):
                     erori_consecutive += 1
                 
                 if erori_consecutive >= limita_erori:
-                    print(f"🏁 [Sfârșit de an] Anul {an} s-a încheiat după {limita_erori} încercări goale consecutive.")
+                    print(f"🏁 [Sfârșit de an] Anul {an} s-a încheiat după {limita_erori} încercări goale.", flush=True)
                     break
                 
                 numar_curent += 1
 
 if __name__ == "__main__":
-    # Permite primirea parametrilor din GitHub Actions (Ex: python crawler_pdf.py 2023 2023)
     an_s = int(sys.argv[1]) if len(sys.argv) >= 3 else 2000
     an_f = int(sys.argv[2]) if len(sys.argv) >= 3 else 2026
     
