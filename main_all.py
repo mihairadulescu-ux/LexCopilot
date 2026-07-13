@@ -27,6 +27,14 @@ _GLOBAL_SOAP_CLIENT = None
 _GLOBAL_SOAP_HISTORY = None
 _GLOBAL_TOKEN_KEY = None
 
+# METRICI DE TELEMETRIE PENTRU FIȘA MEDICALĂ A TOKEN-ULUI
+_TOKEN_STATS = {
+    "current_key": None,
+    "created_at": None,
+    "pages_processed": 0,
+    "history_log": []
+}
+
 
 def get_drive_service():
     scopes = ["https://www.googleapis.com/auth/drive.file"]
@@ -106,16 +114,38 @@ def upload_to_drive(service, filename, content_bytes):
         return False
 
 
+def print_token_health_card():
+    """Printează fișa medicală a token-ului retras din activitate."""
+    global _TOKEN_STATS
+    if not _TOKEN_STATS["current_key"]:
+        return
+        
+    death_time = datetime.datetime.now()
+    lifespan = death_time - _TOKEN_STATS["created_at"]
+    
+    print("\n📊" + "═"*60)
+    print(f"📋 FIȘA MEDICALĂ A TOKEN-ULUI INTERN: {_TOKEN_STATS['current_key']}")
+    print(f"⏱️ Creat la: {_TOKEN_STATS['created_at'].strftime('%H:%M:%S')}")
+    print(f"⏳ Durată viață activă: {lifespan.seconds // 60}m {lifespan.seconds % 60}s")
+    print(f"📦 Pagini procesate/salvate cu succes: {_TOKEN_STATS['pages_processed']}")
+    print("═"*60 + "\n")
+    
+    # Resetăm contorul pentru următorul token
+    _TOKEN_STATS["pages_processed"] = 0
+
+
 def get_or_refresh_soap_session(force_refresh=False):
-    global _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY
+    global _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY, _TOKEN_STATS
     
     if _GLOBAL_SOAP_CLIENT and _GLOBAL_TOKEN_KEY and not force_refresh:
         return _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY
 
     if force_refresh:
-        print("🔄 [TOKEN] ⚠️ REÎMPROSPĂTARE FORȚATĂ! Se re-interoghează WSDL-ul guvernamental...")
+        # Înainte de a-l distruge, îi facem raportul medical celui vechi
+        print_token_health_card()
+        print("🔄 [TOKEN] ⚠️ Sesizare expirare sau refresh forțat! Se cere token nou...")
     else:
-        print("🔌 [TOKEN] Primul apel al rulării. Se inițializează sesiunea inițială...")
+        print("🔌 [TOKEN] Inițializare sesiune la pornire robot...")
 
     history = HistoryPlugin()
     transport = Transport(timeout=90, operation_timeout=120)
@@ -128,17 +158,23 @@ def get_or_refresh_soap_session(force_refresh=False):
                 _GLOBAL_SOAP_CLIENT = client
                 _GLOBAL_SOAP_HISTORY = history
                 _GLOBAL_TOKEN_KEY = token
-                print(f"🔑 [TOKEN] Token NOU generat cu succes: {token[:8]}...")
+                
+                # Înregistrăm noul pacient în tabelul de telemetrie
+                _TOKEN_STATS["current_key"] = token
+                _TOKEN_STATS["created_at"] = datetime.datetime.now()
+                
+                print(f"🔑 [TOKEN] Token NOU alocat de Just.ro: {token}")
                 return _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY
         except Exception as e:
             wait_time = 20 * attempt
-            print(f"🚨 [GetToken Err] Serverul Just.ro refuză alocarea token-ului (Tentativa {attempt}/5). Reîncercăm în {wait_time}s... Eroare: {e}")
+            print(f"🚨 [GetToken Err] Eroare generare token (Tentativa {attempt}/5). Reîncercăm în {wait_time}s... Eroare: {e}")
             time.sleep(wait_time)
             
-    raise ConnectionError("💥 Serverul Just.ro refuză complet generarea de tokenuri noi în acest moment.")
+    raise ConnectionError("💥 Serverul Just.ro refuză complet generarea de tokenuri noi.")
 
 
 def download_year(drive_service, composite_type_name, target_year, downloaded_pages):
+    global _TOKEN_STATS
     print(f"\n{'='*70}\n📅 AN INDUSTRIAL: {target_year}\n{'='*70}")
     
     pages_to_process = []
@@ -178,17 +214,15 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
         
         for attempt in range(0, max_retries + 1):
             try:
-                # IMPORTANT (Recomandare ChatGPT): Nu mai cerem force_refresh pe baza numărului de încercări!
-                # Lăsăm token-ul global neatins, pentru că eroarea 504/502 nu este vina lui.
                 client, history, token_key = get_or_refresh_soap_session(force_refresh=False)
 
-                print(f"--- {prefix_log} An {target_year} / Pagina {current_page} | Token activ: {token_key[:8]}... (Încercare {attempt}/{max_retries}) ---")
+                print(f"--- {prefix_log} An {target_year} / Pagina {current_page} | Token activ: {token_key[:12]}... (Încercare {attempt}/{max_retries}) ---")
 
                 if attempt > 0:
-                    base_wait = 10.0  # Mărim puțin timpul de bază pentru erori de rețea severe
+                    base_wait = 10.0
                     max_wait = 180.0
                     wait_time = min(max_wait, base_wait * (2 ** attempt)) + random.uniform(0.0, 5.0)
-                    print(f"⏳ [Backoff Jitter] Probleme de server detectate. Așteptăm {wait_time:.2f} secunde...")
+                    print(f"⏳ [Backoff] Reîncercare în {wait_time:.2f} secunde...")
                     time.sleep(wait_time)
 
                 composite_type = client.get_type(composite_type_name)
@@ -203,19 +237,16 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
                 break
             except Exception as soap_error:
                 error_str = str(soap_error).lower()
-                print(f"⚠️ [Search Err] Serverul a răspuns cu eroare pe pagina {current_page}: {soap_error}")
+                print(f"⚠️ [Search Err] Eroare la Search() pe pagina {current_page}: {soap_error}")
                 
-                # IMPLEMENTARE RECOMANDARE CHATGPT:
-                # Tratăm 502, 504 și Timeout ca probleme stricte de infrastructură backend. NU distrugem token-ul!
                 if "504" in error_str or "502" in error_str or "timed out" in error_str or "timeout" in error_str:
-                    print("🌐 [Diagnostic] Eroare pură de infrastructură/rețea (Nginx/Timeout). Token-ul este valid în continuare. Se aplică doar Backoff.")
-                # Doar dacă eroarea indică explicit o sesiune invalidă/expirată pe bune, refacem token-ul
+                    print("🌐 [Diagnostic] Eroare infrastructurală (Nginx/Timeout). Tokenul rămâne intact.")
                 elif "token" in error_str or "session" in error_str or "expired" in error_str:
-                    print("🔑 [Diagnostic] Sesiunea a expirat la nivel de aplicație. Se solicită token nou...")
+                    print("🔑 [Diagnostic] Confirmare expirare token! Forțăm reîmprospătarea...")
                     get_or_refresh_soap_session(force_refresh=True)
 
         if not retry_success:
-            print(f"🛑 Pagina {current_page} ({target_year}) a epuizat cele {max_retries} încercări de backoff din cauza blocajului Just.ro. O sărim pentru această rulare.")
+            print(f"🛑 Pagina {current_page} ({target_year}) s-a blocat definitiv. O sărim.")
             if not is_gap_repair:
                 consecutive_empty_pages = 0
             continue
@@ -231,7 +262,7 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
                     print(f"✅ Anul {target_year} terminat în siguranță!")
                     break
             else:
-                print(f"⚠️ Pagina de reparare {current_page} nu a întors date.")
+                print(f"⚠️ Pagina {current_page} nu a întors date.")
         else:
             if not is_gap_repair:
                 consecutive_empty_pages = 0
@@ -240,6 +271,8 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
             success = upload_to_drive(service=drive_service, filename=filename, content_bytes=raw_xml_bytes)
             if success:
                 files_saved += 1
+                # Incrementăm succesul pe tokenul curent
+                _TOKEN_STATS["pages_processed"] += 1
 
         time.sleep(random.uniform(3.0, 5.0))
 
@@ -263,9 +296,11 @@ def download_laws_local():
                 files_saved = download_year(drive_service, composite_type_name, year, downloaded_pages)
                 total_files_all_years += files_saved
             except Exception as year_error:
-                print(f"💥 Problemă izolată pe anul {year}: {year_error}. Se trece la următorul bloc anual.")
+                print(f"💥 Problemă izolată pe anul {year}: {year_error}.")
                 time.sleep(30)
 
+        # La final de tot, printăm stadiul ultimului token folosit
+        print_token_health_card()
         print(f"\n🎉🎉 MOTOARE OPRITE SUCCESIV. Total fișiere noi adăugate: {total_files_all_years}")
 
     except Exception as e:
