@@ -1,6 +1,7 @@
 import os
 import time
 import re
+import random
 import datetime
 import json
 from lxml import etree
@@ -14,20 +15,23 @@ from zeep import Client
 from zeep.transports import Transport
 from zeep.plugins import HistoryPlugin
 
-# CONFIGURĂRI ELEMENTE DE BAZĂ
+# CONFIGURĂRI ELEMENTE DE BAZ RETEAUA INDUSTRIALĂ
 GOOGLE_DRIVE_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
 START_YEAR = 1900
 END_YEAR = 2026
 
+# Variabile globale pentru persistența token-ului (Buna practică din raport)
+_GLOBAL_SOAP_CLIENT = None
+_GLOBAL_SOAP_HISTORY = None
+_GLOBAL_TOKEN_KEY = None
+
 
 def get_drive_service():
     """Autentifică robotul în Google Drive folosind o metodă compatibilă de timeout."""
     scopes = ["https://www.googleapis.com/auth/drive.file"]
     github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    
-    # Timeout la nivel de rețea globală pentru httplib2 (folosit intern de Google API build)
     httplib2.Http(timeout=20)
     
     if github_secret:
@@ -35,25 +39,22 @@ def get_drive_service():
         try:
             service_account_info = json.loads(github_secret)
             creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=scopes)
-            
-            # Reîmprospătăm token-ul cu un timeout explicit pe request de 20 secunde
             custom_request = Request(google.auth.transport.requests.AuthorizedSession(creds))
             custom_request.timeout = 20
-            
-            print("🔑 [Cloud Mode] Cheia JSON a fost parsat cu succes! Se conectează la Google Drive API...")
+            print("🔑 [Cloud Mode] Conexiune stabilita cu succes la Google Drive API.")
             return build("drive", "v3", credentials=creds)
         except Exception as json_err:
-            print(f"❌ Eroare critică la citirea cheii secrete din GitHub (Format JSON invalid?): {json_err}")
+            print(f"❌ Eroare critică la citirea cheii din GitHub Secrets: {json_err}")
             raise json_err
     else:
-        print("💻 [Local Mode] Autentificare în Google Drive folosind service_account.json local...")
+        print("💻 [Local Mode] Autentificare locală service_account.json...")
         credentials_path = "service_account.json"
         creds = service_account.Credentials.from_service_account_file(credentials_path, scopes=scopes)
         return build("drive", "v3", credentials=creds)
 
 
 def pre_scan_entire_drive(service):
-    """Scanează folderul Google Drive O SINGURĂ DATĂ și grupează paginile pe ani în memorie."""
+    """Scanează folderul Google Drive O SINGURĂ DATĂ la pornire."""
     print("📂 [Magistrală] Se inițiază scanarea globală a folderului Google Drive...")
     database = {}
     page_token = None
@@ -83,7 +84,6 @@ def pre_scan_entire_drive(service):
             page_token = response.get('nextPageToken', None)
             if not page_token:
                 break
-        
         print(f"✅ Scanare completă! Am mapat istoricul pentru {len(database)} ani diferiți.")
         return database
     except Exception as e:
@@ -92,7 +92,7 @@ def pre_scan_entire_drive(service):
 
 
 def upload_to_drive(service, filename, content_bytes):
-    """Încarcă fișierul XML brut în folderul din Shared Drive."""
+    """Încarcă fișierul XML în Shared Drive."""
     try:
         file_metadata = {"name": filename, "parents": [GOOGLE_DRIVE_FOLDER_ID]}
         media = MediaInMemoryUpload(content_bytes, mimetype="application/xml", resumable=True)
@@ -102,61 +102,68 @@ def upload_to_drive(service, filename, content_bytes):
             fields="id",
             supportsAllDrives=True,
         ).execute()
-        print(f"✅ Fișier salvat în Drive: {filename} (ID: {file.get('id')})")
+        print(f"✅ Salvat în Drive: {filename} (ID: {file.get('id')})")
         return True
     except Exception as e:
         print(f"❌ Eroare la upload în Drive pentru {filename}: {e}")
         return False
 
 
-def create_fresh_soap_client():
-    """Creează o instanță curată de client SOAP cu timeout-uri robuste extinse."""
+def get_or_refresh_soap_session(force_refresh=False):
+    """Menține un singur token persistent global pentru a preveni blocarea bazei Just.ro."""
+    global _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY
+    
+    if _GLOBAL_SOAP_CLIENT and _GLOBAL_TOKEN_KEY and not force_refresh:
+        return _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY
+
+    if force_refresh:
+        print("🔄 [Sesiune] S-a solicitat reîmprospătarea forțată a token-ului de acces...")
+    else:
+        print("🔌 [Sesiune] Se inițializează conexiunea primară cu serverul SOAP Just.ro...")
+
     history = HistoryPlugin()
-    transport = Transport(timeout=90, operation_timeout=120)  
-    client = Client(WSDL_URL, transport=transport, plugins=[history])
-    return client, history
+    transport = Transport(timeout=90, operation_timeout=120)
+    
+    # Algoritm exponențial simplu pentru momentele când endpoint-ul de GetToken este căzut
+    for attempt in range(1, 6):
+        try:
+            client = Client(WSDL_URL, transport=transport, plugins=[history])
+            token = client.service.GetToken()
+            if token:
+                _GLOBAL_SOAP_CLIENT = client
+                _GLOBAL_SOAP_HISTORY = history
+                _GLOBAL_TOKEN_KEY = token
+                print(f"🔑 [Sesiune] Token nou generat cu succes: {token[:8]}... Sesiune salvată local.")
+                return _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY
+        except Exception as e:
+            wait_time = 15 * attempt
+            print(f"🚨 [GetToken Err] Serverul Just.ro a respins alocarea token-ului (Tentativa {attempt}/5). Reîncercăm în {wait_time}s... Eroare: {e}")
+            time.sleep(wait_time)
+            
+    raise ConnectionError("💥 Serverul Just.ro refuză complet generarea de tokenuri noi în acest moment.")
 
 
 def download_year(drive_service, composite_type_name, target_year, downloaded_pages):
-    """Descarcă toate paginile pentru UN singur an folosind baza de date pre-scanată."""
+    """Descarcă paginile unui an folosind token-ul global reutilizabil."""
     print(f"\n{'='*70}\n📅 AN INDUSTRIAL: {target_year}\n{'='*70}")
     
     pages_to_process = []
     if downloaded_pages:
         max_page = max(downloaded_pages)
-        print(f"📦 {len(downloaded_pages)} pagini găsite în Drive pentru {target_year}. (Ultima pagină: {max_page})")
-        
+        print(f"📦 {len(downloaded_pages)} pagini deja în Drive pentru {target_year}. (Ultima pagină: {max_page})")
         all_expected_pages = set(range(1, max_page + 1))
         gaps = sorted(list(all_expected_pages - downloaded_pages))
-        
         if gaps:
-            print(f"🛠️ Detectat {len(gaps)} lacune/pagini lipsă în istoric: {gaps}. Le reparăm primele!")
+            print(f"🛠️ Detectat {len(gaps)} lacune în istoric: {gaps}. Le reparăm.")
             pages_to_process.extend(gaps)
-        
         next_new_page = max_page + 1
     else:
-        print(f"🆕 An complet nou detectat. Începem descărcarea de la pagina 1.")
+        print(f"🆕 An gol detectat. Pornim de la pagina 1.")
         next_new_page = 1
 
     results_per_page = 50
     files_saved = 0
     consecutive_empty_pages = 0
-
-    client = None
-    history = None
-    token_key = None
-    
-    for init_attempt in range(1, 6):
-        try:
-            client, history = create_fresh_soap_client()
-            token_key = client.service.GetToken()
-            break
-        except Exception as e:
-            print(f"🚨 [Init Err] Serverul Just.ro nu răspunde la inițializare pentru {target_year} (Tentativa {init_attempt}/5): {e}")
-            if init_attempt == 5:
-                print(f"🛑 Abandonăm anul {target_year} temporar.")
-                return 0
-            time.sleep(30 * init_attempt)
 
     while True:
         if pages_to_process:
@@ -175,18 +182,19 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
 
         retry_success = False
         max_retries = 5
-
+        
         for attempt in range(0, max_retries + 1):
             try:
-                if attempt > 0:
-                    wait_time = 30 * attempt
-                    print(f"⏳ [Așteptare Recovery] Reîncercare {attempt}/{max_retries} peste {wait_time}s...")
-                    time.sleep(wait_time)
-                    client, history = create_fresh_soap_client()
-                    token_key = client.service.GetToken()
+                # Obținem conexiunea curentă persistentă (fără a cere token nou de pomană)
+                client, history, token_key = get_or_refresh_soap_session(force_refresh=(attempt > 2))
 
-                if not token_key:
-                    token_key = client.service.GetToken()
+                if attempt > 0:
+                    # Implementare matematică Backoff Exponențial cu Jitter (recomandarea din Raportul Tehnic)
+                    base_wait = 5.0
+                    max_wait = 120.0
+                    wait_time = min(max_wait, base_wait * (2 ** attempt)) + random.uniform(0.0, 5.0)
+                    print(f"⏳ [Backoff Jitter] Reîncercare {attempt}/{max_retries} programată peste {wait_time:.2f} secunde...")
+                    time.sleep(wait_time)
 
                 composite_type = client.get_type(composite_type_name)
                 search_model = composite_type(
@@ -199,11 +207,15 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
                 retry_success = True
                 break
             except Exception as soap_error:
-                print(f"⚠️ Eroare detectată la pagina {current_page}: {soap_error}")
-                token_key = None
+                error_str = str(soap_error).lower()
+                print(f"⚠️ Problemă întâmpinată la pagina {current_page}: {soap_error}")
+                
+                # Dacă eroarea indică explicit o problemă de expirare token, forțăm resetarea sesiunii la următorul loop
+                if "token" in error_str or "session" in error_str or "expired" in error_str:
+                    get_or_refresh_soap_session(force_refresh=True)
 
         if not retry_success:
-            print(f"🛑 Pagina {current_page} ({target_year}) a eșuat critic. Trecem mai departe.")
+            print(f"🛑 Pagina {current_page} ({target_year}) a epuizat încercările de backoff. O sărim temporar.")
             if not is_gap_repair:
                 consecutive_empty_pages = 0
             continue
@@ -216,10 +228,10 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
             if not is_gap_repair:
                 consecutive_empty_pages += 1
                 if consecutive_empty_pages >= 2:
-                    print(f"✅ Anul {target_year} finalizat complet!")
+                    print(f"✅ Anul {target_year} terminat în siguranță!")
                     break
             else:
-                print(f"⚠️ Notă: Pagina de reparare {current_page} a întors un răspuns gol.")
+                print(f"⚠️ Pagina de reparare {current_page} nu a întors date.")
         else:
             if not is_gap_repair:
                 consecutive_empty_pages = 0
@@ -229,19 +241,22 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
             if success:
                 files_saved += 1
 
-        time.sleep(3.0)
+        # Pauză preventivă strictă (Rate limiting preventiv pe client conform recomandării din raport)
+        time.sleep(random.uniform(3.0, 5.0))
 
     return files_saved
 
 
 def download_laws_local():
-    global drive_service
     try:
-        print(f"🚀 Pornire motor industrial auto-reparabil: {START_YEAR}–{END_YEAR}...")
+        print(f"🚀 Pornire motor industrial optimizat conform directivelor de infrastructură...")
         drive_service = get_drive_service()
         
-        # O SINGURĂ SCANARE GLOBALĂ
+        # O singură scanare la început
         global_drive_db = pre_scan_entire_drive(drive_service)
+        
+        # Forțăm o primă conectare SOAP stabilă pentru a stabili token-ul global persistent
+        get_or_refresh_soap_session(force_refresh=False)
         
         composite_type_name = "{http://schemas.datacontract.org/2004/07/FreeWebService}CompositeType"
         total_files_all_years = 0
@@ -252,13 +267,13 @@ def download_laws_local():
                 files_saved = download_year(drive_service, composite_type_name, year, downloaded_pages)
                 total_files_all_years += files_saved
             except Exception as year_error:
-                print(f"💥 Eroare catastrofală izolată pentru anul {year}: {year_error}. Trecem la anul următor.")
-                time.sleep(60)
+                print(f"💥 Problemă izolată pe anul {year}: {year_error}. Se trece la următorul bloc anual.")
+                time.sleep(30)
 
-        print(f"\n🎉🎉 MOTOARE DE COLECTARE OPRITE. Total fișiere noi injectate în Drive: {total_files_all_years}")
+        print(f"\n🎉🎉 MOTOARE OPRITE SUCCESIV. Total fișiere noi adăugate: {total_files_all_years}")
 
     except Exception as e:
-        print(f"💥 Eroare critică la nivelul magistralei principale: {str(e)}")
+        print(f"💥 Eroare critică de magistrală: {str(e)}")
 
 
 if __name__ == "__main__":
