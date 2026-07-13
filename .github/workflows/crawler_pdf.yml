@@ -12,11 +12,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Aici setezi ce ani vrei să ruleze în paralel. Acum este pus pe 2023 și 2024.
+        # Aici setezi ce ani vrei să ruleze în paralel. 
         include:
+          - start_year: 2020
+            end_year: 2021
           - start_year: 2022
-            end_year: 2022
-          - start_year: 2023
             end_year: 2023
 
     steps:
