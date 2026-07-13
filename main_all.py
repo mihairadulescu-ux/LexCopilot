@@ -7,6 +7,9 @@ from lxml import etree
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaInMemoryUpload
+from google.auth.transport.requests import Request
+import google.auth.transport.requests
+import httplib2
 from zeep import Client
 from zeep.transports import Transport
 from zeep.plugins import HistoryPlugin
@@ -20,21 +23,25 @@ END_YEAR = 2026
 
 
 def get_drive_service():
-    """Autentifică robotul în Google Drive cu timeout explicit pentru a preveni blocajele în cloud."""
-    import httplib2
+    """Autentifică robotul în Google Drive folosind o metodă compatibilă de timeout."""
     scopes = ["https://www.googleapis.com/auth/drive.file"]
     github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     
-    # Transport HTTP securizat: refuză să aștepte mai mult de 20 de secunde
-    http_transport = httplib2.Http(timeout=20)
+    # Timeout la nivel de rețea globală pentru httplib2 (folosit intern de Google API build)
+    httplib2.Http(timeout=20)
     
     if github_secret:
         print("🤖 [Cloud Mode] Se încarcă cheia din GitHub Secrets...")
         try:
             service_account_info = json.loads(github_secret)
             creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=scopes)
+            
+            # Reîmprospătăm token-ul cu un timeout explicit pe request de 20 secunde
+            custom_request = Request(google.auth.transport.requests.AuthorizedSession(creds))
+            custom_request.timeout = 20
+            
             print("🔑 [Cloud Mode] Cheia JSON a fost parsat cu succes! Se conectează la Google Drive API...")
-            return build("drive", "v3", credentials=creds, http=http_transport)
+            return build("drive", "v3", credentials=creds)
         except Exception as json_err:
             print(f"❌ Eroare critică la citirea cheii secrete din GitHub (Format JSON invalid?): {json_err}")
             raise json_err
@@ -42,7 +49,7 @@ def get_drive_service():
         print("💻 [Local Mode] Autentificare în Google Drive folosind service_account.json local...")
         credentials_path = "service_account.json"
         creds = service_account.Credentials.from_service_account_file(credentials_path, scopes=scopes)
-        return build("drive", "v3", credentials=creds, http=http_transport)
+        return build("drive", "v3", credentials=creds)
 
 
 def pre_scan_entire_drive(service):
