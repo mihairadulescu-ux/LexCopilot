@@ -57,7 +57,7 @@ def incarca_in_drive(drive_service, cale_locala, folder_id):
     return False
 
 # ======================================================================
-# CORE CRAWLER ANTI-BLOCARE ȘI REZISTENT LA ERORI DE CONEXIUNE
+# CORE CRAWLER CU CORECTURĂ DE "PLACEHOLDER" (FIȘIER GOL PENTRU 404)
 # ======================================================================
 def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
     url_template = "https://monitoruloficial.ro/Monitorul-Oficial--PI--{numar}--{an}.html"
@@ -109,7 +109,7 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
     timeout_config = httpx.Timeout(timeout=120.0, connect=20.0, read=120.0)
     erori_consecutive_an = {}
     ani_finalizati = set() 
-    fisiere_esuate = [] # Listă pentru raportul final
+    fisiere_esuate = []
     
     for idx, item in enumerate(coada_descarcare, 1):
         an = item["an"]
@@ -123,6 +123,7 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
         
         url = url_template.format(numar=numar_cerut, an=an)
         descarcat_ok = False
+        era_404 = False
         incercari = 0
         
         cale_locala = director_temp / nume_pdf
@@ -130,7 +131,6 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
         
         while incercari < 3:
             try:
-                # Politică de delay politicos
                 time.sleep(random.uniform(2.5, 4.5))
                 
                 headers = {
@@ -138,7 +138,6 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
                     "Referer": "https://monitoruloficial.ro/e-monitor/"
                 }
                 
-                # Verificăm dacă avem deja o descărcare parțială pe disc pentru a încerca reluarea (Resume/Range request)
                 dimensiune_partiala = 0
                 if cale_temp.exists():
                     dimensiune_partiala = cale_temp.stat().st_size
@@ -147,14 +146,15 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
                 
                 with httpx.Client(headers=headers, timeout=timeout_config, follow_redirects=True) as client:
                     with client.stream("GET", url) as response:
-                        # Dacă am cerut Range și serverul dă 416 (Range Not Satisfiable), o luăm de la 0
                         if response.status_code == 416:
                             if cale_temp.exists():
                                 cale_temp.unlink()
                             dimensiune_partiala = 0
                             continue
                             
+                        # Aici prindem cazul când fișierul nu există deloc!
                         if response.status_code == 404:
+                            era_404 = True
                             if item["tip"] == "simplu":
                                 erori_consecutive_an[an] = erori_consecutive_an.get(an, 0) + 1
                                 if erori_consecutive_an[an] >= 30:
@@ -174,7 +174,6 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
                         if item["tip"] == "simplu":
                             erori_consecutive_an[an] = 0
                         
-                        # Stabilim modul de scriere: adăugare (ab) dacă reluăm, altfel scriere de la zero (wb)
                         mod_scriere = "ab" if (response.status_code == 206 and dimensiune_partiala > 0) else "wb"
                         if mod_scriere == "wb" and cale_temp.exists():
                             cale_temp.unlink()
@@ -190,7 +189,6 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
             except Exception as e:
                 incercari += 1
                 print(f"⚠️ Problemă la descărcare {nume_pdf} (Încercarea {incercari}/3): {e}", flush=True)
-                # Lăsăm serverul să se relaxeze după o cădere de conexiune
                 time.sleep(random.uniform(45.0, 75.0))
                 
         if descarcat_ok:
@@ -199,20 +197,31 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
             if incarca_in_drive(drive_service, cale_locala, GOOGLE_DRIVE_FOLDER_ID):
                 print(f"✅ Sincronizat în Google Drive.", flush=True)
             time.sleep(random.uniform(3.0, 6.0))
-        else:
+            
+        elif era_404:
+            # IDEEA TA: Creăm fișier gol pentru a marca lipsa lui permanent în Drive
             if an not in ani_finalizati:
-                # Curățăm fișierele temporare corupte ca să nu încurce la următoarea rulare
+                print(f"ℹ️ {nume_pdf} -> Nu există (404). Generăm fișier de marcaj (0 bytes)...", flush=True)
                 if cale_temp.exists():
                     cale_temp.unlink()
                 
-                # Dacă a fost eșec de conexiune (nu 404), îl punem în lista de eșuate ca să mergem mai departe cu restul
+                # Creăm fișierul gol local
+                with open(cale_locala, "wb") as f:
+                    pass 
+                
+                # Îl urcăm în cloud ca să existe la următorul index
+                if incarca_in_drive(drive_service, cale_locala, GOOGLE_DRIVE_FOLDER_ID):
+                    print(f"📝 Placeholder salvat în Drive pentru {nume_pdf}.", flush=True)
+                time.sleep(random.uniform(1.5, 3.0))
+        else:
+            # Cazuri în care rețeaua a picat (nu e 404)
+            if an not in ani_finalizati:
+                if cale_temp.exists():
+                    cale_temp.unlink()
                 if incercari >= 3:
                     print(f"⏭️ [Ocolit] Fișierul {nume_pdf} a fost ocolit după 3 încercări eșuate de rețea. Continuăm cu restul coadei...", flush=True)
                     fisiere_esuate.append(nume_pdf)
-                else:
-                    print(f"ℹ️ {nume_pdf} -> Nu există (404).", flush=True)
 
-    # Afișăm raportul final la sfârșit
     if fisiere_esuate:
         print("\n⚠️ Rularea s-a încheiat cu câteva fișiere nefinalizate din cauza serverului:", flush=True)
         for f in fisiere_esuate:
