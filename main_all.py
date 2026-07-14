@@ -19,8 +19,8 @@ from zeep.plugins import HistoryPlugin
 GOOGLE_DRIVE_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
-START_YEAR = 2024
-END_YEAR = 2024
+START_YEAR = 2020
+END_YEAR = 2023
 
 # Variabile globale pentru persistența token-ului
 _GLOBAL_SOAP_CLIENT = None
