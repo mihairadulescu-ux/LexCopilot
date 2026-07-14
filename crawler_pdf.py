@@ -13,6 +13,15 @@ from googleapiclient.http import MediaFileUpload
 # ======================================================================
 GOOGLE_DRIVE_FOLDER_ID = "1c8SEo8UrQVe6qgzPFGLXJFiMyLeI-r8D"
 
+# Listă de User-Agents moderni pentru rotație automată
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
+]
+
 def instantiaza_drive():
     """Inițializează conexiunea securizată cu Google Drive API folosind Secretul existent."""
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
@@ -35,7 +44,6 @@ def adu_fisiere_existente_in_drive(drive_service, folder_id):
             fields="nextPageToken, files(name)", 
             pageToken=page_token, 
             pageSize=1000,
-            # Forțează motorul Google să caute folderul în toate locațiile accesibile de robot:
             supportsAllDrives=True,
             includeItemsFromAllDrives=True
         ).execute()
@@ -57,7 +65,6 @@ def incarca_in_drive(drive_service, cale_locala, folder_id):
             body=metadata, 
             media_body=media, 
             fields='id',
-            # Forțează upload-ul chiar dacă folderul este într-un Shared Drive sau are reguli stricte:
             supportsAllDrives=True
         ).execute()
         if file_drive.get('id'):
@@ -72,10 +79,6 @@ def incarca_in_drive(drive_service, cale_locala, folder_id):
 # ======================================================================
 def descarca_monitoare_pdf(an_start=2000, an_stop=2026):
     url_template = "https://monitoruloficial.ro/Monitorul-Oficial--PI--{numar}--{an}.html"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://monitoruloficial.ro/e-monitor/"
-    }
     
     print("🔄 Conectare la Google Drive și preluare index...", flush=True)
     try:
@@ -90,113 +93,178 @@ def descarca_monitoare_pdf(an_start=2000, an_stop=2026):
     director_temp = Path("./temp_pdf_download")
     director_temp.mkdir(exist_ok=True)
     
-    # Folosim limitatoare rezonabile la nivel de client HTTP
-    with httpx.Client(headers=headers, timeout=45.0, follow_redirects=True) as client:
-        for an in range(an_start, an_stop + 1):
-            print(f"\n=================== PROCESĂM ANUL {an} ===================", flush=True)
+    # Timeout mărit pentru a permite descărcări lente și sigure
+    timeout_config = httpx.Timeout(45.0, connect=15.0)
+    
+    for an in range(an_start, an_stop + 1):
+        print(f"\n=================== PROCESĂM ANUL {an} ===================", flush=True)
+        
+        numar_curent = 1
+        erori_consecutive = 0
+        limita_erori = 30 # 30 de numere absente consecutive = an terminat
+        
+        while True:
+            # Determinăm mai întâi dacă numărul de bază (simplu) există local sau în cloud
+            nume_baza_pdf = f"MO_PI_{an}_{numar_curent}.pdf"
+            baza_exista_in_drive = nume_baza_pdf in fisiere_drive
             
-            numar_curent = 1
-            erori_consecutive = 0
-            limita_erori = 30 # 30 de numere aritmetice complet lipsă consecutive = an terminat
+            # Verificăm dacă numărul de bază a fost găsit pe server în această rulare
+            baza_gasit_acum = False
             
-            while True:
-                variante_numar = [
-                    str(numar_curent), 
-                    f"{numar_curent}Bis", 
-                    f"{numar_curent}Tris",
-                    f"{numar_curent}Quater",
-                    f"{numar_curent}S"
-                ]
-                document_gasit_pe_server = False
+            # Pasul 1: Încercăm numărul de bază (ex: "10")
+            url_baza = url_template.format(numar=str(numar_curent), an=an)
+            
+            if baza_exista_in_drive:
+                print(f"☁️ [Există în Drive] {nume_baza_pdf}", flush=True)
+                baza_gasit_acum = True
+                erori_consecutive = 0
+            else:
+                # Rotire dinamică de browser pentru a ocoli detecția WAF
+                headers = {
+                    "User-Agent": random.choice(USER_AGENTS),
+                    "Referer": "https://monitoruloficial.ro/e-monitor/"
+                }
                 
-                for varianta in variante_numar:
-                    nume_fisier = f"MO_PI_{an}_{varianta}.pdf"
-                    cale_finala_locala = director_temp / nume_fisier
-                    cale_temporara = director_temp / f"{nume_fisier}.part"
-                    
-                    # 1. Sari peste dacă e deja în Drive
-                    if nume_fisier in fisiere_drive:
-                        print(f"☁️ [Există în Drive] {nume_fisier}", flush=True)
-                        document_gasit_pe_server = True
-                        if varianta == str(numar_curent):
-                            erori_consecutive = 0
-                        continue
-                    
-                    url = url_template.format(numar=varianta, an=an)
-                    
-                    # Încercare cu mecanism inteligent de Retry pentru probleme de rețea/SSL
-                    descarcat_cu_succes = False
-                    incercari_conexiune = 0
-                    max_incercari_conexiune = 3
-                    
-                    while incercari_conexiune < max_incercari_conexiune:
-                        try:
-                            # Adăugăm un delay foarte scurt între variante, să evităm blocajul tip flood
-                            time.sleep(random.uniform(0.5, 1.5))
-                            
-                            with client.stream("GET", url) as response:
+                # Încercăm descărcarea numărului de bază cu retry robust
+                descarcat_cu_succes = False
+                incercari_conexiune = 0
+                max_incercari_conexiune = 3
+                
+                while incercari_conexiune < max_incercari_conexiune:
+                    try:
+                        # Pauză politicoasă înainte de a apela serverul
+                        time.sleep(random.uniform(2.0, 4.0))
+                        
+                        with httpx.Client(headers=headers, timeout=timeout_config, follow_redirects=True) as client:
+                            with client.stream("GET", url_baza) as response:
                                 if response.status_code == 404:
-                                    # Resursa nu există pe server. Nu e o eroare de conexiune.
-                                    break
+                                    break  # Nu există baza, oprim bucla retry
                                 
                                 if response.status_code in [500, 502, 503, 504]:
-                                    print(f"⚠️ [Server Error {response.status_code}] La {varianta}/{an}. Încercarea {incercari_conexiune + 1}...", flush=True)
+                                    print(f"⚠️ [Server Error {response.status_code}] La {numar_curent}/{an}. Reîncercare...", flush=True)
                                     incercari_conexiune += 1
-                                    time.sleep(10.0)
+                                    time.sleep(15.0)
                                     continue
                                 
                                 response.raise_for_status()
                                 
                                 tip_continut = response.headers.get("Content-Type", "")
                                 if "application/pdf" not in tip_continut:
-                                    # Pagina returnată nu este PDF (posibil redirect ciudat spre home)
-                                    break
+                                    break  # Redirect ciudat, nu e un PDF real
                                 
-                                # Dacă am ajuns aici, documentul este valid pe server
-                                document_gasit_pe_server = True
-                                if varianta == str(numar_curent):
-                                    erori_consecutive = 0
+                                # Dacă am ajuns aici, documentul este de încredere
+                                baza_gasit_acum = True
+                                erori_consecutive = 0
                                 
-                                # Descărcare atomică direct pe disc
+                                cale_finala_locala = director_temp / nume_baza_pdf
+                                cale_temporara = director_temp / f"{nume_baza_pdf}.part"
+                                
                                 with open(cale_temporara, "wb") as f_temp:
                                     for chunk in response.iter_bytes(chunk_size=65536):
                                         f_temp.write(chunk)
                                 
                                 cale_temporara.replace(cale_finala_locala)
-                                print(f"📥 Descărcat local: {nume_fisier}", flush=True)
+                                print(f"📥 Descărcat local: {nume_baza_pdf}", flush=True)
                                 descarcat_cu_succes = True
-                                break  # Ieșim din bucla de retry, descărcare reușită!
+                                break
                                 
-                        except (httpx.ConnectError, httpx.ReadError, httpx.WriteError, httpx.HTTPError) as e:
-                            incercari_conexiune += 1
-                            print(f"⚠️ [Rețea/SSL Err] Încercare nereușită {incercari_conexiune}/{max_incercari_conexiune} pentru {varianta}/{an}: {e}", flush=True)
-                            
-                            # Curățăm parțialele dacă există
-                            if cale_temporara.exists():
-                                cale_temporara.unlink()
-                                
-                            # Timp de penalizare incremental în caz de blocaj / SSL break
-                            pauza_penalizare = incercari_conexiune * 15.0
-                            time.sleep(pauza_penalizare)
-                    
-                    # 2. Sincronizare în Cloud (dacă am reușit descărcarea locală)
-                    if descarcat_cu_succes:
-                        if incarca_in_drive(drive_service, cale_finala_locala, GOOGLE_DRIVE_FOLDER_ID):
-                            print(f"✅ [Sincronizat Drive] {nume_fisier}", flush=True)
+                    except (httpx.ConnectError, httpx.ReadError, httpx.WriteError, httpx.HTTPError) as e:
+                        incercari_conexiune += 1
+                        print(f"⚠️ [Rețea/SSL Err] Probleme la baza {numar_curent}/{an} (Incercarea {incercari_conexiune}/{max_incercari_conexiune}): {e}", flush=True)
                         
-                        # Pauza clasică mare după un fișier adus complet în Drive
-                        time.sleep(random.uniform(5.0, 8.0))
+                        # Timp de răcire considerabil în caz de blocaj sever al IP-ului (Cool-off)
+                        print("⏳ Aplicăm timp de răcire de 90 de secunde pentru resetarea conexiunii...", flush=True)
+                        time.sleep(90.0)
                 
-                # 3. Logica de oprire a anului
-                # erori_consecutive se adună doar dacă pe tot setul de variante al numărului curent nu s-a găsit nimic (404 curat)
-                if not document_gasit_pe_server:
-                    erori_consecutive += 1
+                # Sincronizare în Drive
+                if descarcat_cu_succes:
+                    if incarca_in_drive(drive_service, cale_finala_locala, GOOGLE_DRIVE_FOLDER_ID):
+                        print(f"✅ [Sincronizat Drive] {nume_baza_pdf}", flush=True)
+                    time.sleep(random.uniform(4.0, 7.0))
+
+            # Pasul 2: Procesăm sufixele speciale (Bis, Tris, Quater, S) DOAR dacă numărul de bază a fost găsit sau exista deja
+            # Dacă numărul de bază NU există pe server (404), este inutil să scanăm variantele (economie de timp și trafic!)
+            document_gasit_pe_server = baza_gasit_acum
+            
+            if baza_gasit_acum or baza_exista_in_drive:
+                sufixe = ["Bis", "Tris", "Quater", "S"]
                 
-                if erori_consecutive >= limita_erori:
-                    print(f"🏁 [Sfârșit de an] Anul {an} s-a încheiat după {limita_erori} numere consecutive complet absente.", flush=True)
-                    break
-                
-                numar_curent += 1
+                for sufix in sufixe:
+                    varianta = f"{numar_curent}{sufix}"
+                    nume_sufix_pdf = f"MO_PI_{an}_{varianta}.pdf"
+                    
+                    if nume_sufix_pdf in fisiere_drive:
+                        print(f"☁️ [Există în Drive] {nume_sufix_pdf}", flush=True)
+                        document_gasit_pe_server = True
+                        continue
+                        
+                    url_sufix = url_template.format(numar=varianta, an=an)
+                    headers_sufix = {
+                        "User-Agent": random.choice(USER_AGENTS),
+                        "Referer": "https://monitoruloficial.ro/e-monitor/"
+                    }
+                    
+                    descarcat_sufix_succes = False
+                    incercari_sufix = 0
+                    
+                    while incercari_sufix < max_incercari_conexiune:
+                        try:
+                            # Pauză foarte scurtă între sufixe pentru protecție anti-flood
+                            time.sleep(random.uniform(1.0, 2.5))
+                            
+                            with httpx.Client(headers=headers_sufix, timeout=timeout_config, follow_redirects=True) as client:
+                                with client.stream("GET", url_sufix) as response:
+                                    if response.status_code == 404:
+                                        break
+                                    
+                                    if response.status_code in [500, 502, 503, 504]:
+                                        incercari_sufix += 1
+                                        time.sleep(15.0)
+                                        continue
+                                    
+                                    response.raise_for_status()
+                                    
+                                    tip_continut = response.headers.get("Content-Type", "")
+                                    if "application/pdf" not in tip_continut:
+                                        break
+                                    
+                                    document_gasit_pe_server = True
+                                    
+                                    cale_finala_locala = director_temp / nume_sufix_pdf
+                                    cale_temporara = director_temp / f"{nume_sufix_pdf}.part"
+                                    
+                                    with open(cale_temporara, "wb") as f_temp:
+                                        for chunk in response.iter_bytes(chunk_size=65536):
+                                            f_temp.write(chunk)
+                                            
+                                    cale_temporara.replace(cale_finala_locala)
+                                    print(f"📥 Descărcat local: {nume_sufix_pdf}", flush=True)
+                                    descarcat_sufix_succes = True
+                                    break
+                                    
+                        except (httpx.ConnectError, httpx.ReadError, httpx.WriteError, httpx.HTTPError) as e:
+                            incercari_sufix += 1
+                            print(f"⚠️ [Rețea/SSL Err] Probleme la varianta {varianta}/{an} (Incercarea {incercari_sufix}/{max_incercari_conexiune}): {e}", flush=True)
+                            print("⏳ Aplicăm timp de răcire de 90 de secunde...", flush=True)
+                            time.sleep(90.0)
+                            
+                    # Sincronizare sufix în Drive
+                    if descarcat_sufix_succes:
+                        if incarca_in_drive(drive_service, cale_finala_locala, GOOGLE_DRIVE_FOLDER_ID):
+                            print(f"✅ [Sincronizat Drive] {nume_sufix_pdf}", flush=True)
+                        time.sleep(random.uniform(4.0, 7.0))
+            
+            # Pasul 3: Logica de oprire a anului
+            if not document_gasit_pe_server:
+                erori_consecutive += 1
+                # Afișăm în log progresul eșecurilor consecutive pentru a ști cât mai avem până la oprire
+                print(f"❌ Numărul {numar_curent}/{an} nu a fost găsit. Contor eșecuri: {erori_consecutive}/{limita_erori}", flush=True)
+            
+            if erori_consecutive >= limita_erori:
+                print(f"🏁 [Sfârșit de an] Anul {an} s-a încheiat după {limita_erori} numere consecutive complet absente.", flush=True)
+                break
+            
+            numar_curent += 1
 
 if __name__ == "__main__":
     an_s = int(sys.argv[1]) if len(sys.argv) >= 3 else 2000
