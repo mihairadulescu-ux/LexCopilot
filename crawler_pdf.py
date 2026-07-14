@@ -116,7 +116,7 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
         print(f"🛑 Eroare critică la inițializarea Google Drive: {e}", flush=True)
         return
 
-    MAX_NUMERE_AN = 1350 # Ridicat usor pentru anii cu foarte multe numere
+    MAX_NUMERE_AN = 1350 
     
     print("🧠 Pasul 2: Calculare diferențe și identificare fișiere lipsă...", flush=True)
     coada_descarcare = []
@@ -129,7 +129,7 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
         {"sufix": "S", "tip": "s"}
     ]
     
-    AN_CURENT_SISTEM = 2026 # Anul de referință pentru limitare dinamică
+    AN_CURENT_SISTEM = 2026
     
     for an in range(an_start, am_stop + 1):
         numere_existente_an = []
@@ -145,14 +145,11 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                     
         max_numar_existent = max(numere_existente_an) if numere_existente_an else 0
         
-        # CORECTURA MAJORĂ AICI: Pentru anii anteriori scanăm PÂNĂ LA CAPĂT (MAX_NUMERE_AN).
-        # Logica cu "max + 30" se aplică DOAR pentru anul în curs ca să nu facă 1000 de cereri 404 aiurea în avans.
         if an < AN_CURENT_SISTEM:
             limita_scanare = MAX_NUMERE_AN
         else:
-            # Pentru anul curent, mergem cu maxim 30-50 numere în avans față de cel mai mare găsit
             limita_scanare = min(max_numar_existent + 50, MAX_NUMERE_AN)
-            if limita_scanare < 100: # Asigurăm măcar primele 100 dacă anul e abia la început
+            if limita_scanare < 100:
                 limita_scanare = 100
         
         for n in range(1, limita_scanare + 1):
@@ -169,9 +166,15 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                 else:
                     meta = inventar_drive[nume_pdf]
                     file_id_existent = meta["id"]
+                    # Dacă este un Bis cu contor temporar activ (dummy_1 până la dummy_5), îl punem la descărcat din nou
                     if var["tip"] == "bis" and meta["status"].startswith("dummy_") and meta["status"] != "dummy_final":
                         trebuie_descarcat = True
                         status_actual = meta["status"]
+                    else:
+                        # 🟢 IMBUNĂTĂȚIRE VIZUALĂ: Fișierul există deja în Drive și este final/valid
+                        # Nu îl punem în coadă și afișăm direct confirmarea verde pe ecran
+                        if var["tip"] == "simplu" or meta["status"] == "ok":
+                            print(f"🟢 {nume_pdf} este deja descărcat în Drive.", flush=True)
                 
                 if trebuie_descarcat:
                     coada_descarcare.append({
@@ -185,21 +188,19 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
 
     total_lipsa = len(coada_descarcare)
     if total_lipsa == 0:
-        print("🎉 Toate fișierele sunt la zi! Nimic de descărcat.", flush=True)
+        print("\n🎉 Toate fișierele sunt la zi! Nimic de descărcat.", flush=True)
         return
         
-    print(f"🚀 Pasul 3: Începem descărcarea a {total_lipsa} fișiere în coadă...", flush=True)
+    print(f"\n🚀 Pasul 3: Începem descărcarea a {total_lipsa} fișiere în coadă...", flush=True)
     
     director_temp = Path("./temp_pdf_download")
     director_temp.mkdir(exist_ok=True)
     
-    # Timeout standard
     timeout_standard = httpx.Timeout(timeout=45.0, connect=15.0, read=45.0)
-    # Timeout uriaș special pentru cărămizile de fișiere (10 minute pentru citire)
     timeout_fisiere_mari = httpx.Timeout(timeout=600.0, connect=20.0, read=600.0)
     
     erori_consecutive_an = {}
-    succese_in_an = {} # Contorizăm dacă am reușit să luăm ceva pe anul respectiv
+    succese_in_an = {}
     ani_finalizati = set() 
     fisiere_esuate_protejate = []
     
@@ -245,7 +246,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                         valoare_fantomă = " "
                         if este_simplu:
                             erori_consecutive_an[an] = erori_consecutive_an.get(an, 0) + 1
-                            # Prag crescut la 60 și verificăm dacă am luat măcar ceva pe anul ăsta, ca să nu tăiem anii noi
                             if erori_consecutive_an[an] >= 60 and succese_in_an.get(an, 0) > 10:
                                 print(f"🏁 [Anulat inteligent] Anul {an} pare finalizat pe server (60 eșecuri consecutive). Sărim restul.", flush=True)
                                 ani_finalizati.add(an)
@@ -278,7 +278,7 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                             
                         if este_simplu:
                             erori_consecutive_an[an] = 0
-                            succese_in_an[an] = succese_in_an.get(an, 0) + 1 # Contorizăm succesele
+                            succese_in_an[an] = succese_in_an.get(an, 0) + 1
                         
                         if cale_temp.exists():
                             cale_temp.unlink()
