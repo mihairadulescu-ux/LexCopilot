@@ -105,11 +105,12 @@ def descarca_monitoare_pdf(an_start=2000, an_stop=2026):
         limita_erori = 30 # 30 de numere absente consecutive = an terminat
         
         while True:
-            # Determinăm mai întâi dacă numărul de bază (simplu) există local sau în cloud
+            # Determinăm mai întâi dacă numărul de bază (simplu) există în Drive-ul nostru local cache
             nume_baza_pdf = f"MO_PI_{an}_{numar_curent}.pdf"
             baza_exista_in_drive = nume_baza_pdf in fisiere_drive
             
-            # Verificăm dacă numărul de bază a fost găsit pe server în această rulare
+            # Variabilă care ne spune dacă am interacționat cu rețeaua externă în această iterație
+            a_facut_cereri_retea = False
             baza_gasit_acum = False
             
             # Pasul 1: Încercăm numărul de bază (ex: "10")
@@ -120,6 +121,9 @@ def descarca_monitoare_pdf(an_start=2000, an_stop=2026):
                 baza_gasit_acum = True
                 erori_consecutive = 0
             else:
+                # Accesăm rețeaua externă -> activăm mecanismele de delay
+                a_facut_cereri_retea = True
+                
                 # Rotire dinamică de browser pentru a ocoli detecția WAF
                 headers = {
                     "User-Agent": random.choice(USER_AGENTS),
@@ -183,7 +187,6 @@ def descarca_monitoare_pdf(an_start=2000, an_stop=2026):
                     time.sleep(random.uniform(4.0, 7.0))
 
             # Pasul 2: Procesăm sufixele speciale (Bis, Tris, Quater, S) DOAR dacă numărul de bază a fost găsit sau exista deja
-            # Dacă numărul de bază NU există pe server (404), este inutil să scanăm variantele (economie de timp și trafic!)
             document_gasit_pe_server = baza_gasit_acum
             
             if baza_gasit_acum or baza_exista_in_drive:
@@ -198,6 +201,8 @@ def descarca_monitoare_pdf(an_start=2000, an_stop=2026):
                         document_gasit_pe_server = True
                         continue
                         
+                    # Dacă am ajuns aici, înseamnă că sufixul NU există în Drive -> Îl descărcăm de pe rețea
+                    a_facut_cereri_retea = True
                     url_sufix = url_template.format(numar=varianta, an=an)
                     headers_sufix = {
                         "User-Agent": random.choice(USER_AGENTS),
@@ -257,12 +262,16 @@ def descarca_monitoare_pdf(an_start=2000, an_stop=2026):
             # Pasul 3: Logica de oprire a anului
             if not document_gasit_pe_server:
                 erori_consecutive += 1
-                # Afișăm în log progresul eșecurilor consecutive pentru a ști cât mai avem până la oprire
                 print(f"❌ Numărul {numar_curent}/{an} nu a fost găsit. Contor eșecuri: {erori_consecutive}/{limita_erori}", flush=True)
             
             if erori_consecutive >= limita_erori:
                 print(f"🏁 [Sfârșit de an] Anul {an} s-a încheiat după {limita_erori} numere consecutive complet absente.", flush=True)
                 break
+            
+            # Adăugăm o mică pauză doar dacă am descărcat efectiv ceva de pe internet în această iterație a buclei.
+            # Dacă am trecut prin fișiere care existau deja în Drive, timpul de așteptare este ZERO!
+            if a_facut_cereri_retea:
+                time.sleep(random.uniform(1.0, 2.5))
             
             numar_curent += 1
 
