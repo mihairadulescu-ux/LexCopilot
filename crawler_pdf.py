@@ -107,9 +107,9 @@ def descarca_in_bucati_mari(url, cale_locala, cale_temp, total_bytes, timeout_co
     return True
 
 # ======================================================================
-# CORE CRAWLER INTELIGENT MULTI-SUFIX (OPTIMIZAT CONEXIUNE)
+# CORE CRAWLER INTELIGENT MULTI-SUFIX
 # ======================================================================
-def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
+def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
     url_template = "https://monitoruloficial.ro/Monitorul-Oficial--PI--{numar}--{an}.html"
     
     print("🔄 Pasul 1: Conectare la Google Drive și preluare index...", flush=True)
@@ -134,7 +134,7 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
         {"sufix": "S", "tip": "s"}
     ]
     
-    for an in range(an_start, an_stop + 1):
+    for an in range(an_start, am_stop + 1):
         numere_existente_an = []
         for f in fisiere_drive:
             if f.startswith(f"MO_PI_{an}_"):
@@ -175,14 +175,15 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
     timeout_config = httpx.Timeout(timeout=45.0, connect=10.0, read=45.0)
     erori_consecutive_an = {}
     ani_finalizati = set() 
-    fisiere_esuate = []
+    fisiere_esuate_protejate = []
     
     for idx, item in enumerate(coada_descarcare, 1):
         an = item["an"]
         numar_cerut = item["numar"]
         nume_pdf = item["nume_pdf"]
         
-        # MODIFICARE CHEIE: Doar Tris, Quatro și S sunt speciale. "Bis" este considerat "normal" ca și cel simplu!
+        # MODIFICARE CHEIE: Atât "simplu" cât și "bis" sunt protejate (fără dummy la erori de rețea)
+        este_protejat = item["tip"] in ["simplu", "bis"]
         este_special = item["tip"] not in ["simplu", "bis"]
         
         if an in ani_finalizati:
@@ -194,7 +195,7 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
         descarcat_ok = False
         creeaza_fantomă = False
         incercari = 0
-        limită_reincercări = 3 if not este_special else 1
+        limită_reincercări = 3 if este_protejat else 1
         
         cale_locala = director_temp / nume_pdf
         cale_temp = director_temp / f"{nume_pdf}.part"
@@ -216,7 +217,7 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
                         if item["tip"] == "simplu":
                             erori_consecutive_an[an] = erori_consecutive_an.get(an, 0) + 1
                             if erori_consecutive_an[an] >= 30:
-                                print(f"🏁 [Anulat inteligent] Anul {an} pare finalizat pe server (30 eșecuri consecutive). Sărim restul.", flush=True)
+                                print(f"🏁 [Anulat inteligent] Anul {an} pare finalizat pe server (30 eșecuri consecutive de 404). Sărim restul.", flush=True)
                                 ani_finalizati.add(an)
                         break
                     
@@ -228,7 +229,14 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
                     
                     with client.stream("GET", url) as response:
                         response.raise_for_status()
+                        
                         if "application/pdf" not in response.headers.get("Content-Type", ""):
+                            # Dacă e fișier protejat (simplu sau Bis), NU îl forțăm ca dummy, ci doar ieșim pentru a fi reîncercat tura viitoare
+                            if not este_protejat:
+                                print(f"💡 Serverul a trimis HTML în loc de PDF la fișier special. Marcăm ca absent.", flush=True)
+                                creeaza_fantomă = True
+                            else:
+                                print(f"⚠️ Eroare: Serverul a trimis HTML în loc de PDF la un fișier PROTEJAT (Simplu/Bis). NU marcăm cu dummy!", flush=True)
                             break
                             
                         if item["tip"] == "simplu":
@@ -251,7 +259,6 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
                 descriere_eroare = str(e) if len(str(e)) < 120 else str(e)[:120] + "..."
                 print(f"⚠️ Problemă la descărcare {nume_pdf} (Încercarea {incercari}/{limită_reincercări}): {descriere_eroare}", flush=True)
                 
-                # Dacă este Tris/Quatro/S și dă eroare, mergem direct pe varianta fantomă
                 if este_special:
                     print(f"💡 Eroare de conexiune la fișier foarte rar (Tris/Quatro/S) -> Presupunem că nu există.", flush=True)
                     creeaza_fantomă = True
@@ -279,21 +286,21 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
                     print(f"📝 Placeholder salvat în Drive.", flush=True)
                 time.sleep(random.uniform(1.0, 2.0))
         else:
+            # Aici intră atât fișierele simple cât și cele Bis care au eșuat din cauze de rețea sau conținut HTML
             if an not in ani_finalizati:
                 if cale_temp.exists():
                     cale_temp.unlink()
-                if incercari >= limită_reincercări:
-                    print(f"⏭️ [Ocolit] Fișierul {nume_pdf} a fost ocolit. Continuăm cu restul coadei...", flush=True)
-                    fisiere_esuate.append(nume_pdf)
+                print(f"⏭️ [Ocolit protejat] Fișierul {nume_pdf} a fost ocolit pentru siguranță și va fi reîncercat tura următoare.", flush=True)
+                fisiere_esuate_protejate.append(nume_pdf)
 
-    if fisiere_esuate:
-        print("\n⚠️ Rularea s-a încheiat cu câteva fișiere nefinalizate din cauza serverului:", flush=True)
-        for f in fisiere_esuate:
+    if fisiere_esuate_protejate:
+        print("\n⚠️ Rularea s-a încheiat. Următoarele fișiere importante (Simplu/Bis) au eșuat temporar și NU au fost marcate cu dummy (se vor descărca la rularea următoare):", flush=True)
+        for f in fisiere_esuate_protejate:
             print(f"  - {f}", flush=True)
     else:
-        print("\n🎉 Rulare completă finalizată cu succes!", flush=True)
+        print("\n🎉 Rularea completă s-a terminat cu succes!", flush=True)
 
 if __name__ == "__main__":
     an_s = int(sys.argv[1]) if len(sys.argv) >= 3 else 2000
     an_f = int(sys.argv[2]) if len(sys.argv) >= 3 else 2026
-    descarca_monitoare_precalculat(an_start=an_s, an_stop=an_f)
+    descarca_monitoare_precalculat(an_start=an_s, am_stop=an_f)
