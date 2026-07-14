@@ -96,7 +96,7 @@ def descarca_monitoare_pdf(an_start=2000, an_stop=2026):
             
             numar_curent = 1
             erori_consecutive = 0
-            limita_erori = 10 # 10 numere consecutive lipsă = an terminat
+            limita_erori = 50 # 10 numere consecutive lipsă = an terminat
             
             while True:
                 variante_numar = [
