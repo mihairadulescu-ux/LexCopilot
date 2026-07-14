@@ -14,7 +14,7 @@ jobs:
       matrix:
         # Aici pui pur și simplu lista de ani pe care vrei să-i rulezi în paralel.
         # De exemplu, acum va lansa 4 instanțe simultane. Modifică lista cum ai nevoie!
-        an: [2021, 2022, 2023, 2024]
+        an: [2020, 2021, 2022, 2023, 2024, 2025,  2026]
 
     steps:
       - name: Checkout Code
