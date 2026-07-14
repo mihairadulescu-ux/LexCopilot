@@ -186,4 +186,4 @@ if __name__ == "__main__":
     an_f = int(sys.argv[2]) if len(sys.argv) >= 3 else 2026
     descarca_monitoare_pdf = descarca_monitoare_precalculat(an_start=an_s, an_stop=an_f)
 
-```
+
