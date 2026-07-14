@@ -196,24 +196,34 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
     consecutive_empty_pages = 0
 
     while True:
+        # 1. Determinăm pagina curentă pe care o evaluăm
         if pages_to_process:
-            current_page = pages_to_process.pop(0)
+            current_page = pages_to_process[0]  # Doar ne uităm la ea, o scoatem din listă doar dacă o procesăm real
             is_gap_repair = True
         else:
             current_page = next_new_page
-            next_new_page += 1
             is_gap_repair = False
 
+        # --- OPTIMIZARE EXTREMĂ: Skip instantaneu fără sleep/pauze de rețea ---
         if current_page in downloaded_pages and not is_gap_repair:
-            continue
+            print(f"☁️ [Există în Drive] brut_legislatie_{target_year}_pag{current_page}.xml", flush=True)
+            next_new_page += 1
+            continue  # Trecem instant la următoarea pagină, fără delay-uri!
+
+        # Dacă am trecut de filtrul de mai sus, înseamnă că pagină NU este în Drive și trebuie descărcată.
+        # Acum o putem elimina din coada de reparare gaps.
+        if is_gap_repair:
+            pages_to_process.pop(0)
+        else:
+            next_new_page += 1
 
         prefix_log = "[REPARARE]" if is_gap_repair else "[AVANS]"
-        
         retry_success = False
         max_retries = 5
         
         for attempt in range(0, max_retries + 1):
             try:
+                # Accesăm serverul SOAP Just.ro doar pentru fișiere cu adevărat noi!
                 client, history, token_key = get_or_refresh_soap_session(force_refresh=False)
 
                 print(f"--- {prefix_log} An {target_year} / Pagina {current_page} | Token activ: {token_key[:12]}... (Încercare {attempt}/{max_retries}) ---")
@@ -271,9 +281,9 @@ def download_year(drive_service, composite_type_name, target_year, downloaded_pa
             success = upload_to_drive(service=drive_service, filename=filename, content_bytes=raw_xml_bytes)
             if success:
                 files_saved += 1
-                # Incrementăm succesul pe tokenul curent
                 _TOKEN_STATS["pages_processed"] += 1
 
+        # Această pauză protejează serverul Just.ro și se execută DOAR când am făcut descărcare reală!
         time.sleep(random.uniform(3.0, 5.0))
 
     return files_saved
