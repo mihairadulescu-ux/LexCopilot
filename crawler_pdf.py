@@ -60,10 +60,6 @@ def incarca_in_drive(drive_service, cale_locala, folder_id):
 # DESCARCARE SEGMENTATA (OCOLIRE LIMITARE 100MB)
 # ======================================================================
 def descarca_in_bucati_mari(url, cale_locala, cale_temp, total_bytes, timeout_config):
-    """
-    Descarcă un fișier uriaș împărțindu-l în segmente de câte 80MB (83,886,080 octeți),
-    pentru a evita deconectarea automată impusă de serverul Monitorului Oficial.
-    """
     dimensiune_segment = 80 * 1024 * 1024  # 80 MB
     print(f"🧩 Fișier uriaș detectat ({total_bytes // 1024 // 1024} MB). Aplicăm descărcarea segmentată în bucăți de 80MB...", flush=True)
     
@@ -90,7 +86,6 @@ def descarca_in_bucati_mari(url, cale_locala, cale_temp, total_bytes, timeout_co
                     response = client.get(url)
                     response.raise_for_status()
                     
-                    # Scriem segmentul la sfârșitul fișierului temporar
                     with open(cale_temp, "ab") as f:
                         f.write(response.content)
                         
@@ -108,12 +103,11 @@ def descarca_in_bucati_mari(url, cale_locala, cale_temp, total_bytes, timeout_co
                 cale_temp.unlink()
             return False
             
-    # Dacă toate segmentele s-au lipit cu succes
     cale_temp.replace(cale_locala)
     return True
 
 # ======================================================================
-# CORE CRAWLER INTELIGENT MULTI-SUFIX
+# CORE CRAWLER INTELIGENT
 # ======================================================================
 def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
     url_template = "https://monitoruloficial.ro/Monitorul-Oficial--PI--{numar}--{an}.html"
@@ -160,6 +154,7 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
                 numar_complet = f"{n}{var['sufix']}" if var["sufix"] else str(n)
                 nume_pdf = f"MO_PI_{an}_{numar_complet}.pdf"
                 
+                # Căutare directă în setul de fișiere existente din Drive
                 if nume_pdf not in fisiere_drive:
                     coada_descarcare.append({
                         "an": an, 
@@ -211,7 +206,6 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
                 }
                 
                 with httpx.Client(headers=headers, timeout=timeout_config, follow_redirects=True) as client:
-                    # Facem un HEAD rapid înainte să vedem dimensiunea fișierului
                     head_res = client.head(url)
                     
                     if head_res.status_code == 404:
@@ -225,12 +219,10 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
                     
                     total_bytes = int(head_res.headers.get("Content-Length", 0))
                     
-                    # Decizie inteligentă: dacă depășește 95 MB, folosim descărcarea segmentată
                     if total_bytes > 95 * 1024 * 1024:
                         descarcat_ok = descarca_in_bucati_mari(url, cale_locala, cale_temp, total_bytes, timeout_config)
                         break
                     
-                    # Dacă e un fișier normal (sub 95MB), îl descărcăm clasic dintr-o bucată
                     with client.stream("GET", url) as response:
                         response.raise_for_status()
                         if "application/pdf" not in response.headers.get("Content-Type", ""):
@@ -264,12 +256,13 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
             
         elif era_404:
             if an not in ani_finalizati:
-                print(f"ℹ️ {nume_pdf} -> Nu există (404). Generăm fișier de marcaj (0 bytes)...", flush=True)
+                print(f"ℹ️ {nume_pdf} -> Nu există (404). Generăm fișier de marcaj (1 byte)...", flush=True)
                 if cale_temp.exists():
                     cale_temp.unlink()
                 
-                with open(cale_locala, "wb") as f:
-                    pass 
+                # REPARARE: Scriem exact 1 byte (un simplu caracter) pentru a forța Google Drive să-l urce!
+                with open(cale_locala, "w") as f:
+                    f.write(" ") 
                 
                 if incarca_in_drive(drive_service, cale_locala, GOOGLE_DRIVE_FOLDER_ID):
                     print(f"📝 Placeholder salvat în Drive pentru {nume_pdf}.", flush=True)
