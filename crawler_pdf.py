@@ -107,7 +107,7 @@ def descarca_in_bucati_mari(url, cale_locala, cale_temp, total_bytes, timeout_co
     return True
 
 # ======================================================================
-# CORE CRAWLER INTELIGENT
+# CORE CRAWLER INTELIGENT MULTI-SUFIX (OPTIMIZAT CONEXIUNE)
 # ======================================================================
 def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
     url_template = "https://monitoruloficial.ro/Monitorul-Oficial--PI--{numar}--{an}.html"
@@ -154,7 +154,6 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
                 numar_complet = f"{n}{var['sufix']}" if var["sufix"] else str(n)
                 nume_pdf = f"MO_PI_{an}_{numar_complet}.pdf"
                 
-                # Căutare directă în setul de fișiere existente din Drive
                 if nume_pdf not in fisiere_drive:
                     coada_descarcare.append({
                         "an": an, 
@@ -173,7 +172,7 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
     director_temp = Path("./temp_pdf_download")
     director_temp.mkdir(exist_ok=True)
     
-    timeout_config = httpx.Timeout(timeout=120.0, connect=20.0, read=120.0)
+    timeout_config = httpx.Timeout(timeout=45.0, connect=10.0, read=45.0)
     erori_consecutive_an = {}
     ani_finalizati = set() 
     fisiere_esuate = []
@@ -183,6 +182,9 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
         numar_cerut = item["numar"]
         nume_pdf = item["nume_pdf"]
         
+        # MODIFICARE CHEIE: Doar Tris, Quatro și S sunt speciale. "Bis" este considerat "normal" ca și cel simplu!
+        este_special = item["tip"] not in ["simplu", "bis"]
+        
         if an in ani_finalizati:
             continue
             
@@ -190,15 +192,16 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
         
         url = url_template.format(numar=numar_cerut, an=an)
         descarcat_ok = False
-        era_404 = False
+        creeaza_fantomă = False
         incercari = 0
+        limită_reincercări = 3 if not este_special else 1
         
         cale_locala = director_temp / nume_pdf
         cale_temp = director_temp / f"{nume_pdf}.part"
         
-        while incercari < 3:
+        while incercari < limită_reincercări:
             try:
-                time.sleep(random.uniform(2.5, 4.5))
+                time.sleep(random.uniform(1.5, 3.0))
                 
                 headers = {
                     "User-Agent": random.choice(USER_AGENTS), 
@@ -209,11 +212,11 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
                     head_res = client.head(url)
                     
                     if head_res.status_code == 404:
-                        era_404 = True
+                        creeaza_fantomă = True
                         if item["tip"] == "simplu":
                             erori_consecutive_an[an] = erori_consecutive_an.get(an, 0) + 1
                             if erori_consecutive_an[an] >= 30:
-                                print(f"🏁 [Anulat inteligent] Anul {an} pare finalizat pe server (30 eșecuri consecutive). Sărim restul numerelor.", flush=True)
+                                print(f"🏁 [Anulat inteligent] Anul {an} pare finalizat pe server (30 eșecuri consecutive). Sărim restul.", flush=True)
                                 ani_finalizati.add(an)
                         break
                     
@@ -242,43 +245,51 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
                         descarcat_ok = True
                         break
                         
-            except Exception as e:
+            except (httpx.ConnectError, httpx.ReadError, httpx.HTTPStatusError, Exception) as e:
                 incercari += 1
-                print(f"⚠️ Problemă la descărcare {nume_pdf} (Încercarea {incercari}/3): {e}", flush=True)
-                time.sleep(random.uniform(45.0, 75.0))
+                
+                descriere_eroare = str(e) if len(str(e)) < 120 else str(e)[:120] + "..."
+                print(f"⚠️ Problemă la descărcare {nume_pdf} (Încercarea {incercari}/{limită_reincercări}): {descriere_eroare}", flush=True)
+                
+                # Dacă este Tris/Quatro/S și dă eroare, mergem direct pe varianta fantomă
+                if este_special:
+                    print(f"💡 Eroare de conexiune la fișier foarte rar (Tris/Quatro/S) -> Presupunem că nu există.", flush=True)
+                    creeaza_fantomă = True
+                    break
+                    
+                time.sleep(random.uniform(20.0, 40.0))
                 
         if descarcat_ok:
             marime_mb = os.path.getsize(cale_locala) // 1024 // 1024
             print(f"📥 Descărcat cu succes: {nume_pdf} (~{marime_mb} MB)", flush=True)
             if incarca_in_drive(drive_service, cale_locala, GOOGLE_DRIVE_FOLDER_ID):
                 print(f"✅ Sincronizat în Google Drive.", flush=True)
-            time.sleep(random.uniform(3.0, 6.0))
+            time.sleep(random.uniform(2.0, 4.0))
             
-        elif era_404:
+        elif creeaza_fantomă:
             if an not in ani_finalizati:
-                print(f"ℹ️ {nume_pdf} -> Nu există (404). Generăm fișier de marcaj (1 byte)...", flush=True)
+                print(f"ℹ️ Creăm fișier de marcaj (1 byte) în Drive pentru: {nume_pdf}...", flush=True)
                 if cale_temp.exists():
                     cale_temp.unlink()
                 
-                # REPARARE: Scriem exact 1 byte (un simplu caracter) pentru a forța Google Drive să-l urce!
                 with open(cale_locala, "w") as f:
                     f.write(" ") 
                 
                 if incarca_in_drive(drive_service, cale_locala, GOOGLE_DRIVE_FOLDER_ID):
-                    print(f"📝 Placeholder salvat în Drive pentru {nume_pdf}.", flush=True)
-                time.sleep(random.uniform(1.5, 3.0))
+                    print(f"📝 Placeholder salvat în Drive.", flush=True)
+                time.sleep(random.uniform(1.0, 2.0))
         else:
             if an not in ani_finalizati:
                 if cale_temp.exists():
                     cale_temp.unlink()
-                if incercari >= 3:
-                    print(f"⏭️ [Ocolit] Fișierul {nume_pdf} a fost ocolit după 3 încercări eșuate de rețea. Continuăm cu restul coadei...", flush=True)
+                if incercari >= limită_reincercări:
+                    print(f"⏭️ [Ocolit] Fișierul {nume_pdf} a fost ocolit. Continuăm cu restul coadei...", flush=True)
                     fisiere_esuate.append(nume_pdf)
 
     if fisiere_esuate:
         print("\n⚠️ Rularea s-a încheiat cu câteva fișiere nefinalizate din cauza serverului:", flush=True)
         for f in fisiere_esuate:
-            print(f"  - {f} (dimensiune prea mare / serverul a tăiat conexiunea)", flush=True)
+            print(f"  - {f}", flush=True)
     else:
         print("\n🎉 Rulare completă finalizată cu succes!", flush=True)
 
