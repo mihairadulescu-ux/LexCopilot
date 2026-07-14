@@ -2,11 +2,12 @@ import os
 import sys
 import time
 import random
+import io
 from pathlib import Path
 import httpx
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 # ======================================================================
 # CONFIGURARE GOOGLE DRIVE
@@ -28,41 +29,98 @@ def instantiaza_drive():
     return build("drive", "v3", credentials=creds)
 
 def adu_fisiere_existente_in_drive(drive_service, folder_id):
-    existente = set()
+    """
+    Returnează un dicționar cu fișierele din Drive:
+    { "nume_fisier": {"id": "id_drive", "size": 1234, "status": "pdf" sau "dummy_1"..."dummy_5" sau "dummy_final"} }
+    """
+    existente = {}
     page_token = None
     query = f"'{folder_id}' in parents and trashed = false"
+    
+    print("   ↳ Scanăm metadatele din Drive...", flush=True)
     while True:
         response = drive_service.files().list(
-            q=query, fields="nextPageToken, files(name)", pageToken=page_token, pageSize=1000,
-            supportsAllDrives=True, includeItemsFromAllDrives=True
+            q=query, 
+            fields="nextPageToken, files(id, name, size)", 
+            pageToken=page_token, 
+            pageSize=1000,
+            supportsAllDrives=True, 
+            includeItemsFromAllDrives=True
         ).execute()
+        
         for f in response.get("files", []):
-            existente.add(f["name"])
+            nume = f["name"]
+            f_id = f["id"]
+            size = int(f.get("size", 0))
+            
+            # Implicit presupunem că e PDF valid sau dummy finalizat
+            status = "ok"
+            
+            # Dacă fișierul are fix 1 byte, este un fișier dummy (fantomă) pe care trebuie să îl verificăm
+            if size == 1:
+                status = "dummy_verificabil"
+                
+            existente[nume] = {"id": f_id, "size": size, "status": status}
+            
         page_token = response.get("nextPageToken", None)
         if not page_token:
             break
+            
+    # Pentru fișierele marcate ca "dummy_verificabil", le descărcăm conținutul (doar 1 byte!) ca să citim contorul
+    fisiere_de_verificat = [n for n, v in existente.items() if v["status"] == "dummy_verificabil"]
+    if fisiere_de_verificat:
+        print(f"   ↳ Am detectat {len(fisiere_de_verificat)} fișiere dummy de 1 byte. Le citim contorul...", flush=True)
+        
+        for nume in fisiere_de_verificat:
+            f_id = existente[nume]["id"]
+            try:
+                request = drive_service.files().get_media(fileId=f_id)
+                fh = io.BytesIO()
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while done is False:
+                    _, done = downloader.next_chunk()
+                
+                continut = fh.getvalue().decode('utf-8', errors='ignore').strip()
+                
+                if continut.isdigit() and 1 <= int(continut) <= 5:
+                    existente[nume]["status"] = f"dummy_{continut}"
+                else:
+                    existente[nume]["status"] = "dummy_final" # Are spațiu sau altceva, e abandonat definitiv
+            except Exception:
+                # Dacă dă eroare la citire, îl considerăm dummy final ca să nu blocăm procesul
+                existente[nume]["status"] = "dummy_final"
+                
     return existente
 
-def incarca_in_drive(drive_service, cale_locala, folder_id):
+def incarca_sau_actualizeaza_in_drive(drive_service, cale_locala, folder_id, file_id_existent=None):
+    """
+    Încarcă un fișier nou sau suprascrie (actualizează conținutul) unui fișier existent (de ex. când facem upgrade la dummy sau trecem de la dummy la PDF real).
+    """
     nume_fisier = cale_locala.name
-    metadata = {'name': nume_fisier, 'parents': [folder_id]}
     media = MediaFileUpload(str(cale_locala), mimetype='application/pdf', resumable=True)
     try:
-        file_drive = drive_service.files().create(body=metadata, media_body=media, fields='id', supportsAllDrives=True).execute()
+        if file_id_existent:
+            # Actualizăm conținutul fișierului existent
+            file_drive = drive_service.files().update(fileId=file_id_existent, media_body=media, supportsAllDrives=True).execute()
+        else:
+            # Creăm un fișier complet nou
+            metadata = {'name': nume_fisier, 'parents': [folder_id]}
+            file_drive = drive_service.files().create(body=metadata, media_body=media, fields='id', supportsAllDrives=True).execute()
+            
         if file_drive.get('id'):
             cale_locala.unlink()
             return True
     except Exception as e:
-        print(f"❌ [Drive Err] Eroare incarcare {nume_fisier}: {e}", flush=True)
+        print(f"❌ [Drive Err] Eroare scriere/update {nume_fisier}: {e}", flush=True)
     return False
 
 # ======================================================================
 # DESCARCARE SEGMENTATA - OPTIMIZATA ULTRA-SIGUR LA 20MB
 # ======================================================================
 def descarca_in_bucati_mari(url, cale_locala, cale_temp, total_bytes, timeout_config):
-    # MODIFICARE: Segmente de 20 MB pentru stabilitate maximă pe conexiuni slabe/instabile
     dimensiune_segment = 20 * 1024 * 1024  # 20 MB
-    print(f"🧩 Fișier uriaș detectat ({total_bytes // 1024 // 1024} MB). Aplicăm descărcarea segmentată în bucăți ultra-sigure de 20MB...", flush=True)
+    print(f"🧩 Fișier uriaș detectat ({total_bytes // 1024 // 1024} MB). Aplicăm descărcarea segmentată în bucăți de 20MB...", flush=True)
     
     if cale_temp.exists():
         cale_temp.unlink()
@@ -108,16 +166,16 @@ def descarca_in_bucati_mari(url, cale_locala, cale_temp, total_bytes, timeout_co
     return True
 
 # ======================================================================
-# CORE CRAWLER INTELIGENT MULTI-SUFIX
+# CORE CRAWLER INTELIGENT MULTI-SUFIX CU CONTOR DE TIMP PENTRU BIS
 # ======================================================================
 def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
     url_template = "https://monitoruloficial.ro/Monitorul-Oficial--PI--{numar}--{an}.html"
     
-    print("🔄 Pasul 1: Conectare la Google Drive și preluare index...", flush=True)
+    print("🔄 Pasul 1: Conectare la Google Drive și preluare index detaliat...", flush=True)
     try:
         drive_service = instantiaza_drive()
-        fisiere_drive = adu_fisiere_existente_in_drive(drive_service, GOOGLE_DRIVE_FOLDER_ID)
-        print(f"📊 Detectate {len(fisiere_drive)} PDF-uri salvate deja în cloud.", flush=True)
+        inventar_drive = adu_fisiere_existente_in_drive(drive_service, GOOGLE_DRIVE_FOLDER_ID)
+        print(f"📊 Scanare finalizată. Detectate {len(inventar_drive)} înregistrări în cloud.", flush=True)
     except Exception as e:
         print(f"🛑 Eroare critică la inițializarea Google Drive: {e}", flush=True)
         return
@@ -137,7 +195,7 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
     
     for an in range(an_start, am_stop + 1):
         numere_existente_an = []
-        for f in fisiere_drive:
+        for f in inventar_drive.keys():
             if f.startswith(f"MO_PI_{an}_"):
                 try:
                     num_str = f.split('_')[3].split('.')[0]
@@ -155,12 +213,31 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                 numar_complet = f"{n}{var['sufix']}" if var["sufix"] else str(n)
                 nume_pdf = f"MO_PI_{an}_{numar_complet}.pdf"
                 
-                if nume_pdf not in fisiere_drive:
+                # LOGICA DE AUR A ȘMECHERIEI:
+                # Intră în coada de descărcare dacă:
+                # 1. Nu există deloc în Drive
+                # 2. SAU este de tip "Bis" și statusul lui actual este "dummy_1", "dummy_2", "dummy_3", "dummy_4", "dummy_5"
+                trebuie_descarcat = False
+                status_actual = None
+                file_id_existent = None
+                
+                if nume_pdf not in inventar_drive:
+                    trebuie_descarcat = True
+                else:
+                    meta = inventar_drive[nume_pdf]
+                    file_id_existent = meta["id"]
+                    if var["tip"] == "bis" and meta["status"].startswith("dummy_") and meta["status"] != "dummy_final":
+                        trebuie_descarcat = True
+                        status_actual = meta["status"] # reținem statusul actual (ex. 'dummy_2')
+                
+                if trebuie_descarcat:
                     coada_descarcare.append({
                         "an": an, 
                         "numar": numar_complet, 
                         "nume_pdf": nume_pdf, 
-                        "tip": var["tip"]
+                        "tip": var["tip"],
+                        "file_id_existent": file_id_existent,
+                        "status_actual": status_actual
                     })
 
     total_lipsa = len(coada_descarcare)
@@ -183,7 +260,8 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
         numar_cerut = item["numar"]
         nume_pdf = item["nume_pdf"]
         
-        este_protejat = item["tip"] in ["simplu", "bis"]
+        este_simplu = item["tip"] == "simplu"
+        este_bis = item["tip"] == "bis"
         este_special = item["tip"] not in ["simplu", "bis"]
         
         if an in ani_finalizati:
@@ -194,8 +272,11 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
         url = url_template.format(numar=numar_cerut, an=an)
         descarcat_ok = False
         creeaza_fantomă = False
+        valoare_fantomă = " " # Valoarea implicită (spațiu)
+        
+        # LOGICA ȘMECHERIEI: Pentru Bis facem DOAR 1 încercare per rulare!
+        limită_reincercări = 1 if (este_special or este_bis) else 3
         incercari = 0
-        limită_reincercări = 3 if este_protejat else 1
         
         cale_locala = director_temp / nume_pdf
         cale_temp = director_temp / f"{nume_pdf}.part"
@@ -214,10 +295,11 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                     
                     if head_res.status_code == 404:
                         creeaza_fantomă = True
-                        if item["tip"] == "simplu":
+                        valoare_fantomă = " " # 404 înseamnă clar inexistent, punem direct dummy final (spațiu)
+                        if este_simplu:
                             erori_consecutive_an[an] = erori_consecutive_an.get(an, 0) + 1
                             if erori_consecutive_an[an] >= 30:
-                                print(f"🏁 [Anulat inteligent] Anul {an} pare finalizat pe server (30 eșecuri consecutive de 404). Sărim restul.", flush=True)
+                                print(f"🏁 [Anulat inteligent] Anul {an} pare finalizat pe server (30 eșecuri consecutive). Sărim restul.", flush=True)
                                 ani_finalizati.add(an)
                         break
                     
@@ -231,14 +313,22 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                         response.raise_for_status()
                         
                         if "application/pdf" not in response.headers.get("Content-Type", ""):
-                            if not este_protejat:
-                                print(f"💡 Serverul a trimis HTML în loc de PDF la fișier special. Marcăm ca absent.", flush=True)
+                            # Dacă nu e PDF:
+                            if este_special:
                                 creeaza_fantomă = True
+                                valoare_fantomă = " "
+                            elif este_bis:
+                                creeaza_fantomă = True
+                                # Calculăm următorul nivel al contorului pentru Bis
+                                contor_vechi = int(item["status_actual"].split('_')[1]) if item["status_actual"] else 0
+                                urmatorul_contor = contor_vechi + 1
+                                valoare_fantomă = str(urmatorul_contor) if urmatorul_contor < 6 else " "
+                                print(f"💡 Serverul a trimis HTML. Incrementăm contorul Bis la: {valoare_fantomă}", flush=True)
                             else:
-                                print(f"⚠️ Eroare: Serverul a trimis HTML în loc de PDF la un fișier PROTEJAT (Simplu/Bis). NU marcăm cu dummy!", flush=True)
+                                print(f"⚠️ Eroare: HTML primit la un fișier SIMPLU. Îl ocolim fără dummy.", flush=True)
                             break
                             
-                        if item["tip"] == "simplu":
+                        if este_simplu:
                             erori_consecutive_an[an] = 0
                         
                         if cale_temp.exists():
@@ -254,13 +344,21 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                         
             except (httpx.ConnectError, httpx.ReadError, httpx.HTTPStatusError, Exception) as e:
                 incercari += 1
-                
                 descriere_eroare = str(e) if len(str(e)) < 120 else str(e)[:120] + "..."
                 print(f"⚠️ Problemă la descărcare {nume_pdf} (Încercarea {incercari}/{limită_reincercări}): {descriere_eroare}", flush=True)
                 
                 if este_special:
-                    print(f"💡 Eroare de conexiune la fișier foarte rar (Tris/Quatro/S) -> Presupunem că nu există.", flush=True)
+                    print(f"💡 Eroare la fișier special -> Presupunem neexistent.", flush=True)
                     creeaza_fantomă = True
+                    valoare_fantomă = " "
+                    break
+                elif este_bis:
+                    # LOGICA SPECIALĂ DE REȚEA PENTRU BIS (1 singur eșec = incrementare contor)
+                    creeaza_fantomă = True
+                    contor_vechi = int(item["status_actual"].split('_')[1]) if item["status_actual"] else 0
+                    urmatorul_contor = contor_vechi + 1
+                    valoare_fantomă = str(urmatorul_contor) if urmatorul_contor < 6 else " "
+                    print(f"💡 Eroare conexiune pentru Bis. Incrementăm contorul la: {valoare_fantomă}", flush=True)
                     break
                     
                 time.sleep(random.uniform(20.0, 40.0))
@@ -268,31 +366,35 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
         if descarcat_ok:
             marime_mb = os.path.getsize(cale_locala) // 1024 // 1024
             print(f"📥 Descărcat cu succes: {nume_pdf} (~{marime_mb} MB)", flush=True)
-            if incarca_in_drive(drive_service, cale_locala, GOOGLE_DRIVE_FOLDER_ID):
-                print(f"✅ Sincronizat în Google Drive.", flush=True)
+            # Salvăm PDF-ul adevărat. Dacă exista deja un dummy, update_in_drive se va asigura că îl suprascrie!
+            if incarca_sau_actualizeaza_in_drive(drive_service, cale_locala, GOOGLE_DRIVE_FOLDER_ID, item["file_id_existent"]):
+                print(f"✅ Sincronizat cu succes în Google Drive.", flush=True)
             time.sleep(random.uniform(2.0, 4.0))
             
         elif creeaza_fantomă:
             if an not in ani_finalizati:
-                print(f"ℹ️ Creăm fișier de marcaj (1 byte) în Drive pentru: {nume_pdf}...", flush=True)
                 if cale_temp.exists():
                     cale_temp.unlink()
                 
+                # Generăm conținutul dummy (contorul sau spațiul final)
                 with open(cale_locala, "w") as f:
-                    f.write(" ") 
+                    f.write(valoare_fantomă) 
                 
-                if incarca_in_drive(drive_service, cale_locala, GOOGLE_DRIVE_FOLDER_ID):
-                    print(f"📝 Placeholder salvat în Drive.", flush=True)
+                text_stare = f"contor '{valoare_fantomă}'" if valoare_fantomă != " " else "spațiu final (abandonat)"
+                print(f"ℹ️ Actualizăm dummy în Drive ({text_stare}) pentru: {nume_pdf}...", flush=True)
+                
+                if incarca_sau_actualizeaza_in_drive(drive_service, cale_locala, GOOGLE_DRIVE_FOLDER_ID, item["file_id_existent"]):
+                    print(f"📝 Placeholder salvat.", flush=True)
                 time.sleep(random.uniform(1.0, 2.0))
         else:
             if an not in ani_finalizati:
                 if cale_temp.exists():
                     cale_temp.unlink()
-                print(f"⏭️ [Ocolit protejat] Fișierul {nume_pdf} a fost ocolit pentru siguranță și va fi reîncercat tura următoare.", flush=True)
+                print(f"⏭️ [Ocolit protejat] Fișierul SIMPLU {nume_pdf} a fost ocolit pentru siguranță.", flush=True)
                 fisiere_esuate_protejate.append(nume_pdf)
 
     if fisiere_esuate_protejate:
-        print("\n⚠️ Rularea s-a încheiat. Următoarele fișiere importante (Simplu/Bis) au eșuat temporar și NU au fost marcate cu dummy (se vor descărca la rularea următoare):", flush=True)
+        print("\n⚠️ Rularea s-a încheiat. Următoarele fișiere SIMPLU au eșuat temporar și vor fi reîncercate la rularea următoare:", flush=True)
         for f in fisiere_esuate_protejate:
             print(f"  - {f}", flush=True)
     else:
