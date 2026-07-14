@@ -12,12 +12,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Aici setezi ce ani vrei să ruleze în paralel. 
-        include:
-          - start_year: 2020
-            end_year: 2021
-          - start_year: 2022
-            end_year: 2023
+        # Aici pui pur și simplu lista de ani pe care vrei să-i rulezi în paralel.
+        # De exemplu, acum va lansa 4 instanțe simultane. Modifică lista cum ai nevoie!
+        an: [2021, 2022, 2023, 2024]
 
     steps:
       - name: Checkout Code
@@ -37,5 +34,6 @@ jobs:
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           PYTHONUNBUFFERED: "1"
+        # Scriptul primește acum același an și ca început și ca sfârșit, rulând exact anul din instanța curentă
         run: |
-          python crawler_pdf.py ${{ matrix.start_year }} ${{ matrix.end_year }}
+          python crawler_pdf.py ${{ matrix.an }} ${{ matrix.an }}
