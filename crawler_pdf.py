@@ -116,7 +116,7 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
         print(f"🛑 Eroare critică la inițializarea Google Drive: {e}", flush=True)
         return
 
-    MAX_NUMERE_AN = 1300 
+    MAX_NUMERE_AN = 1350 # Ridicat usor pentru anii cu foarte multe numere
     
     print("🧠 Pasul 2: Calculare diferențe și identificare fișiere lipsă...", flush=True)
     coada_descarcare = []
@@ -128,6 +128,8 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
         {"sufix": "Quatro", "tip": "quatro"},
         {"sufix": "S", "tip": "s"}
     ]
+    
+    AN_CURENT_SISTEM = 2026 # Anul de referință pentru limitare dinamică
     
     for an in range(an_start, am_stop + 1):
         numere_existente_an = []
@@ -142,7 +144,16 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                     continue
                     
         max_numar_existent = max(numere_existente_an) if numere_existente_an else 0
-        limita_scanare = MAX_NUMERE_AN if an >= 2025 else min(max_numar_existent + 30, MAX_NUMERE_AN)
+        
+        # CORECTURA MAJORĂ AICI: Pentru anii anteriori scanăm PÂNĂ LA CAPĂT (MAX_NUMERE_AN).
+        # Logica cu "max + 30" se aplică DOAR pentru anul în curs ca să nu facă 1000 de cereri 404 aiurea în avans.
+        if an < AN_CURENT_SISTEM:
+            limita_scanare = MAX_NUMERE_AN
+        else:
+            # Pentru anul curent, mergem cu maxim 30-50 numere în avans față de cel mai mare găsit
+            limita_scanare = min(max_numar_existent + 50, MAX_NUMERE_AN)
+            if limita_scanare < 100: # Asigurăm măcar primele 100 dacă anul e abia la început
+                limita_scanare = 100
         
         for n in range(1, limita_scanare + 1):
             for var in variante_sufixe:
@@ -188,6 +199,7 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
     timeout_fisiere_mari = httpx.Timeout(timeout=600.0, connect=20.0, read=600.0)
     
     erori_consecutive_an = {}
+    succese_in_an = {} # Contorizăm dacă am reușit să luăm ceva pe anul respectiv
     ani_finalizati = set() 
     fisiere_esuate_protejate = []
     
@@ -225,7 +237,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                     "Referer": "https://monitoruloficial.ro/e-monitor/"
                 }
                 
-                # Folosim timeout-ul standard pentru verificarea HEAD
                 with httpx.Client(headers=headers, timeout=timeout_standard, follow_redirects=True) as client:
                     head_res = client.head(url)
                     
@@ -234,20 +245,19 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                         valoare_fantomă = " "
                         if este_simplu:
                             erori_consecutive_an[an] = erori_consecutive_an.get(an, 0) + 1
-                            if erori_consecutive_an[an] >= 30:
-                                print(f"🏁 [Anulat inteligent] Anul {an} pare finalizat pe server (30 eșecuri consecutive). Sărim restul.", flush=True)
+                            # Prag crescut la 60 și verificăm dacă am luat măcar ceva pe anul ăsta, ca să nu tăiem anii noi
+                            if erori_consecutive_an[an] >= 60 and succese_in_an.get(an, 0) > 10:
+                                print(f"🏁 [Anulat inteligent] Anul {an} pare finalizat pe server (60 eșecuri consecutive). Sărim restul.", flush=True)
                                 ani_finalizati.add(an)
                         break
                     
                     total_bytes = int(head_res.headers.get("Content-Length", 0))
                     
-                    # Alegem timeout-ul potrivit în funcție de mărimea raportată
                     timeout_ales = timeout_standard
                     if total_bytes > 90 * 1024 * 1024:
                         timeout_ales = timeout_fisiere_mari
                         print(f"⚠️ Fișier de mari dimensiuni detectat ({total_bytes // 1024 // 1024} MB). Aplicăm streaming direct cu timeout extins (10 min)...", flush=True)
 
-                # Pornim descărcarea propriu-zisă prin stream direct cu timeout-ul ales
                 with httpx.Client(headers=headers, timeout=timeout_ales, follow_redirects=True) as client:
                     with client.stream("GET", url) as response:
                         response.raise_for_status()
@@ -268,13 +278,13 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                             
                         if este_simplu:
                             erori_consecutive_an[an] = 0
+                            succese_in_an[an] = succese_in_an.get(an, 0) + 1 # Contorizăm succesele
                         
                         if cale_temp.exists():
                             cale_temp.unlink()
                             
-                        # Descărcare directă în fișierul temporar
                         with open(cale_temp, "wb") as f:
-                            for chunk in response.iter_bytes(chunk_size=32768): # Chunk size mărit la 32KB pentru viteză
+                            for chunk in response.iter_bytes(chunk_size=32768):
                                 f.write(chunk)
                                 
                         cale_temp.replace(cale_locala)
