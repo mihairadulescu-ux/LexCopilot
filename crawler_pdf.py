@@ -57,7 +57,7 @@ def incarca_in_drive(drive_service, cale_locala, folder_id):
     return False
 
 # ======================================================================
-# CORE CRAWLER CU CORECTURĂ DE "PLACEHOLDER" (FIȘIER GOL PENTRU 404)
+# CORE CRAWLER MULTI-SUFIX (Bis, Tris, Quatro, S)
 # ======================================================================
 def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
     url_template = "https://monitoruloficial.ro/Monitorul-Oficial--PI--{numar}--{an}.html"
@@ -76,25 +76,43 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
     print("🧠 Pasul 2: Calculare diferențe și identificare fișiere lipsă...", flush=True)
     coada_descarcare = []
     
+    # Definirea variantelor pe care le căutăm
+    variante_sufixe = [
+        {"sufix": "", "tip": "simplu"},
+        {"sufix": "Bis", "tip": "bis"},
+        {"sufix": "Tris", "tip": "tris"},
+        {"sufix": "Quatro", "tip": "quatro"},
+        {"sufix": "S", "tip": "s"}
+    ]
+    
     for an in range(an_start, an_stop + 1):
-        numere_existente_an = [
-            int(f.split('_')[3].split('.')[0].replace('Bis', '')) 
-            for f in fisiere_drive 
-            if f.startswith(f"MO_PI_{an}_")
-        ]
+        numere_existente_an = []
+        for f in fisiere_drive:
+            if f.startswith(f"MO_PI_{an}_"):
+                try:
+                    num_str = f.split('_')[3].split('.')[0]
+                    # Eliminăm sufixele cunoscute pentru a obține doar numărul curat
+                    for suf in ['Bis', 'Tris', 'Quatro', 'S']:
+                        num_str = num_str.replace(suf, '')
+                    numere_existente_an.append(int(num_str))
+                except (IndexError, ValueError):
+                    continue
+                    
         max_numar_existent = max(numere_existente_an) if numere_existente_an else 0
-        
         limita_scanare = MAX_NUMERE_AN if an >= 2025 else min(max_numar_existent + 30, MAX_NUMERE_AN)
         
         for n in range(1, limita_scanare + 1):
-            nume_simplu = f"MO_PI_{an}_{n}.pdf"
-            nume_bis = f"MO_PI_{an}_{n}Bis.pdf"
-            
-            if nume_simplu not in fisiere_drive:
-                coada_descarcare.append({"an": an, "numar": str(n), "nume_pdf": nume_simplu, "tip": "simplu"})
+            for var in variante_sufixe:
+                numar_complet = f"{n}{var['sufix']}" if var["sufix"] else str(n)
+                nume_pdf = f"MO_PI_{an}_{numar_complet}.pdf"
                 
-            if nume_bis not in fisiere_drive:
-                coada_descarcare.append({"an": an, "numar": f"{n}Bis", "nume_pdf": nume_bis, "tip": "bis"})
+                if nume_pdf not in fisiere_drive:
+                    coada_descarcare.append({
+                        "an": an, 
+                        "numar": numar_complet, 
+                        "nume_pdf": nume_pdf, 
+                        "tip": var["tip"]
+                    })
 
     total_lipsa = len(coada_descarcare)
     if total_lipsa == 0:
@@ -152,7 +170,7 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
                             dimensiune_partiala = 0
                             continue
                             
-                        # Aici prindem cazul când fișierul nu există deloc!
+                        # Dacă fișierul nu există (404)
                         if response.status_code == 404:
                             era_404 = True
                             if item["tip"] == "simplu":
@@ -199,22 +217,19 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
             time.sleep(random.uniform(3.0, 6.0))
             
         elif era_404:
-            # IDEEA TA: Creăm fișier gol pentru a marca lipsa lui permanent în Drive
+            # Creare fișier "scut" de 0 bytes pentru oricare variantă inexistentă
             if an not in ani_finalizati:
                 print(f"ℹ️ {nume_pdf} -> Nu există (404). Generăm fișier de marcaj (0 bytes)...", flush=True)
                 if cale_temp.exists():
                     cale_temp.unlink()
                 
-                # Creăm fișierul gol local
                 with open(cale_locala, "wb") as f:
                     pass 
                 
-                # Îl urcăm în cloud ca să existe la următorul index
                 if incarca_in_drive(drive_service, cale_locala, GOOGLE_DRIVE_FOLDER_ID):
                     print(f"📝 Placeholder salvat în Drive pentru {nume_pdf}.", flush=True)
                 time.sleep(random.uniform(1.5, 3.0))
         else:
-            # Cazuri în care rețeaua a picat (nu e 404)
             if an not in ani_finalizati:
                 if cale_temp.exists():
                     cale_temp.unlink()
