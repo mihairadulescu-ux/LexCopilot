@@ -57,7 +57,63 @@ def incarca_in_drive(drive_service, cale_locala, folder_id):
     return False
 
 # ======================================================================
-# CORE CRAWLER MULTI-SUFIX (Bis, Tris, Quatro, S)
+# DESCARCARE SEGMENTATA (OCOLIRE LIMITARE 100MB)
+# ======================================================================
+def descarca_in_bucati_mari(url, cale_locala, cale_temp, total_bytes, timeout_config):
+    """
+    Descarcă un fișier uriaș împărțindu-l în segmente de câte 80MB (83,886,080 octeți),
+    pentru a evita deconectarea automată impusă de serverul Monitorului Oficial.
+    """
+    dimensiune_segment = 80 * 1024 * 1024  # 80 MB
+    print(f"🧩 Fișier uriaș detectat ({total_bytes // 1024 // 1024} MB). Aplicăm descărcarea segmentată în bucăți de 80MB...", flush=True)
+    
+    if cale_temp.exists():
+        cale_temp.unlink()
+        
+    for start_byte in range(0, total_bytes, dimensiune_segment):
+        end_byte = min(start_byte + dimensiune_segment - 1, total_bytes - 1)
+        print(f"   ↳ Cerem segmentul: {start_byte // 1024 // 1024}MB - {(end_byte + 1) // 1024 // 1024}MB...", end="", flush=True)
+        
+        incercari_segment = 0
+        segment_descarcat = False
+        
+        while incercari_segment < 3 and not segment_descarcat:
+            try:
+                time.sleep(random.uniform(3.0, 5.0))
+                headers = {
+                    "User-Agent": random.choice(USER_AGENTS),
+                    "Referer": "https://monitoruloficial.ro/e-monitor/",
+                    "Range": f"bytes={start_byte}-{end_byte}"
+                }
+                
+                with httpx.Client(headers=headers, timeout=timeout_config, follow_redirects=True) as client:
+                    response = client.get(url)
+                    response.raise_for_status()
+                    
+                    # Scriem segmentul la sfârșitul fișierului temporar
+                    with open(cale_temp, "ab") as f:
+                        f.write(response.content)
+                        
+                    segment_descarcat = True
+                    print(" OK!", flush=True)
+                    
+            except Exception as e:
+                incercari_segment += 1
+                print(f" Reîncercare segment ({incercari_segment}/3)...", flush=True)
+                time.sleep(15.0)
+                
+        if not segment_descarcat:
+            print(f"❌ Nu s-a putut descărca segmentul {start_byte}-{end_byte}.", flush=True)
+            if cale_temp.exists():
+                cale_temp.unlink()
+            return False
+            
+    # Dacă toate segmentele s-au lipit cu succes
+    cale_temp.replace(cale_locala)
+    return True
+
+# ======================================================================
+# CORE CRAWLER INTELIGENT MULTI-SUFIX
 # ======================================================================
 def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
     url_template = "https://monitoruloficial.ro/Monitorul-Oficial--PI--{numar}--{an}.html"
@@ -76,7 +132,6 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
     print("🧠 Pasul 2: Calculare diferențe și identificare fișiere lipsă...", flush=True)
     coada_descarcare = []
     
-    # Definirea variantelor pe care le căutăm
     variante_sufixe = [
         {"sufix": "", "tip": "simplu"},
         {"sufix": "Bis", "tip": "bis"},
@@ -91,7 +146,6 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
             if f.startswith(f"MO_PI_{an}_"):
                 try:
                     num_str = f.split('_')[3].split('.')[0]
-                    # Eliminăm sufixele cunoscute pentru a obține doar numărul curat
                     for suf in ['Bis', 'Tris', 'Quatro', 'S']:
                         num_str = num_str.replace(suf, '')
                     numere_existente_an.append(int(num_str))
@@ -156,35 +210,28 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
                     "Referer": "https://monitoruloficial.ro/e-monitor/"
                 }
                 
-                dimensiune_partiala = 0
-                if cale_temp.exists():
-                    dimensiune_partiala = cale_temp.stat().st_size
-                    if dimensiune_partiala > 0:
-                        headers["Range"] = f"bytes={dimensiune_partiala}-"
-                
                 with httpx.Client(headers=headers, timeout=timeout_config, follow_redirects=True) as client:
+                    # Facem un HEAD rapid înainte să vedem dimensiunea fișierului
+                    head_res = client.head(url)
+                    
+                    if head_res.status_code == 404:
+                        era_404 = True
+                        if item["tip"] == "simplu":
+                            erori_consecutive_an[an] = erori_consecutive_an.get(an, 0) + 1
+                            if erori_consecutive_an[an] >= 30:
+                                print(f"🏁 [Anulat inteligent] Anul {an} pare finalizat pe server (30 eșecuri consecutive). Sărim restul numerelor.", flush=True)
+                                ani_finalizati.add(an)
+                        break
+                    
+                    total_bytes = int(head_res.headers.get("Content-Length", 0))
+                    
+                    # Decizie inteligentă: dacă depășește 95 MB, folosim descărcarea segmentată
+                    if total_bytes > 95 * 1024 * 1024:
+                        descarcat_ok = descarca_in_bucati_mari(url, cale_locala, cale_temp, total_bytes, timeout_config)
+                        break
+                    
+                    # Dacă e un fișier normal (sub 95MB), îl descărcăm clasic dintr-o bucată
                     with client.stream("GET", url) as response:
-                        if response.status_code == 416:
-                            if cale_temp.exists():
-                                cale_temp.unlink()
-                            dimensiune_partiala = 0
-                            continue
-                            
-                        # Dacă fișierul nu există (404)
-                        if response.status_code == 404:
-                            era_404 = True
-                            if item["tip"] == "simplu":
-                                erori_consecutive_an[an] = erori_consecutive_an.get(an, 0) + 1
-                                if erori_consecutive_an[an] >= 30:
-                                    print(f"🏁 [Anulat inteligent] Anul {an} pare finalizat pe server (30 eșecuri consecutive). Sărim restul numerelor.", flush=True)
-                                    ani_finalizati.add(an)
-                            break
-                            
-                        if response.status_code in [500, 502, 503, 504]:
-                            incercari += 1
-                            time.sleep(20.0)
-                            continue
-                            
                         response.raise_for_status()
                         if "application/pdf" not in response.headers.get("Content-Type", ""):
                             break
@@ -192,11 +239,10 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
                         if item["tip"] == "simplu":
                             erori_consecutive_an[an] = 0
                         
-                        mod_scriere = "ab" if (response.status_code == 206 and dimensiune_partiala > 0) else "wb"
-                        if mod_scriere == "wb" and cale_temp.exists():
+                        if cale_temp.exists():
                             cale_temp.unlink()
                             
-                        with open(cale_temp, mod_scriere) as f:
+                        with open(cale_temp, "wb") as f:
                             for chunk in response.iter_bytes(chunk_size=16384):
                                 f.write(chunk)
                                 
@@ -217,7 +263,6 @@ def descarca_monitoare_precalculat(an_start=2000, an_stop=2026):
             time.sleep(random.uniform(3.0, 6.0))
             
         elif era_404:
-            # Creare fișier "scut" de 0 bytes pentru oricare variantă inexistentă
             if an not in ani_finalizati:
                 print(f"ℹ️ {nume_pdf} -> Nu există (404). Generăm fișier de marcaj (0 bytes)...", flush=True)
                 if cale_temp.exists():
