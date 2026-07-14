@@ -334,12 +334,24 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                 if cale_temp.exists():
                     cale_temp.unlink()
                 print(f"⏭️ [Ocolit protejat] Fișierul SIMPLU {nume_pdf} a fost ocolit pentru siguranță.", flush=True)
-                fisiere_esuate_protejate.append(nume_pdf)
+                fisiere_esuate_protejate.append({"nume": nume_pdf, "url": url})
 
     if fisiere_esuate_protejate:
         print("\n⚠️ Rularea s-a încheiat. Următoarele fișiere SIMPLU au eșuat temporar și vor fi reîncercate la rularea următoare:", flush=True)
         for f in fisiere_esuate_protejate:
-            print(f"  - {f}", flush=True)
+            print(f"  - {f['nume']}", flush=True)
+            
+        # 📂 SCRIEM AUTOMAT ÎN FIȘIER EXTERN PENTRU DESCĂRCARE MANUALĂ
+        cale_fisier_manual = Path("liste_descarcare_manuala.txt")
+        try:
+            with open(cale_fisier_manual, "w", encoding="utf-8") as f_manual:
+                f_manual.write("# FIȘIERE DE DESCĂRCAT MANUAL ÎN BROWSER\n")
+                f_manual.write("# Copiază linkul în browser, descarcă PDF-ul și denumește-l exact ca în stânga\n\n")
+                for f in fisiere_esuate_protejate:
+                    f_manual.write(f"{f['nume']} -> {f['url']}\n")
+            print(f"\n📝 Am generat fișierul '{cale_fisier_manual}' cu toate link-urile directe pentru descărcare manuală rapidă!", flush=True)
+        except Exception as e:
+            print(f"⚠️ Nu am putut genera fișierul de descărcare manuală: {e}", flush=True)
     else:
         print("\n🎉 Rularea completă s-a terminat cu succes!", flush=True)
 
