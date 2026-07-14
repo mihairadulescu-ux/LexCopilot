@@ -4,6 +4,8 @@ import re
 import random
 import datetime
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from lxml import etree
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -22,12 +24,18 @@ WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 START_YEAR = 2020
 END_YEAR = 2023
 
+# Numărul de thread-uri paralele (3-4 este optim pentru a nu fi blocați de Just.ro)
+MAX_WORKERS = 3 
+
+# Lock pentru thread-safety la nivel de rețea/Drive
+SESSION_LOCK = threading.Lock()
+DRIVE_LOCK = threading.Lock()
+
 # Variabile globale pentru persistența token-ului
 _GLOBAL_SOAP_CLIENT = None
 _GLOBAL_SOAP_HISTORY = None
 _GLOBAL_TOKEN_KEY = None
 
-# METRICI DE TELEMETRIE PENTRU FIȘA MEDICALĂ A TOKEN-ULUI
 _TOKEN_STATS = {
     "current_key": None,
     "created_at": None,
@@ -98,24 +106,25 @@ def pre_scan_entire_drive(service):
 
 
 def upload_to_drive(service, filename, content_bytes):
-    try:
-        file_metadata = {"name": filename, "parents": [GOOGLE_DRIVE_FOLDER_ID]}
-        media = MediaInMemoryUpload(content_bytes, mimetype="application/xml", resumable=True)
-        file = service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields="id",
-            supportsAllDrives=True,
-        ).execute()
-        print(f"✅ Salvat în Drive: {filename} (ID: {file.get('id')})")
-        return True
-    except Exception as e:
-        print(f"❌ Eroare la upload în Drive pentru {filename}: {e}")
-        return False
+    # Protejăm upload-ul simultan din multiple thread-uri
+    with DRIVE_LOCK:
+        try:
+            file_metadata = {"name": filename, "parents": [GOOGLE_DRIVE_FOLDER_ID]}
+            media = MediaInMemoryUpload(content_bytes, mimetype="application/xml", resumable=True)
+            file = service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields="id",
+                supportsAllDrives=True,
+            ).execute()
+            print(f"✅ Salvat în Drive: {filename} (ID: {file.get('id')})")
+            return True
+        except Exception as e:
+            print(f"❌ Eroare la upload în Drive pentru {filename}: {e}")
+            return False
 
 
 def print_token_health_card():
-    """Printează fișa medicală a token-ului retras din activitate."""
     global _TOKEN_STATS
     if not _TOKEN_STATS["current_key"]:
         return
@@ -130,168 +139,197 @@ def print_token_health_card():
     print(f"📦 Pagini procesate/salvate cu succes: {_TOKEN_STATS['pages_processed']}")
     print("═"*60 + "\n")
     
-    # Resetăm contorul pentru următorul token
     _TOKEN_STATS["pages_processed"] = 0
 
 
 def get_or_refresh_soap_session(force_refresh=False):
     global _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY, _TOKEN_STATS
     
-    if _GLOBAL_SOAP_CLIENT and _GLOBAL_TOKEN_KEY and not force_refresh:
-        return _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY
+    # Folosim Lock pentru ca thread-urile să nu ceară token-uri noi simultan
+    with SESSION_LOCK:
+        if _GLOBAL_SOAP_CLIENT and _GLOBAL_TOKEN_KEY and not force_refresh:
+            return _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY
 
-    if force_refresh:
-        # Înainte de a-l distruge, îi facem raportul medical celui vechi
-        print_token_health_card()
-        print("🔄 [TOKEN] ⚠️ Sesizare expirare sau refresh forțat! Se cere token nou...")
-    else:
-        print("🔌 [TOKEN] Inițializare sesiune la pornire robot...")
+        if force_refresh:
+            print_token_health_card()
+            print("🔄 [TOKEN] ⚠️ Sesizare expirare sau refresh forțat! Se cere token nou...")
+        else:
+            print("🔌 [TOKEN] Inițializare sesiune la pornire robot...")
 
-    history = HistoryPlugin()
-    transport = Transport(timeout=90, operation_timeout=120)
+        history = HistoryPlugin()
+        transport = Transport(timeout=90, operation_timeout=120)
+        
+        for attempt in range(1, 6):
+            try:
+                client = Client(WSDL_URL, transport=transport, plugins=[history])
+                token = client.service.GetToken()
+                if token:
+                    _GLOBAL_SOAP_CLIENT = client
+                    _GLOBAL_SOAP_HISTORY = history
+                    _GLOBAL_TOKEN_KEY = token
+                    
+                    _TOKEN_STATS["current_key"] = token
+                    _TOKEN_STATS["created_at"] = datetime.datetime.now()
+                    
+                    print(f"🔑 [TOKEN] Token NOU alocat de Just.ro: {token}")
+                    return _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY
+            except Exception as e:
+                wait_time = 20 * attempt
+                print(f"🚨 [GetToken Err] Eroare generare token (Tentativa {attempt}/5). Reîncercăm în {wait_time}s... Eroare: {e}")
+                time.sleep(wait_time)
+                
+        raise ConnectionError("💥 Serverul Just.ro refuză complet generarea de tokenuri noi.")
+
+
+def download_single_page_worker(drive_service, composite_type_name, target_year, page, is_gap_repair):
+    """
+    Funcție executată în paralel de thread-uri. 
+    Descarcă o pagină specifică și o încarcă în Drive dacă conține date.
+    """
+    prefix_log = "[REPARARE]" if is_gap_repair else "[AVANS]"
+    max_retries = 5
     
-    for attempt in range(1, 6):
+    for attempt in range(0, max_retries + 1):
         try:
-            client = Client(WSDL_URL, transport=transport, plugins=[history])
-            token = client.service.GetToken()
-            if token:
-                _GLOBAL_SOAP_CLIENT = client
-                _GLOBAL_SOAP_HISTORY = history
-                _GLOBAL_TOKEN_KEY = token
-                
-                # Înregistrăm noul pacient în tabelul de telemetrie
-                _TOKEN_STATS["current_key"] = token
-                _TOKEN_STATS["created_at"] = datetime.datetime.now()
-                
-                print(f"🔑 [TOKEN] Token NOU alocat de Just.ro: {token}")
-                return _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY
-        except Exception as e:
-            wait_time = 20 * attempt
-            print(f"🚨 [GetToken Err] Eroare generare token (Tentativa {attempt}/5). Reîncercăm în {wait_time}s... Eroare: {e}")
-            time.sleep(wait_time)
+            client, history, token_key = get_or_refresh_soap_session(force_refresh=False)
+
+            # Mică deviație de timp între thread-uri ca să nu lovească serverul la aceeași milisecundă
+            time.sleep(random.uniform(0.1, 0.8))
+
+            composite_type = client.get_type(composite_type_name)
+            search_model = composite_type(
+                NumarPagina=page,
+                RezultatePagina=50,
+                SearchAn=str(target_year),
+            )
+
+            client.service.Search(SearchModel=search_model, tokenKey=token_key)
             
-    raise ConnectionError("💥 Serverul Just.ro refuză complet generarea de tokenuri noi.")
+            # Preluare date primite
+            last_response_envelope = history.last_received["envelope"]
+            raw_xml_bytes = etree.tostring(last_response_envelope, pretty_print=True, encoding="utf-8")
+            raw_xml_string = raw_xml_bytes.decode("utf-8")
+            
+            # Verificăm dacă pagina este goală
+            if "<a:Legi>" not in raw_xml_string and "<Legi>" not in raw_xml_string:
+                return {"page": page, "status": "empty", "bytes": None}
+                
+            # Salvare în Drive
+            filename = f"brut_legislatie_{target_year}_pag{page}.xml"
+            success = upload_to_drive(service=drive_service, filename=filename, content_bytes=raw_xml_bytes)
+            
+            if success:
+                with SESSION_LOCK:
+                    _TOKEN_STATS["pages_processed"] += 1
+                return {"page": page, "status": "success", "bytes": raw_xml_bytes}
+            else:
+                return {"page": page, "status": "upload_failed", "bytes": None}
+
+        except Exception as soap_error:
+            error_str = str(soap_error).lower()
+            print(f"⚠️ [Thread Err] Pagina {page} (An {target_year}): {soap_error}")
+            
+            if "token" in error_str or "session" in error_str or "expired" in error_str:
+                get_or_refresh_soap_session(force_refresh=True)
+            
+            # Backoff exponențial la eroare
+            if attempt < max_retries:
+                time.sleep(min(60.0, 5.0 * (2 ** attempt)) + random.uniform(1.0, 3.0))
+                
+    return {"page": page, "status": "failed", "bytes": None}
 
 
 def download_year(drive_service, composite_type_name, target_year, downloaded_pages):
-    global _TOKEN_STATS
-    print(f"\n{'='*70}\n📅 AN INDUSTRIAL: {target_year}\n{'='*70}")
+    print(f"\n{'='*70}\n📅 AN INDUSTRIAL: {target_year} | MULTITHREADING ACTIV (Workers: {MAX_WORKERS})\n{'='*70}")
     
-    pages_to_process = []
+    gaps = []
     if downloaded_pages:
         max_page = max(downloaded_pages)
         print(f"📦 {len(downloaded_pages)} pagini deja în Drive pentru {target_year}. (Ultima pagină: {max_page})")
         all_expected_pages = set(range(1, max_page + 1))
         gaps = sorted(list(all_expected_pages - downloaded_pages))
-        if gaps:
-            print(f"🛠️ Detectat {len(gaps)} lacune în istoric: {gaps}. Le reparăm.")
-            pages_to_process.extend(gaps)
         next_new_page = max_page + 1
     else:
         print(f"🆕 An gol detectat. Pornim de la pagina 1.")
         next_new_page = 1
 
-    results_per_page = 50
     files_saved = 0
-    consecutive_empty_pages = 0
 
-    while True:
-        # 1. Determinăm pagina curentă pe care o evaluăm
-        if pages_to_process:
-            current_page = pages_to_process[0]  # Doar ne uităm la ea, o scoatem din listă doar dacă o procesăm real
-            is_gap_repair = True
-        else:
-            current_page = next_new_page
-            is_gap_repair = False
-
-        # --- OPTIMIZARE EXTREMĂ: Skip instantaneu fără sleep/pauze de rețea ---
-        if current_page in downloaded_pages and not is_gap_repair:
-            print(f"☁️ [Există în Drive] brut_legislatie_{target_year}_pag{current_page}.xml", flush=True)
-            next_new_page += 1
-            continue  # Trecem instant la următoarea pagină, fără delay-uri!
-
-        # Dacă am trecut de filtrul de mai sus, înseamnă că pagină NU este în Drive și trebuie descărcată.
-        # Acum o putem elimina din coada de reparare gaps.
-        if is_gap_repair:
-            pages_to_process.pop(0)
-        else:
-            next_new_page += 1
-
-        prefix_log = "[REPARARE]" if is_gap_repair else "[AVANS]"
-        retry_success = False
-        max_retries = 5
+    # Pornim executorul de thread-uri
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         
-        for attempt in range(0, max_retries + 1):
-            try:
-                # Accesăm serverul SOAP Just.ro doar pentru fișiere cu adevărat noi!
-                client, history, token_key = get_or_refresh_soap_session(force_refresh=False)
+        # ----------------- FAZA 1: REPARARE GAPS (PARALELIZATĂ COMPLET) -----------------
+        if gaps:
+            print(f"🛠️ Reparăm {len(gaps)} lacune în paralel...")
+            futures = {
+                executor.submit(download_single_page_worker, drive_service, composite_type_name, target_year, gap, True): gap 
+                for gap in gaps
+            }
+            for future in as_completed(futures):
+                res = future.result()
+                if res["status"] == "success":
+                    files_saved += 1
+            print("✅ Faza de reparare a lacunelor s-a finalizat.")
 
-                print(f"--- {prefix_log} An {target_year} / Pagina {current_page} | Token activ: {token_key[:12]}... (Încercare {attempt}/{max_retries}) ---")
+        # ----------------- FAZA 2: AVANS (PARALELIZARE ÎN PACHETE) -----------------
+        consecutive_empty_pages = 0
+        
+        while True:
+            # Planificăm un pachet de pagini de dimensiunea MAX_WORKERS (ex: [101, 102, 103])
+            pachet_pagini = []
+            for i in range(MAX_WORKERS):
+                pag = next_new_page
+                # Verificăm instant din DB dacă cumva o avem deja (foarte rar în faza de avans, dar util ca siguranță)
+                while pag in downloaded_pages:
+                    print(f"☁️ [Există în Drive] brut_legislatie_{target_year}_pag{pag}.xml", flush=True)
+                    pag += 1
+                pachet_pagini.append(pag)
+                next_new_page = pag + 1
 
-                if attempt > 0:
-                    base_wait = 10.0
-                    max_wait = 180.0
-                    wait_time = min(max_wait, base_wait * (2 ** attempt)) + random.uniform(0.0, 5.0)
-                    print(f"⏳ [Backoff] Reîncercare în {wait_time:.2f} secunde...")
-                    time.sleep(wait_time)
+            # Trimitem pachetul în execuție paralelă
+            print(f"🚀 Se descarcă pachetul de pagini: {pachet_pagini}...", flush=True)
+            futures = {
+                executor.submit(download_single_page_worker, drive_service, composite_type_name, target_year, pag, False): pag
+                for pag in pachet_pagini
+            }
+            
+            # Colectăm rezultatele ordonate după numărul paginii
+            rezultate_pachet = {}
+            for future in as_completed(futures):
+                res = future.result()
+                rezultate_pachet[res["page"]] = res
 
-                composite_type = client.get_type(composite_type_name)
-                search_model = composite_type(
-                    NumarPagina=current_page,
-                    RezultatePagina=results_per_page,
-                    SearchAn=str(target_year),
-                )
+            # Procesăm rezultatele în ordine crescătoare a paginilor pentru a detecta corect finalul anului
+            an_terminat = False
+            for pag in sorted(pachet_pagini):
+                res = rezultate_pachet[pag]
+                
+                if res["status"] == "success":
+                    files_saved += 1
+                    consecutive_empty_pages = 0
+                elif res["status"] == "empty":
+                    consecutive_empty_pages += 1
+                    print(f"ℹ️ Pagina {pag} este goală. (Contor goluri: {consecutive_empty_pages}/2)")
+                    if consecutive_empty_pages >= 2:
+                        print(f"🏁 [Sfârșit de An] Am detectat limitele anului {target_year} la pagina {pag}.")
+                        an_terminat = True
+                        break
+                else:
+                    # Dacă a eșuat din alte motive, nu resetăm neapărat contorul, dar logăm
+                    print(f"⚠️ Pagina {pag} a finalizat cu status: {res['status']}")
 
-                client.service.Search(SearchModel=search_model, tokenKey=token_key)
-                retry_success = True
+            # Pauză de protecție la finalul fiecărui pachet descărcat
+            time.sleep(random.uniform(2.5, 4.0))
+
+            if an_terminat:
                 break
-            except Exception as soap_error:
-                error_str = str(soap_error).lower()
-                print(f"⚠️ [Search Err] Eroare la Search() pe pagina {current_page}: {soap_error}")
-                
-                if "504" in error_str or "502" in error_str or "timed out" in error_str or "timeout" in error_str:
-                    print("🌐 [Diagnostic] Eroare infrastructurală (Nginx/Timeout). Tokenul rămâne intact.")
-                elif "token" in error_str or "session" in error_str or "expired" in error_str:
-                    print("🔑 [Diagnostic] Confirmare expirare token! Forțăm reîmprospătarea...")
-                    get_or_refresh_soap_session(force_refresh=True)
-
-        if not retry_success:
-            print(f"🛑 Pagina {current_page} ({target_year}) s-a blocat definitiv. O sărim.")
-            if not is_gap_repair:
-                consecutive_empty_pages = 0
-            continue
-
-        last_response_envelope = history.last_received["envelope"]
-        raw_xml_bytes = etree.tostring(last_response_envelope, pretty_print=True, encoding="utf-8")
-        raw_xml_string = raw_xml_bytes.decode("utf-8")
-
-        if "<a:Legi>" not in raw_xml_string and "<Legi>" not in raw_xml_string:
-            if not is_gap_repair:
-                consecutive_empty_pages += 1
-                if consecutive_empty_pages >= 2:
-                    print(f"✅ Anul {target_year} terminat în siguranță!")
-                    break
-            else:
-                print(f"⚠️ Pagina {current_page} nu a întors date.")
-        else:
-            if not is_gap_repair:
-                consecutive_empty_pages = 0
-                
-            filename = f"brut_legislatie_{target_year}_pag{current_page}.xml"
-            success = upload_to_drive(service=drive_service, filename=filename, content_bytes=raw_xml_bytes)
-            if success:
-                files_saved += 1
-                _TOKEN_STATS["pages_processed"] += 1
-
-        # Această pauză protejează serverul Just.ro și se execută DOAR când am făcut descărcare reală!
-        time.sleep(random.uniform(3.0, 5.0))
 
     return files_saved
 
 
 def download_laws_local():
     try:
-        print(f"🚀 Pornire motor industrial optimizat de producție...")
+        print(f"🚀 Pornire motor industrial optimizat de producție (MULTITHREADED)...")
         drive_service = get_drive_service()
         global_drive_db = pre_scan_entire_drive(drive_service)
         
@@ -309,7 +347,6 @@ def download_laws_local():
                 print(f"💥 Problemă izolată pe anul {year}: {year_error}.")
                 time.sleep(30)
 
-        # La final de tot, printăm stadiul ultimului token folosit
         print_token_health_card()
         print(f"\n🎉🎉 MOTOARE OPRITE SUCCESIV. Total fișiere noi adăugate: {total_files_all_years}")
 
