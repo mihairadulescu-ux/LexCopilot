@@ -57,11 +57,12 @@ def incarca_in_drive(drive_service, cale_locala, folder_id):
     return False
 
 # ======================================================================
-# DESCARCARE SEGMENTATA (OCOLIRE LIMITARE 100MB)
+# DESCARCARE SEGMENTATA - OPTIMIZATA ULTRA-SIGUR LA 20MB
 # ======================================================================
 def descarca_in_bucati_mari(url, cale_locala, cale_temp, total_bytes, timeout_config):
-    dimensiune_segment = 80 * 1024 * 1024  # 80 MB
-    print(f"🧩 Fișier uriaș detectat ({total_bytes // 1024 // 1024} MB). Aplicăm descărcarea segmentată în bucăți de 80MB...", flush=True)
+    # MODIFICARE: Segmente de 20 MB pentru stabilitate maximă pe conexiuni slabe/instabile
+    dimensiune_segment = 20 * 1024 * 1024  # 20 MB
+    print(f"🧩 Fișier uriaș detectat ({total_bytes // 1024 // 1024} MB). Aplicăm descărcarea segmentată în bucăți ultra-sigure de 20MB...", flush=True)
     
     if cale_temp.exists():
         cale_temp.unlink()
@@ -182,7 +183,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
         numar_cerut = item["numar"]
         nume_pdf = item["nume_pdf"]
         
-        # MODIFICARE CHEIE: Atât "simplu" cât și "bis" sunt protejate (fără dummy la erori de rețea)
         este_protejat = item["tip"] in ["simplu", "bis"]
         este_special = item["tip"] not in ["simplu", "bis"]
         
@@ -231,7 +231,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                         response.raise_for_status()
                         
                         if "application/pdf" not in response.headers.get("Content-Type", ""):
-                            # Dacă e fișier protejat (simplu sau Bis), NU îl forțăm ca dummy, ci doar ieșim pentru a fi reîncercat tura viitoare
                             if not este_protejat:
                                 print(f"💡 Serverul a trimis HTML în loc de PDF la fișier special. Marcăm ca absent.", flush=True)
                                 creeaza_fantomă = True
@@ -286,7 +285,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                     print(f"📝 Placeholder salvat în Drive.", flush=True)
                 time.sleep(random.uniform(1.0, 2.0))
         else:
-            # Aici intră atât fișierele simple cât și cele Bis care au eșuat din cauze de rețea sau conținut HTML
             if an not in ani_finalizati:
                 if cale_temp.exists():
                     cale_temp.unlink()
