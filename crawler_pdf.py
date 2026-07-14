@@ -93,8 +93,9 @@ def descarca_monitoare_pdf(an_start=2000, an_stop=2026):
     director_temp = Path("./temp_pdf_download")
     director_temp.mkdir(exist_ok=True)
     
-    # Timeout mărit pentru a permite descărcări lente și sigure
+    # Parametri globali de rețea și încercări
     timeout_config = httpx.Timeout(45.0, connect=15.0)
+    max_incercari_conexiune = 3
     
     for an in range(an_start, an_stop + 1):
         print(f"\n=================== PROCESĂM ANUL {an} ===================", flush=True)
@@ -128,7 +129,6 @@ def descarca_monitoare_pdf(an_start=2000, an_stop=2026):
                 # Încercăm descărcarea numărului de bază cu retry robust
                 descarcat_cu_succes = False
                 incercari_conexiune = 0
-                max_incercari_conexiune = 3
                 
                 while incercari_conexiune < max_incercari_conexiune:
                     try:
