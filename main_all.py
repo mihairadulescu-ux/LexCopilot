@@ -1,165 +1,140 @@
-import os
-import io
-import json
+mport os
 import time
-import subprocess
-import sys
+import requests
+import xml.etree.ElementTree as ET
 
-# --- AUTO-INSTALARE SUDS DACĂ LIPSEȘTE ---
-try:
-    from suds.client import Client
-except ImportError:
-    print("[📦 System] Biblioteca 'suds-py3' nu a fost găsită. O instalăm acum...", flush=True)
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "suds-py3"])
-        from suds.client import Client
-        print("[📦 System] 'suds-py3' a fost instalată cu succes!", flush=True)
-    except Exception as e:
-        print(f"❌ Nu s-a putut instala automat 'suds-py3': {e}", flush=True)
-        sys.exit(1)
-# ------------------------------------------------------------
+# --- CODURI CULORI ANSI PENTRU CONSOLĂ ---
+VERDE = "\033[92m"
+GALBEN = "\033[93m"
+ROSU = "\033[91m"
+RESET = "\033[0m"
 
-# Bibliotecile Google Client API
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
+# --- CONFIGURARE CREDENȚIALE ȘI URL-URI ---
+WSDL_URL = "http://legislatie.just.ro/api/LegislatieService.svc"
+USER_NAME = "utilizatorul_tau"
+PASSWORD = "parola_ta"
 
-# ==================== CONFIGURĂRI PARAMETRI ====================
-URL_API = 'http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl'
-GOOGLE_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
+CURRENT_TOKEN = None
 
-AN_START = 2000
-AN_STOP = 2019
-# ===============================================================
-
-_drive_service = None
-
-def obtine_serviciu_drive():
-    """Inițializează serviciul Google Drive (Secvențial)."""
-    global _drive_service
-    if _drive_service is not None:
-        return _drive_service
-
-    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-    if not sa_json:
-        raise ValueError("❌ Lipseste variabila de mediu GOOGLE_SERVICE_ACCOUNT_JSON!")
+def obtine_token_nou():
+    """Apelează serviciul de autentificare pentru a genera un token proaspăt."""
+    global CURRENT_TOKEN
+    print(f"{GALBEN}[-] Se solicită un token nou de la server...{RESET}")
     
-    creds_info = json.loads(sa_json)
-    creds = service_account.Credentials.from_service_account_info(
-        creds_info, 
-        scopes=["https://www.googleapis.com/auth/drive"]
-    )
+    headers = {
+        "Content-Type": "text/xml; charset=utf-8",
+        "SOAPAction": "http://tempuri.org/ILegislatieService/Login"
+    }
     
-    _drive_service = build('drive', 'v3', credentials=creds, cache_discovery=False)
-    return _drive_service
-
-def incarca_in_google_drive(continut_xml, nume_fisier):
-    """Încarcă fișierul XML în Shared Drive-ul Corporate."""
+    soap_request = f"""<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tem="http://tempuri.org/">
+       <soapenv:Header/>
+       <soapenv:Body>
+          <tem:Login>
+             <tem:username>{USER_NAME}</tem:username>
+             <tem:password>{PASSWORD}</tem:password>
+          </tem:Login>
+       </soapenv:Body>
+    </soapenv:Envelope>"""
+    
     try:
-        service = obtine_serviciu_drive()
-        
-        metadata_fisier = {
-            'name': nume_fisier,
-            'parents': [GOOGLE_FOLDER_ID]
-        }
-        
-        fh = io.BytesIO(continut_xml.encode('utf-8'))
-        media = MediaIoBaseUpload(fh, mimetype='text/xml', resumable=True)
-        
-        file = service.files().create(
-            body=metadata_fisier,
-            media_body=media,
-            fields='id',
-            supportsAllDrives=True
-        ).execute()
-        
-        return file.get('id')
+        response = requests.post(WSDL_URL, data=soap_request, headers=headers, timeout=30)
+        if response.status_code == 200:
+            root = ET.fromstring(response.content)
+            namespaces = {'s': 'http://schemas.xmlsoap.org/soap/envelope/', 't': 'http://tempuri.org/'}
+            token_element = root.find('.//t:LoginResult', namespaces)
+            if token_element is not None and token_element.text:
+                CURRENT_TOKEN = token_element.text
+                print(f"{VERDE}[+] Token nou obținut cu succes: {CURRENT_TOKEN[:15]}...{RESET}")
+                return CURRENT_TOKEN
+        print(f"{ROSU}[!] Eroare la obținerea token-ului. Cod status: {response.status_code}{RESET}")
     except Exception as e:
-        print(f"❌ Eroare Google Drive la încărcarea {nume_fisier}: {e}", flush=True)
+        print(f"{ROSU}[!] Excepție la generarea token-ului: {e}{RESET}")
+    
+    return None
+
+
+def executa_cerere_search(an, pagina):
+    """Trimite cererea XML de căutare pentru un anumit an și pagină."""
+    global CURRENT_TOKEN
+    
+    if not CURRENT_TOKEN:
+        obtine_token_nou()
+        
+    headers = {
+        "Content-Type": "text/xml; charset=utf-8",
+        "SOAPAction": "http://tempuri.org/ILegislatieService/Search"
+    }
+    
+    soap_request = f"""<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns0="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="http://schemas.microsoft.com/2003/10/Serialization/Arrays" xmlns:ns2="http://tempuri.org/">
+       <SOAP-ENV:Header/>
+       <ns0:Body>
+          <ns2:Search>
+             <ns2:SearchModel>
+                <ns1:NumarPagina>{pagina}</ns1:NumarPagina>
+                <ns1:RezultatePagina>100</ns1:RezultatePagina>
+                <ns1:SearchAn>{an}</ns1:SearchAn>
+             </ns2:SearchModel>
+             <ns2:tokenKey>{CURRENT_TOKEN}</ns2:tokenKey>
+          </ns2:Search>
+       </ns0:Body>
+    </SOAP-ENV:Envelope>"""
+
+    try:
+        response = requests.post(WSDL_URL, data=soap_request, headers=headers, timeout=30)
+        return response
+    except Exception as e:
+        print(f"{ROSU}[!] Eroare de conexiune la cerere: {e}{RESET}")
         return None
 
-def descarca_pagina_direct(client_soap, token, an, pagina):
-    """
-    Trimite cererea SOAP și returnează direct rezultatul apelului.
-    """
-    search_model = client_soap.factory.create('SearchModel')
-    search_model.NumarPagina = pagina
-    search_model.RezultatePagina = 50
-    search_model.SearchAn = an
-    
-    # Executăm apelul SOAP și salvăm direct rezultatul
-    rezultat = client_soap.service.Search(search_model, token)
-    return rezultat
 
-def crawleaza_an_complet(client_soap, token, an):
-    """Parcurge pagină cu pagină pentru un singur an, complet secvențial."""
-    pagina = 0
-    while True:
-        print(f"📥 [An {an}][Pagina {pagina}] Se descarcă de pe Just...", flush=True)
-        
-        try:
-            raspuns = descarca_pagina_direct(client_soap, token, an, pagina)
-        except Exception as e:
-            print(f"⚠️ [An {an}][Pagina {pagina}] Eroare: {e}. Reîncercăm peste 5 secunde...", flush=True)
-            time.sleep(5)
+def ruleaza_scraping(an_start, an_end):
+    global CURRENT_TOKEN
+    
+    for an in range(an_start, an_end + 1):
+        pagina = 0
+        while True:
+            print(f"[*] Se descarcă: Anul {an}, Pagina {pagina}...")
+            response = executa_cerere_search(an, pagina)
+            
+            if response is None:
+                print(f"{ROSU}[!] Server inaccesibil. Reîncercăm în 10 secunde...{RESET}")
+                time.sleep(10)
+                continue
+                
+            response_text = response.text
+            
+            # Verificare expirare token
+            if "TOKEN INVALID" in response_text or "REGENERATI TOKEN" in response_text:
+                print(f"{GALBEN}[!] Token expirat detectat! Pornim procedura de re-autentificare...{RESET}")
+                obtine_token_nou()
+                continue 
+                
+            if response.status_code != 200:
+                print(f"{ROSU}[!] Eroare HTTP {response.status_code}. Reîncercăm în 5 secunde...{RESET}")
+                time.sleep(5)
+                continue
+
+            # --- SALVARE CU NAMING BRUT ORIGINAL ---
+            nume_fisier = f"response_raw_{an}_pag_{pagina}.xml"
+            
             try:
-                raspuns = descarca_pagina_direct(client_soap, token, an, pagina)
-            except Exception:
-                print(f"❌ [An {an}][Pagina {pagina}] Eșec definitiv la descărcare.", flush=True)
+                with open(nume_fisier, "w", encoding="utf-8") as f:
+                    f.write(response_text)
+                # Mesajul de succes este acum complet verde
+                print(f"{VERDE}[+] Fișier salvat cu succes: {nume_fisier}{RESET}")
+            except Exception as e:
+                print(f"{ROSU}[!] Eroare la scrierea fișierului {nume_fisier}: {e}{RESET}")
+            
+            # Condiție oprire paginare pe anul curent
+            if "<a:TipAct>" not in response_text and "SearchResult" in response_text:
+                print(f"[*] Am terminat toate paginile pentru anul {an}.")
                 break
+                
+            pagina += 1
+            time.sleep(1)
 
-        # Verificăm dacă structura de date conține legi (folosind structura nativă Python)
-        if not raspuns or not hasattr(raspuns, 'Legi') or not raspuns.Legi:
-            print(f"🛑 [An {an}] S-au terminat paginile la indexul {pagina}.", flush=True)
-            break
-            
-        # Extragem XML-ul brut (SOAP Envelope complet) direct din tranzacția HTTP
-        xml_text_brut = str(client_soap.last_received())
-        
-        nume_fisier = f"an_{an}_pag_{pagina}.xml"
-        
-        # Urcăm fișierul XML brut în Drive
-        drive_file_id = incarca_in_google_drive(xml_text_brut, nume_fisier)
-        
-        if drive_file_id:
-            numar_legi = len(raspuns.Legi)
-            print(f"☁️ [An {an}][Pagina {pagina}] Salvat cu succes! Conține {numar_legi} legi. ID Drive: {drive_file_id[:10]}...", flush=True)
-        else:
-            print(f"❌ [An {an}][Pagina {pagina}] Eșec la salvarea în Shared Drive.", flush=True)
-            
-        pagina += 1
-        time.sleep(0.5)
-
-def porneste_crawler():
-    try:
-        print("[☁️] Se inițializează conexiunea cu Google Drive...", flush=True)
-        obtine_serviciu_drive()
-        print("[☁️] Conexiune la Shared Drive realizată cu succes!", flush=True)
-    except Exception as e:
-        print(f"❌ Conexiunea la Google Drive a eșuat: {e}", flush=True)
-        return
-
-    try:
-        print("[🔑 Just] Inițializăm clientul SOAP...", flush=True)
-        client_soap = Client(URL_API, cache=None)
-        
-        print("[🔑 Just] Solicităm tokenul de sesiune...", flush=True)
-        token = client_soap.service.GetToken()
-        print(f"[🔑 Just] Token primit cu succes: {token[:15]}...", flush=True)
-    except Exception as e:
-        print(f"❌ Nu s-a putut conecta la serviciul Just: {e}", flush=True)
-        return
-        
-    ani_de_procesat = list(range(AN_START, AN_STOP + 1))
-    
-    print(f"📅 Interval ani selectat: {AN_START} - {AN_STOP}", flush=True)
-    print("🚀 Pornim descărcarea secvențială...", flush=True)
-    
-    for an in ani_de_procesat:
-        crawleaza_an_complet(client_soap, token, an)
-        time.sleep(0.5)
-
-    print("✅ Descărcarea s-a încheiat cu succes pentru toți anii!", flush=True)
 
 if __name__ == "__main__":
-    porneste_crawler()
+   
+    
+    ruleaza_scraping(2000, 2026)
