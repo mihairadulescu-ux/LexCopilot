@@ -86,19 +86,28 @@ def adu_fisiere_existente_in_drive(drive_service, folder_id):
 
 def incarca_sau_actualizeaza_in_drive(drive_service, cale_locala, folder_id, file_id_existent=None):
     nume_fisier = cale_locala.name
-    media = MediaFileUpload(str(cale_locala), mimetype='application/pdf', resumable=True)
+    # Folosim chunksize pentru a asigura un upload stabil de tip resumable pentru fișiere mari
+    media = MediaFileUpload(str(cale_locala), mimetype='application/pdf', chunksize=1024*1024*5, resumable=True)
     try:
         if file_id_existent:
-            file_drive = drive_service.files().update(fileId=file_id_existent, media_body=media, supportsAllDrives=True).execute()
+            request = drive_service.files().update(fileId=file_id_existent, media_body=media, supportsAllDrives=True)
         else:
             metadata = {'name': nume_fisier, 'parents': [folder_id]}
-            file_drive = drive_service.files().create(body=metadata, media_body=media, fields='id', supportsAllDrives=True).execute()
+            request = drive_service.files().create(body=metadata, media_body=media, fields='id', supportsAllDrives=True)
             
-        if file_drive.get('id'):
+        # Încărcare controlată în bucăți pentru a rezista la deconectări
+        response = None
+        while response is None:
+            status, response = request.next_chunk()
+            if status:
+                print(f"   ↳ [Drive Upload] {int(status.progress() * 100)}% din {nume_fisier} trimis...", flush=True)
+                
+        if response.get('id'):
             cale_locala.unlink()
             return True
     except Exception as e:
         print(f"❌ [Drive Err] Eroare scriere/update {nume_fisier}: {e}", flush=True)
+        # Dacă fișierul local încă există, îl păstrăm pentru încercări viitoare
     return False
 
 # ======================================================================
@@ -146,13 +155,13 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
         max_numar_existent = max(numere_existente_an) if numere_existente_an else 0
         
         if an < AN_CURENT_SISTEM:
-            limita_scanare = MAX_NUMERE_AN
+            limata_scanare = MAX_NUMERE_AN
         else:
-            limita_scanare = min(max_numar_existent + 50, MAX_NUMERE_AN)
-            if limita_scanare < 100:
-                limita_scanare = 100
+            limata_scanare = min(max_numar_existent + 50, MAX_NUMERE_AN)
+            if limata_scanare < 100:
+                limata_scanare = 100
         
-        for n in range(1, limita_scanare + 1):
+        for n in range(1, limata_scanare + 1):
             for var in variante_sufixe:
                 numar_complet = f"{n}{var['sufix']}" if var["sufix"] else str(n)
                 nume_pdf = f"MO_PI_{an}_{numar_complet}.pdf"
@@ -171,7 +180,8 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                         status_actual = meta["status"]
                     else:
                         if var["tip"] == "simplu" or meta["status"] == "ok":
-                            print(f"🟢 {nume_pdf} este deja descărcat în Drive.", flush=True)
+                            # Nu mai printăm zeci de mii de mesaje verzi ca să nu umplem log-urile din consola GitHub / terminal
+                            pass
                 
                 if trebuie_descarcat:
                     coada_descarcare.append({
@@ -193,8 +203,8 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
     director_temp = Path("./temp_pdf_download")
     director_temp.mkdir(exist_ok=True)
     
-    # 🛠️ TIMEOUT RESILIENT UNIVERSAL: 5 minute pentru citire (read), perfect pentru fișiere mari transmise lent
-    timeout_resilient = httpx.Timeout(timeout=300.0, connect=20.0, read=300.0)
+    # 🛠️ TIMEOUT EXTREM DE REZISTENT PENTRU FIȘIERE MARI (6 minute citire, 30s conectare)
+    timeout_resilient = httpx.Timeout(timeout=360.0, connect=30.0, read=360.0)
     
     erori_consecutive_an = {}
     succese_in_an = {}
@@ -220,7 +230,7 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
         creeaza_fantomă = False
         valoare_fantomă = " "
         
-        limită_reincercări = 1 if (este_special or este_bis) else 3
+        limită_reincercări = 1 if (este_special or este_bis) else 4  # 4 încercări pentru numere simple mari
         incercari = 0
         
         cale_locala = director_temp / nume_pdf
@@ -228,14 +238,19 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
         
         while incercari < limită_reincercări:
             try:
-                time.sleep(random.uniform(1.5, 3.0))
+                # Timp de așteptare politicos, crescător la reîncercări (exponential backoff)
+                sleep_time = random.uniform(1.5, 3.0) if incercari == 0 else random.uniform(10.0, 20.0) * incercari
+                time.sleep(sleep_time)
                 
                 headers = {
                     "User-Agent": random.choice(USER_AGENTS), 
                     "Referer": "https://monitoruloficial.ro/e-monitor/"
                 }
                 
-                # Descarcă direct prin streaming fără HEAD request preliminar
+                if cale_temp.exists():
+                    cale_temp.unlink()
+                
+                # Descarcă prin streaming ghidat
                 with httpx.Client(headers=headers, timeout=timeout_resilient, follow_redirects=True) as client:
                     with client.stream("GET", url) as response:
                         
@@ -252,7 +267,8 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                         response.raise_for_status()
                         
                         # Verificare tip conținut direct din stream
-                        if "application/pdf" not in response.headers.get("Content-Type", ""):
+                        content_type = response.headers.get("Content-Type", "").lower()
+                        if "application/pdf" not in content_type:
                             if este_special:
                                 creeaza_fantomă = True
                                 valoare_fantomă = " "
@@ -266,28 +282,24 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                                 print(f"⚠️ Eroare: HTML primit la un fișier SIMPLU. Îl ocolim fără dummy.", flush=True)
                             break
                         
-                        # Afișăm dimensiunea dacă e disponibilă, doar ca info
-                        total_bytes = int(response.headers.get("Content-Length", 0))
-                        if total_bytes > 0:
-                            print(f"📥 Dimensiune detectată: {total_bytes // 1024 // 1024} MB. Începe descărcarea...", flush=True)
-                        else:
-                            print(f"📥 Dimensiune necunoscută. Se descarcă în mod securizat...", flush=True)
-                            
-                        if este_simplu:
-                            erori_consecutive_an[an] = 0
-                            succese_in_an[an] = succese_in_an.get(an, 0) + 1
-                        
-                        if cale_temp.exists():
-                            cale_temp.unlink()
-                            
+                        # Descărcare activă în bucăți
+                        total_bytes = 0
                         with open(cale_temp, "wb") as f:
-                            for chunk in response.iter_bytes(chunk_size=65536): # Chunk size mai mare pentru viteză mai bună
+                            for chunk in response.iter_bytes(chunk_size=131072): # Chunk de 128KB pentru a maximiza I/O pe fișiere mari
                                 f.write(chunk)
+                                total_bytes += len(chunk)
                                 
-                        cale_temp.replace(cale_locala)
-                        descarcat_ok = True
-                        break
-                        
+                        if total_bytes > 0:
+                            if este_simplu:
+                                erori_consecutive_an[an] = 0
+                                succese_in_an[an] = succese_in_an.get(an, 0) + 1
+                            
+                            cale_temp.replace(cale_locala)
+                            descarcat_ok = True
+                            break
+                        else:
+                            raise IOError("Fișierul descărcat are dimensiune zero.")
+                                
             except (httpx.ConnectError, httpx.ReadError, httpx.HTTPStatusError, Exception) as e:
                 incercari += 1
                 descriere_eroare = str(e) if len(str(e)) < 120 else str(e)[:120] + "..."
@@ -305,12 +317,13 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                     valoare_fantomă = str(urmatorul_contor) if urmatorul_contor < 6 else " "
                     print(f"💡 Eroare conexiune pentru Bis. Incrementăm contorul la: {valoare_fantomă}", flush=True)
                     break
-                    
-                time.sleep(random.uniform(20.0, 40.0))
+                
+                # Așteptare lungă în caz de eroare, ca să lăsăm serverul Just să se relaxeze
+                time.sleep(random.uniform(15.0, 30.0))
                 
         if descarcat_ok:
-            marime_mb = os.path.getsize(cale_locala) // 1024 // 1024
-            print(f"📥 Descărcat complet: {nume_pdf} (~{marime_mb} MB)", flush=True)
+            marime_mb = os.path.getsize(cale_locala) / 1024 / 1024
+            print(f"📥 Descărcat complet: {nume_pdf} (~{marime_mb:.2f} MB)", flush=True)
             if incarca_sau_actualizeaza_in_drive(drive_service, cale_locala, GOOGLE_DRIVE_FOLDER_ID, item["file_id_existent"]):
                 print(f"✅ Sincronizat cu succes în Google Drive.", flush=True)
             time.sleep(random.uniform(2.0, 4.0))
