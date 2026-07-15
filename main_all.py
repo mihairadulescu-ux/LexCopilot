@@ -1,10 +1,10 @@
-import os
-import time
-import requests
-import xml.etree.ElementTree as ET
+# Culori pentru un log frumos în consolă
+VERDE = "\033[92m"
+GALBEN = "\033[93m"
+ROSU = "\033[91m"
+RESET = "\033[0m"
 
-# --- CODURI CULORI ANSI PENTRU CONSOLĂ ---
-VERDE = "\033[92m"import os
+
 import time
 import re
 import json
