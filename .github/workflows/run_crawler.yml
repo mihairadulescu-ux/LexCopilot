@@ -1,30 +1,58 @@
-name: Ruleaza Crawler Legislație Just
+name: "Descărcare Legislație Paralelă"
 
 on:
-  workflow_dispatch: # Permite declanșarea manuală a crawler-ului din interfața GitHub
+  workflow_dispatch: # Pornire manuală din GitHub Actions
   schedule:
-    - cron: '0 2 * * 1' # Opțional: rulează automat în fiecare luni la ora 02:00 AM
+    - cron: '0 1 * * *' # Rulează automat în fiecare noapte la ora 01:00 AM UTC
 
 jobs:
-  build:
+  download:
+    name: "Segment: ${{ matrix.nume }}"
     runs-on: ubuntu-latest
+    
+    strategy:
+      fail-fast: false # Dacă un segment dă eroare, celelalte continuă să ruleze!
+      matrix:
+        include:
+          - nume: "Vechi I (1900 - 1950)"
+            start: 1900
+            end: 1950
+          - nume: "Vechi II (1951 - 1980)"
+            start: 1951
+            end: 1980
+          - nume: "Mediu I (1981 - 2000)"
+            start: 1981
+            end: 2000
+          - nume: "Mediu II (2001 - 2010)"
+            start: 2001
+            end: 2010
+          - nume: "Recent I (2011 - 2018)"
+            start: 2011
+            end: 2018
+          - nume: "Recent II (2019 - 2026)"
+            start: 2019
+            end: 2026
 
     steps:
-    - name: Checkout cod din repository
-      uses: actions/checkout@v4
+      - name: Checkout cod din repository
+        uses: actions/checkout@v4
 
-    - name: Configureaza mediul Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
+      - name: Configurare Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: 'pip'
 
-    - name: Instaleaza dependentele in runner
-      run: |
-        python -m pip install --upgrade pip
-        pip install lxml zeep google-api-python-client google-auth requests
+      - name: Instalare dependente
+        run: |
+          python -m pip install --upgrade pip
+          pip install lxml zeep google-api-python-client google-auth requests
 
-    - name: Ruleaza Scriptul de Descarcare Legislatie
-      env:
-        GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-      run: |
-        python -u main_all.py
+      - name: Rulează Descărcarea
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          START_YEAR: ${{ matrix.start }}
+          END_YEAR: ${{ matrix.end }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python -u main_all.py
