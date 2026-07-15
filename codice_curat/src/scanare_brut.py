@@ -32,21 +32,34 @@ def curata_text(text):
     return re.sub(r'\s+', ' ', text).strip()
 
 def extrage_metadate_din_xml(xml_content):
-    """Extrage emitentul și tipul actului din XML-ul brut."""
+    """
+    Extrage emitentul și tipul actului din XML-ul brut.
+    Folosește o metodă imună la namespace-uri (caută tag-uri care se termină în 'Emitent' sau 'TipAct').
+    """
     try:
         root = ET.fromstring(xml_content)
-        namespaces = {
-            'a': 'http://schemas.datacontract.org/2004/07/Legis.Sg.Doc'
-        }
         
-        emitent_elem = root.find(".//a:Emitent", namespaces) or root.find(".//Emitent")
-        tip_act_elem = root.find(".//a:TipAct", namespaces) or root.find(".//TipAct")
+        emitent = None
+        tip_act = None
         
-        emitent = curata_text(emitent_elem.text) if emitent_elem is not None else None
-        tip_act = curata_text(tip_act_elem.text) if tip_act_elem is not None else None
-        
+        # Iterăm prin toate elementele din XML și căutăm potriviri ignorând namespace-ul
+        for elem in root.iter():
+            # În ElementTree, tag-ul complet arată ca "{http://namespace}NumeTag" sau simplu "NumeTag"
+            # extragem doar partea de după acoladă (numele local al tag-ului)
+            local_name = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+            
+            if local_name == "Emitent" and elem.text:
+                emitent = curata_text(elem.text)
+            elif local_name == "TipAct" and elem.text:
+                tip_act = curata_text(elem.text)
+                
+            # Dacă le-am găsit pe amândouă, ne putem opri mai devreme
+            if emitent and tip_act:
+                break
+                
         return emitent, tip_act
-    except Exception:
+    except Exception as e:
+        # Returnăm None în caz de eroare de parsare, dar lăsăm scriptul să meargă mai departe
         return None, None
 
 def descarca_si_scaneaza_xmluri(service):
@@ -121,7 +134,7 @@ def descarca_si_scaneaza_xmluri(service):
             if tip_act:
                 tipuri_acte_counter[tip_act] += 1
                 
-            # Din 100 în 100 de fișiere, afișăm un status intermediar complet ca să nu pară blocat
+            # Din 100 în 100 de fișiere, afișăm un status intermediar complet
             if idx % 100 == 0:
                 elapsed = time.time() - start_time
                 viteza = idx / elapsed if elapsed > 0 else 0
@@ -132,6 +145,11 @@ def descarca_si_scaneaza_xmluri(service):
                 print(f"  > Viteza de procesare: {viteza:.2f} fișiere/secundă")
                 print(f"  > Emitenți unici detectați până acum: {len(emitenti_counter)}")
                 print(f"  > Tipuri de acte unice detectate până acum: {len(tipuri_acte_counter)}")
+                # Afișăm top 3 din fiecare pentru confirmare vizuală rapidă
+                if emitenti_counter:
+                    print(f"  > Exemple emitenți: {dict(emitenti_counter.most_common(3))}")
+                if tipuri_acte_counter:
+                    print(f"  > Exemple tipuri: {dict(tipuri_acte_counter.most_common(3))}")
                 print("------------------------------------------\n")
                 
         except Exception as e:
