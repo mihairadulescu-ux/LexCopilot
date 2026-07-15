@@ -1,36 +1,31 @@
 name: Descarcare XML de pe legislatie.just.ro
-
 on:
+  workflow_dispatch: # Permite declanșarea manuală a crawler-ului din interfața GitHub
   schedule:
-    # Rulează în fiecare seară la ora 22:00 (ora României, adică 19:00 UTC)
-    - cron: '0 19 * * *'
-  workflow_dispatch:
-    # Ne permite să pornim robotul și manual, dintr-un buton
+    - cron: '0 2 * * 1' # Opțional: rulează automat în fiecare luni la ora 02:00 AM
 
 jobs:
-  run-crawler:
+  build:
     runs-on: ubuntu-latest
 
     steps:
-    - name: 1. Descarcă codul din repository
+    - name: Checkout cod din repository
       uses: actions/checkout@v4
 
-    - name: 2. Instalează Python
+    - name: Configureaza mediul Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.13'
+        cache: 'pip' # Optimizează timpul de rulare salvând cache-ul librăriilor
 
-    - name: 3. Instalează dependențele electronice
+    - name: Instaleaza dependentele in runner
       run: |
         python -m pip install --upgrade pip
-        pip install lxml google-oauth2-tool google-auth-oauthlib google-api-python-client zeep httplib2
+        pip install suds-py3 google-api-python-client google-auth requests
 
-    - name: 4. Pornește Motorul de Colectare
+    - name: Ruleaza Scriptul de Descarcare Legislatie
       env:
+        # Mapăm secretul tău de pe GitHub direct în variabila pe care o caută scriptul Python
         GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-        PYTHONUNBUFFERED: "1"
-
-     - name: Instalează dependențele necesare
-  run: |
-    pip install suds-py3 google-api-python-client google-auth   
-      run: python main_all.py
+      run: |
+        python main_all.py
