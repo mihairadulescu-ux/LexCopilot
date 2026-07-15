@@ -3,6 +3,7 @@ import json
 import re
 import csv
 import io
+import time
 from collections import Counter
 import xml.etree.ElementTree as ET
 from google.oauth2 import service_account
@@ -49,21 +50,19 @@ def extrage_metadate_din_xml(xml_content):
         return None, None
 
 def descarca_si_scaneaza_xmluri(service):
-    """Listare brută a conținutului din folder, compatibilă cu Shared Drives."""
+    """Listare și scanare cu status update detaliat și progres în consolă."""
     emitenti_counter = Counter()
     tipuri_acte_counter = Counter()
     
-    # Interogare de bază
     query = f"'{FOLDER_SURSA_ID}' in parents and trashed = false"
     
-    print(f"Începem interogarea folderului sursă (inclusiv Shared Drives): {FOLDER_SURSA_ID}")
+    print(f"[{time.strftime('%H:%M:%S')}] Pasul 1: Interogare fișiere din folderul sursă...")
     
     toate_fisierele = []
     page_token = None
     
     while True:
         try:
-            # Am adăugat suportul complet pentru Shared Drives aici
             results = service.files().list(
                 q=query, 
                 fields="nextPageToken, files(id, name, mimeType)", 
@@ -82,30 +81,31 @@ def descarca_si_scaneaza_xmluri(service):
             break
 
     if not toate_fisierele:
-        print("\n!!! API-ul Google Drive a returnat tot 0 fișiere.")
-        print("Dacă folderul nu e gol și permisiunile sunt bune, verifică dacă ID-ul este exact al folderului (și nu cumva un shortcut).")
+        print("\n!!! API-ul Google Drive a returnat 0 fișiere.")
         return emitenti_counter, tipuri_acte_counter
 
-    print(f"\nAPI-ul a detectat {len(toate_fisierele)} elemente în folder.")
-    
-    # Filtrare după extensia .xml
     toate_xmlurile = [f for f in toate_fisierele if f['name'].lower().endswith('.xml')]
+    total_xmluri = len(toate_xmlurile)
     
-    print(f"Dintre acestea, {len(toate_xmlurile)} sunt fișiere cu extensia '.xml'.")
+    print(f"[{time.strftime('%H:%M:%S')}] Pasul 2: S-au detectat în total {len(toate_fisierele)} elemente.")
+    print(f" -> Dintre acestea, {total_xmluri} sunt fișiere XML valide.")
     
-    if not toate_xmlurile:
-        print("\nExemple de fișiere detectate în folder (primele 5):")
-        for f in toate_fisierele[:5]:
-            print(f" - Nume: {f['name']} | Tip MIME: {f['mimeType']}")
+    if total_xmluri == 0:
+        print("Nu s-au găsit XML-uri de procesat.")
         return emitenti_counter, tipuri_acte_counter
 
-    print("Începe descărcarea și scanarea XML-urilor...")
+    print(f"\n[{time.strftime('%H:%M:%S')}] Pasul 3: Începe descărcarea și procesarea în timp real...\n")
+    
+    start_time = time.time()
     
     for idx, file in enumerate(toate_xmlurile, 1):
         file_id = file["id"]
         file_name = file["name"]
         
         try:
+            # Afișăm în consolă fișierul curent
+            print(f"[{idx}/{total_xmluri}] Se procesează: {file_name}...", end="\r", flush=True)
+            
             request = service.files().get_media(fileId=file_id)
             file_buffer = io.BytesIO()
             downloader = MediaIoBaseDownload(file_buffer, request)
@@ -121,12 +121,26 @@ def descarca_si_scaneaza_xmluri(service):
             if tip_act:
                 tipuri_acte_counter[tip_act] += 1
                 
-            if idx % 50 == 0:
-                print(f"Progres scanare: {idx}/{len(toate_xmlurile)} fișiere procesate...")
+            # Din 100 în 100 de fișiere, afișăm un status intermediar complet ca să nu pară blocat
+            if idx % 100 == 0:
+                elapsed = time.time() - start_time
+                viteza = idx / elapsed if elapsed > 0 else 0
+                estimat_ramas = (total_xmluri - idx) / viteza if viteza > 0 else 0
+                
+                print(f"\n--- [Status intermediar {idx}/{total_xmluri}] ---")
+                print(f"  > Timp scurs: {int(elapsed)}s | Rămase aproximative: {int(estimat_ramas)}s")
+                print(f"  > Viteza de procesare: {viteza:.2f} fișiere/secundă")
+                print(f"  > Emitenți unici detectați până acum: {len(emitenti_counter)}")
+                print(f"  > Tipuri de acte unice detectate până acum: {len(tipuri_acte_counter)}")
+                print("------------------------------------------\n")
                 
         except Exception as e:
-            print(f"Eroare la procesarea fișierului {file_name}: {e}")
+            print(f"\n[Eroare] Eșec la procesarea fișierului {file_name}: {e}")
             
+    total_time = time.time() - start_time
+    print(f"\n\n[{time.strftime('%H:%M:%S')}] Scanarea a fost finalizată în {total_time:.2f} secunde.")
+    print(f" -> Total fișiere scanate cu succes: {idx}")
+    
     return emitenti_counter, tipuri_acte_counter
 
 def salveaza_csv_in_drive(service, nume_fisier, date, antet):
@@ -142,7 +156,6 @@ def salveaza_csv_in_drive(service, nume_fisier, date, antet):
     
     query = f"'{FOLDER_METADATE_ID}' in parents and name = '{nume_fisier}' and trashed = false"
     
-    # Adăugat suport Shared Drives și la căutarea CSV-ului de destinație
     existing_files = service.files().list(
         q=query, 
         fields="files(id)",
@@ -163,7 +176,7 @@ def salveaza_csv_in_drive(service, nume_fisier, date, antet):
             media_body=media,
             supportsAllDrives=True
         ).execute()
-        print(f"Fișierul {nume_fisier} a fost actualizat cu succes în folderul /Metadate.")
+        print(f"[{time.strftime('%H:%M:%S')}] Fișierul {nume_fisier} a fost actualizat cu succes în /Metadate.")
     else:
         metadata = {
             "name": nume_fisier,
@@ -174,7 +187,7 @@ def salveaza_csv_in_drive(service, nume_fisier, date, antet):
             media_body=media,
             supportsAllDrives=True
         ).execute()
-        print(f"Fișierul nou {nume_fisier} a fost creat cu succes în folderul /Metadate.")
+        print(f"[{time.strftime('%H:%M:%S')}] Fișierul nou {nume_fisier} a fost creat cu succes în /Metadate.")
 
 def main():
     try:
@@ -184,9 +197,9 @@ def main():
         if emitenti or tipuri_acte:
             salveaza_csv_in_drive(service, "emitenti_brut.csv", emitenti, ["Emitent_Original", "Aparitii"])
             salveaza_csv_in_drive(service, "tipuri_acte_brut.csv", tipuri_acte, ["TipAct_Original", "Aparitii"])
-            print("Procesul s-a încheiat cu succes!")
+            print(f"[{time.strftime('%H:%M:%S')}] Procesul complet s-a încheiat cu succes!")
         else:
-            print("Nu s-au putut colecta date.")
+            print("Nu s-au putut colecta metadate valide din XML-urile procesate.")
     except Exception as e:
         print(f"A apărut o eroare critică în timpul execuției: {e}")
 
