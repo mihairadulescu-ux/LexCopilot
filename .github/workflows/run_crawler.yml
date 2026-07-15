@@ -21,7 +21,7 @@ jobs:
     - name: Instaleaza dependentele in runner
       run: |
         python -m pip install --upgrade pip
-        pip install suds-py3 google-api-python-client google-auth requests
+        pip install lxml zeep google-api-python-client google-auth requests
 
     - name: Ruleaza Scriptul de Descarcare Legislatie
       env:
