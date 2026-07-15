@@ -3,7 +3,8 @@ import io
 import json
 import csv
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
@@ -11,7 +12,7 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 # Configurare ID-uri din mediu sau constante
 XML_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
 METADATA_FOLDER_ID = "1Cpxs20QAtAPw_RIUsOOecJON9hHPlBXf"
-NUM_WORKERS = 4  # Cele 4 sesiuni paralele solicitate
+NUM_WORKERS = 4  # Numărul de procese paralele
 SAVE_INTERVAL = 500  # Salvare la fiecare 500 de fișiere procesate
 LOCAL_CSV_PATH = "metadate_istorice_temp.csv"
 
@@ -20,7 +21,7 @@ def print_flush(message):
     print(message, flush=True)
 
 def get_drive_service():
-    print_flush("[INFO] Începe autentificarea Service Account...")
+    """Construiește o instanță curată și izolată a serviciului Google Drive."""
     sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if not sa_json:
         raise ValueError("Lipsește GOOGLE_SERVICE_ACCOUNT_JSON din variabilele de mediu!")
@@ -30,49 +31,63 @@ def get_drive_service():
         creds_info, 
         scopes=["https://www.googleapis.com/auth/drive"]
     )
-    service = build('drive', 'v3', credentials=creds)
-    print_flush("[INFO] Serviciul Google Drive a fost construit cu succes!")
-    return service
+    # Folosim explicit cache_discovery=False pentru a evita scrierea concurentă de fișiere cache în procese paralele
+    return build('drive', 'v3', credentials=creds, cache_discovery=False)
 
 def parse_xml_stream(xml_content):
-    """Parsează rapid XML-ul și extrage DINAMIC toate tag-urile ca metadate."""
+    """Parsează rapid XML-ul și extrage toate tag-urile ca metadate."""
     metadata_list = []
-    
-    context = ET.iterparse(io.BytesIO(xml_content), events=('end',))
-    for event, elem in context:
-        # Detectăm nodurile principale (ajustează dacă este un alt tag părinte în loc de orice în afară de root)
-        if len(elem) > 0 and elem.tag != 'Root': 
-            record = {}
-            for child in elem:
-                if child.text and child.text.strip():
-                    record[child.tag] = child.text.strip()
-                for attr_name, attr_val in child.attrib.items():
-                    record[f"{child.tag}_{attr_name}"] = attr_val
-            
-            if record:
-                metadata_list.append(record)
+    try:
+        context = ET.iterparse(io.BytesIO(xml_content), events=('end',))
+        for event, elem in context:
+            if len(elem) > 0 and elem.tag != 'Root': 
+                record = {}
+                for child in elem:
+                    if child.text and child.text.strip():
+                        record[child.tag] = child.text.strip()
+                    for attr_name, attr_val in child.attrib.items():
+                        record[f"{child.tag}_{attr_name}"] = attr_val
                 
-            elem.clear()  # Eliberăm imediat memoria RAM
+                if record:
+                    metadata_list.append(record)
+                    
+                elem.clear()  # Eliberăm imediat memoria RAM
+    except Exception as parse_err:
+        # Dacă XML-ul este parțial corupt sau gol
+        pass
             
     return metadata_list
 
-def download_and_parse(file_id, file_name, service):
-    """Descarcă un singur XML de pe Drive și îl parsează dinamic."""
-    try:
-        request = service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
+def download_and_parse(file_id, file_name):
+    """
+    Descarcă un singur XML. Rulează într-un proces complet izolat.
+    Include 3 încercări automate (retries) în caz de eroare de rețea.
+    """
+    retries = 3
+    for attempt in range(retries):
+        try:
+            # Creăm clientul Google special în interiorul procesului, izolat de ceilalți
+            service = get_drive_service()
+            request = service.files().get_media(fileId=file_id)
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
             
-        xml_bytes = fh.getvalue()
-        records = parse_xml_stream(xml_bytes)
-        return records
-    except Exception as e:
-        print_flush(f"[Eroare] Probleme la descărcarea/parsarea fișierului {file_name}: {str(e)}")
-        return []
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+                
+            xml_bytes = fh.getvalue()
+            records = parse_xml_stream(xml_bytes)
+            return records
+            
+        except Exception as e:
+            if attempt < retries - 1:
+                # Așteptăm puțin înainte de a reîncerca
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            else:
+                print_flush(f"[Eroare] Eșec definitiv la fișierul {file_name} după {retries} încercări: {str(e)}")
+                return []
 
 def save_to_drive(service, local_file_path, drive_file_id=None):
     """Urcă sau actualizează fișierul CSV pe Google Drive."""
@@ -99,12 +114,13 @@ def save_to_drive(service, local_file_path, drive_file_id=None):
         return created_file.get('id')
 
 def main():
-    service = get_drive_service()
+    # Serviciul principal folosit pentru listare și scriere finală
+    main_service = get_drive_service()
     
     # 1. Listăm toate fișierele XML din folderul sursă
     print_flush(f"[INFO] Se listează fișierele din folderul XML (ID: {XML_FOLDER_ID})...")
     
-    results = service.files().list(
+    results = main_service.files().list(
         q=f"'{XML_FOLDER_ID}' in parents and trashed = false",
         fields="files(id, name)",
         pageSize=1000,
@@ -123,28 +139,31 @@ def main():
     processed_count = 0
     drive_csv_id = None
     
-    # Curățăm fișierul temporar local dacă a rămas dintr-o rulare anterioară părăsită
     if os.path.exists(LOCAL_CSV_PATH):
         os.remove(LOCAL_CSV_PATH)
         
-    # 2. Procesăm fișierele folosind cele 4 sesiuni paralele
-    print_flush(f"[INFO] Pornim procesarea asincronă cu {NUM_WORKERS} lucrători...")
-    with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+    # 2. Procesăm fișierele în paralel folosind PROCESE în loc de THREAD-URI
+    print_flush(f"[INFO] Pornim procesarea asincronă cu {NUM_WORKERS} procese izolate...")
+    
+    with ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
+        # Trimitem joburile către procese separate
         futures = {
-            executor.submit(download_and_parse, f['id'], f['name'], service): f['name']
+            executor.submit(download_and_parse, f['id'], f['name']): f['name']
             for f in files
         }
         
         for future in as_completed(futures):
             file_name = futures[future]
-            records = future.result()
-            all_records.extend(records)
+            try:
+                records = future.result()
+                all_records.extend(records)
+            except Exception as exc:
+                print_flush(f"[Eroare Proces] Fișierul {file_name} a generat o excepție gravă: {exc}")
+                
             processed_count += 1
-            
-            # Printează progresul la fiecare fișier în parte, acum vedem în timp real!
             print_flush(f"[{processed_count}/{len(files)}] Procesat cu succes: {file_name}")
                 
-            # Când atingem pragul de 500 sau terminăm tot, scriem local și trimitem pe Drive
+            # Sincronizare periodică pe Drive
             if processed_count % SAVE_INTERVAL == 0 or processed_count == len(files):
                 print_flush(f"\n[Sincronizare] Salvare intermediară la {processed_count} fișiere...")
                 
@@ -159,7 +178,8 @@ def main():
                         writer.writeheader()
                         writer.writerows(all_records)
                     
-                    drive_csv_id = save_to_drive(service, LOCAL_CSV_PATH, drive_csv_id)
+                    # Upload din procesul principal
+                    drive_csv_id = save_to_drive(main_service, LOCAL_CSV_PATH, drive_csv_id)
                     print_flush(f"[Sincronizare] Finalizată cu succes pentru primele {processed_count} fișiere!\n")
                 else:
                     print_flush("[Sincronizare] Nu există date noi în acest calup.\n")
