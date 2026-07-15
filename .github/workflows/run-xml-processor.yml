@@ -1,38 +1,29 @@
 name: Optimizare si Procesare XML Istoric
 
 on:
-  workflow_dispatch: # Îți permite să pornești procesul manual, cu o simplă apăsare de buton din tab-ul "Actions"
-  # Optional: dacă vrei să ruleze automat în fiecare noapte la ora 02:00 AM
-  # schedule:
-  #   - cron: '0 2 * * *'
+  workflow_dispatch:
 
 jobs:
   build-and-run:
     runs-on: ubuntu-latest
-    # GitHub Actions are o limită implicită de 6 ore, dar punem un timeout de siguranță de 2 ore (120 min)
     timeout-minutes: 120 
 
     steps:
-    # 1. Copiază codul tău din repository pe mașina virtuală
     - name: Checkout cod
       uses: actions/checkout@v4
 
-    # 2. Configurează mediul Python
     - name: Configurare Python 3.13
       uses: actions/setup-python@v5
       with:
         python-version: '3.13'
-        cache: 'pip' # Optimizează timpul de rulare prin salvarea librăriilor în cache
+        # Am scos linia de cache pentru a evita eroarea de fișier lipsă
 
-    # 3. Instalează doar pachetele oficiale Google necesare (fără dependințe inutile)
     - name: Instalare dependinte Google API
       run: |
         python -m pip install --upgrade pip
         pip install google-auth google-api-python-client
 
-    # 4. Execută scriptul Python în siguranță
     - name: Rulează procesorul XML
       env:
-        # Îi transmitem scriptului cheia secretă din GitHub Secrets
         GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
       run: python optimize_xml_processor.py
