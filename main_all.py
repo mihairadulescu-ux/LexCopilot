@@ -15,16 +15,16 @@ WSDL_URL = "http://legislatie.just.ro/api/legis/LegislatieService.svc"
 CURRENT_TOKEN = None
 
 def obtine_token_nou():
-    """Apelează serviciul public pentru a genera un token nou (fără user/parolă)."""
+    """Apelează serviciul public pentru a genera un token nou."""
     global CURRENT_TOKEN
-    print(f"{GALBEN}[-] Se solicită un token nou de la server...{RESET}")
+    # flush=True obligă GitHub să afișeze instant acest mesaj!
+    print(f"{GALBEN}[-] Se încearcă conectarea la Just.ro pentru un token nou...{RESET}", flush=True)
     
     headers = {
         "Content-Type": "text/xml; charset=utf-8",
         "SOAPAction": "http://tempuri.org/ILegislatieService/GetToken"
     }
     
-    # Cerere simplă către server fără date de autentificare private
     soap_request = """<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tem="http://tempuri.org/">
        <soapenv:Header/>
        <soapenv:Body>
@@ -33,18 +33,21 @@ def obtine_token_nou():
     </soapenv:Envelope>"""
     
     try:
-        response = requests.post(WSDL_URL, data=soap_request, headers=headers, timeout=30)
+        # Am scăzut timeout la 10 secunde ca să nu stea blocat infinit dacă GitHub e blocat de Just.ro
+        response = requests.post(WSDL_URL, data=soap_request, headers=headers, timeout=10)
         if response.status_code == 200:
             root = ET.fromstring(response.content)
             namespaces = {'s': 'http://schemas.xmlsoap.org/soap/envelope/', 't': 'http://tempuri.org/'}
             token_element = root.find('.//t:GetTokenResult', namespaces)
             if token_element is not None and token_element.text:
                 CURRENT_TOKEN = token_element.text
-                print(f"{VERDE}[+] Token nou obținut cu succes: {CURRENT_TOKEN[:15]}...{RESET}")
+                print(f"{VERDE}[+] Token nou obținut cu succes: {CURRENT_TOKEN[:15]}...{RESET}", flush=True)
                 return CURRENT_TOKEN
-        print(f"{ROSU}[!] Eroare la obținerea token-ului. Cod status: {response.status_code}{RESET}")
+        print(f"{ROSU}[!] Serverul a răspuns cu codul: {response.status_code}{RESET}", flush=True)
+    except requests.exceptions.Timeout:
+        print(f"{ROSU}[!] TIMEOUT: Serverul Just.ro nu a răspuns în 10 secunde. Probabil IP-ul de GitHub este blocat!{RESET}", flush=True)
     except Exception as e:
-        print(f"{ROSU}[!] Excepție la generarea token-ului: {e}{RESET}")
+        print(f"{ROSU}[!] Eroare la generarea token-ului: {e}{RESET}", flush=True)
     
     return None
 
@@ -55,6 +58,8 @@ def executa_cerere_search(an, pagina):
     
     if not CURRENT_TOKEN:
         obtine_token_nou()
+        if not CURRENT_TOKEN:
+            return None # Dacă tot nu avem token, nu mai facem cererea
         
     headers = {
         "Content-Type": "text/xml; charset=utf-8",
@@ -76,10 +81,10 @@ def executa_cerere_search(an, pagina):
     </SOAP-ENV:Envelope>"""
 
     try:
-        response = requests.post(WSDL_URL, data=soap_request, headers=headers, timeout=30)
+        response = requests.post(WSDL_URL, data=soap_request, headers=headers, timeout=10)
         return response
     except Exception as e:
-        print(f"{ROSU}[!] Eroare de conexiune la cerere: {e}{RESET}")
+        print(f"{ROSU}[!] Eroare conexiune la Search (An {an}, Pag {pagina}): {e}{RESET}", flush=True)
         return None
 
 
@@ -89,49 +94,44 @@ def ruleaza_scraping(an_start, an_end):
     for an in range(an_start, an_end + 1):
         pagina = 0
         while True:
-            # --- LOGICA DE SELF-REPAIR ---
             nume_fisier = f"response_raw_{an}_pag_{pagina}.xml"
             
+            # --- LOGICA DE SKIP ---
             if os.path.exists(nume_fisier):
-                # Pasăm peste fișierele deja descărcate
-                print(f"{GALBEN}[~] Pasăm peste: {nume_fisier} există deja.{RESET}")
+                print(f"{GALBEN}[~] Pasăm peste: {nume_fisier} există deja.{RESET}", flush=True)
                 pagina += 1
                 continue
             
-            # Descărcăm doar ce lipsește
-            print(f"[*] Se descarcă: Anul {an}, Pagina {pagina}...")
+            print(f"[*] Se descarcă: Anul {an}, Pagina {pagina}...", flush=True)
             response = executa_cerere_search(an, pagina)
             
             if response is None:
-                print(f"{ROSU}[!] Server inaccesibil. Reîncercăm în 10 secunde...{RESET}")
+                print(f"{ROSU}[!] Reîncercăm peste 10 secunde...{RESET}", flush=True)
                 time.sleep(10)
                 continue
                 
             response_text = response.text
             
-            # Auto-reparare token la expirare (fără să oprească scriptul)
             if "TOKEN INVALID" in response_text or "REGENERATI TOKEN" in response_text:
-                print(f"{GALBEN}[!] Token expirat detectat! Pornim procedura de re-autentificare...{RESET}")
+                print(f"{GALBEN}[!] Token expirat! Regenerăm...{RESET}", flush=True)
                 obtine_token_nou()
                 continue 
                 
             if response.status_code != 200:
-                print(f"{ROSU}[!] Eroare HTTP {response.status_code}. Reîncercăm în 5 secunde...{RESET}")
+                print(f"{ROSU}[!] Eroare HTTP {response.status_code}. Reîncercăm...{RESET}", flush=True)
                 time.sleep(5)
                 continue
 
-            # --- SALVARE BRUTĂ ---
+            # --- SALVARE ---
             try:
                 with open(nume_fisier, "w", encoding="utf-8") as f:
                     f.write(response_text)
-                # Mesajul de succes apare cu verde frumos
-                print(f"{VERDE}[+] Fișier salvat cu succes: {nume_fisier}{RESET}")
+                print(f"{VERDE}[+] Fișier salvat cu succes: {nume_fisier}{RESET}", flush=True)
             except Exception as e:
-                print(f"{ROSU}[!] Eroare la scrierea fișierului {nume_fisier}: {e}{RESET}")
+                print(f"{ROSU}[!] Eroare salvare {nume_fisier}: {e}{RESET}", flush=True)
             
-            # Oprire pagină când nu mai sunt rezultate pe anul curent
             if "<a:TipAct>" not in response_text and "SearchResult" in response_text:
-                print(f"[*] Am terminat toate paginile pentru anul {an}.")
+                print(f"[*] Gata cu paginile pe anul {an}.", flush=True)
                 break
                 
             pagina += 1
@@ -139,5 +139,4 @@ def ruleaza_scraping(an_start, an_end):
 
 
 if __name__ == "__main__":
-    # Rulează direct pe GitHub Actions pentru tot intervalul (ce e deja descărcat va lua skip instant)
     ruleaza_scraping(2000, 2026)
