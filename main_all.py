@@ -1,126 +1,201 @@
 import os
-import sys
+import io
 import time
 import random
-from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from pathlib import Path
-import requests
+
+# Librării SOAP și Google API
+from zeep import Client, Settings
+from zeep.exceptions import Fault
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 
 # ======================================================================
-# ⚙️ CONFIGURARE INTERVAL ANI
+# ⚙️ CONFIGURARE
 # ======================================================================
+WSDL_URL = 'http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl'
 AN_START = 2000
 AN_STOP = 2019
+MAX_THREADS = 4
 
-# Calea unde se vor salva fișierele XML descărcate
-DIRECTOR_SALVARE = Path("./xml_just_salvate")
+# ID-ul folderului tău shared Google Drive primit
+GDRIVE_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
 
 # ======================================================================
-# CONFIGURARE PARAMETRI SOAP (Exact conform WSDL portalquery.just.ro)
+# 🔑 CLIENT GOOGLE DRIVE (Autentificare automată în GitHub)
 # ======================================================================
-SOAP_URL = "http://portalquery.just.ro/query.asmx"
-
-# SOAPAction corect cerut de server (fără http:// în față)
-SOAP_ACTION = "portalquery.just.ro/CautareDosare"
-
-# Plicul XML conform schemei oficiale. Toate câmpurile sunt obligatorii,
-# iar tipul de date DateTime trebuie să includă milisecunde și indicatorul UTC 'Z'.
-SOAP_ENVELOPE_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
-<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
-  <soap:Body>
-    <CautareDosare xmlns="portalquery.just.ro">
-      <numarDosar></numarDosar>
-      <obiectDosar></obiectDosar>
-      <numeParte></numeParte>
-      <institutie xsi:nil="true" />
-      <dataStart>{data_start}T00:00:00.000Z</dataStart>
-      <dataStop>{data_stop}T23:59:59.000Z</dataStop>
-    </CautareDosare>
-  </soap:Body>
-</soap:Envelope>"""
-
-def genereaza_intervale_zile(an_start, an_stop):
-    """Generează o listă de tupluri zi de zi (Format simplu YYYY-MM-DD)."""
-    start_date = datetime(an_start, 1, 1)
-    end_date = datetime(an_stop, 12, 31)
+def obtine_serviciu_gdrive():
+    """Inițializează clientul Google Drive folosind secretele din mediu."""
+    # În GitHub Actions, este recomandat să salvezi JSON-ul cheii într-un Secret (ex: GDRIVE_CREDENTIALS)
+    cheie_json = os.environ.get("GDRIVE_CREDENTIALS")
     
-    curent = start_date
-    while curent <= end_date:
-        data_str = curent.strftime("%Y-%m-%d")
-        yield data_str, data_str
-        curent += timedelta(days=1)
+    if cheie_json:
+        # Dacă secretul este stocat ca string JSON brut în variabilele de mediu
+        import json
+        info = json.loads(cheie_json)
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=['https://www.googleapis.com/auth/drive.file']
+        )
+    else:
+        # Căutare fallback locală/manuală dacă rulezi pe local
+        cale_cheie_locala = Path("credentials.json")
+        if cale_cheie_locala.exists():
+            creds = service_account.Credentials.from_service_account_file(
+                str(cale_cheie_locala), scopes=['https://www.googleapis.com/auth/drive.file']
+            )
+        else:
+            raise RuntimeError(
+                "❌ Nu s-au găsit credențialele Google Drive! "
+                "Asigură-te că ai setat variabila de mediu GDRIVE_CREDENTIALS sau fișierul credentials.json."
+            )
+            
+    return build('drive', 'v3', credentials=creds)
 
-def descarca_date_just():
-    DIRECTOR_SALVARE.mkdir(exist_ok=True)
-    
-    print(f"🚀 Pornire crawler Just.ro (SOAP)...")
-    print(f"📅 Interval setat: {AN_START} - {AN_STOP}")
-    print(f"📂 Salvare în: {DIRECTOR_SALVARE.resolve()}\n")
-    
-    headers = {
-        "Content-Type": "text/xml; charset=utf-8",
-        "SOAPAction": f'"{SOAP_ACTION}"',  # Header-ul are nevoie de ghilimele duble în jurul valorii
-        "User-Agent": "portjust"            # User-Agent-ul recunoscut intern de server
+
+# ======================================================================
+# 🔒 MANAGER TOKEN SOAP (Thread-Safe)
+# ======================================================================
+class TokenManager:
+    def __init__(self, client):
+        self.client = client
+        self.token = None
+        self.lock = Lock()
+
+    def get_valid_token(self, forta_reproaspatare=False):
+        with self.lock:
+            if self.token is None or forta_reproaspatare:
+                if forta_reproaspatare:
+                    print("\n[🔑] Tokenul a expirat. Generăm unul nou...")
+                else:
+                    print("\n[🔑] Inițializare: Obținem token nou pentru Portalul Legislativ...")
+                
+                while True:
+                    try:
+                        self.token = self.client.service.GetToken()
+                        if self.token:
+                            print(f"[🔑] Token generat cu succes: {self.token[:10]}...")
+                            break
+                    except Exception as e:
+                        print(f"[⚠️] Serverul Just ocupat ({e}). Reîncercăm în 3 secunde...")
+                        time.sleep(3)
+            return self.token
+
+# ======================================================================
+# 📤 LOGICĂ DE SALVARE ÎN GOOGLE DRIVE
+# ======================================================================
+def incarca_in_gdrive(service, nume_fisier, continut_text):
+    """Încarcă un fișier text direct în folderul shared Google Drive, fără salvare locală."""
+    file_metadata = {
+        'name': nume_fisier,
+        'parents': [GDRIVE_FOLDER_ID]
     }
     
-    statistici = {"succes": 0, "goale": 0, "erori": 0}
+    # Transformăm textul în stream de octeți în memorie
+    fh = io.BytesIO(continut_text.encode('utf-8'))
+    media = MediaIoBaseUpload(fh, mimetype='text/plain', resumable=True)
     
-    for d_start, d_stop in genereaza_intervale_zile(AN_START, AN_STOP):
-        nume_fisier = DIRECTOR_SALVARE / f"just_dosare_{d_start}.xml"
+    # Trimitem fișierul la Google Drive API (suportă drive-uri partajate prin supportsAllDrives)
+    service.files().create(
+        body=file_metadata,
+        media_body=media,
+        fields='id',
+        supportsAllDrives=True  # Important pentru Shared Drive
+    ).execute()
+
+# ======================================================================
+# 🚀 PROCESATOR AN (Rulat în paralel)
+# ======================================================================
+def proceseaza_an(an, token_manager, client, gdrive_service):
+    """Descarcă legislația unui an și o trimite direct în Google Drive."""
+    pagina = 0
+    rezultate_pe_pagina = 50
+    token = token_manager.get_valid_token()
+    
+    while True:
+        search_params = {
+            'NumarPagina': pagina,
+            'RezultatePagina': rezultate_pe_pagina,
+            'SearchAn': an,
+        }
         
-        # Sărim fișierele deja descărcate corect
-        if nume_fisier.exists() and nume_fisier.stat().st_size > 500:
-            print(f"⏭️ Sărim {d_start} (deja descărcat).")
-            continue
+        try:
+            response = client.service.Search(search_params, token)
             
-        print(f"⏳ Interogăm data: {d_start}...", end="", flush=True)
-        
-        # Generăm payload-ul exact cu datele formatate ISO 8601
-        payload = SOAP_ENVELOPE_TEMPLATE.format(data_start=d_start, data_stop=d_stop)
-        
-        incercari = 0
-        descarcat_ok = False
-        
-        while incercari < 3 and not descarcat_ok:
-            try:
-                # Mică pauză politicoasă între request-uri
-                time.sleep(random.uniform(0.6, 1.3))
+            if response and hasattr(response, 'Legi') and response.Legi:
+                lista_legi = response.Legi.Legi
+                if not lista_legi:
+                    print(f"✅ [An {an}] Finalizat complet.")
+                    break
                 
-                response = requests.post(SOAP_URL, data=payload, headers=headers, timeout=30)
+                # Construim structura fișierului în memorie
+                buffer_text = []
+                for lege in lista_legi:
+                    buffer_text.append(f"ID: {lege.IdValoare} | Titlu: {lege.Titlu} | Data: {lege.DataVigoare}")
                 
-                if response.status_code == 200:
-                    xml_content = response.text
-                    
-                    # Dacă XML-ul conține rezultate
-                    if "<Dosar>" in xml_content or "<Dosar " in xml_content:
-                        with open(nume_fisier, "w", encoding="utf-8") as f:
-                            f.write(xml_content)
-                        print(" [OK - Salvat!]")
-                        statistici["succes"] += 1
-                    else:
-                        # Unele zile sunt complet goale (zile nelucrătoare sau fără activitate)
-                        print(" [Fără dosare]")
-                        statistici["goale"] += 1
-                        
-                    descarcat_ok = True
-                else:
-                    incercari += 1
-                    print(f" (Status {response.status_code}, reîncercăm {incercari}/3)...", end="", flush=True)
-                    time.sleep(2)
-                    
-            except Exception as e:
-                incercari += 1
-                print(f" (Eroare rețea: {str(e)[:30]}, reîncercăm {incercari}/3)...", end="", flush=True)
-                time.sleep(4)
+                continut_final = "\n".join(buffer_text)
+                nume_fisier_gdrive = f"legi_{an}_pag_{pagina}.txt"
                 
-        if not descarcat_ok:
-            print(" ❌ Eșuat permanent.")
-            statistici["erori"] += 1
+                # Încărcare direct în folderul shared Google Drive
+                incarca_in_gdrive(gdrive_service, nume_fisier_gdrive, continut_final)
+                
+                print(f"☁️ [An {an}] Pagina {pagina} salvată direct în GDrive ({len(lista_legi)} acte).")
+                pagina += 1
+                
+                time.sleep(random.uniform(0.3, 0.6))
+                
+            else:
+                print(f"ℹ️ [An {an}] S-a atins capătul listei la pagina {pagina}.")
+                break
+                
+        except Fault as soap_fault:
+            fault_string = str(soap_fault).lower()
+            if "token" in fault_string or "expired" in fault_string or "invalid" in fault_string:
+                token = token_manager.get_valid_token(forta_reproaspatare=True)
+            else:
+                print(f"❌ [An {an}] Eroare SOAP (Pagina {pagina}): {soap_fault}")
+                time.sleep(5)
+                
+        except Exception as e:
+            print(f"⚠️ [An {an}] Reîncercare din cauza unei erori la pagina {pagina}: {e}")
+            time.sleep(5)
 
-    print("\n=======================================================")
-    print("🏁 Rularea s-a încheiat!")
-    print(f"📈 Statistici finale: {statistici['succes']} zile cu date, {statistici['goale']} fără activitate, {statistici['erori']} erori.")
-    print("=======================================================")
+# ======================================================================
+# 🏁 FLUX PRINCIPAL
+# ======================================================================
+def main():
+    print("🚀 Pornire Crawler Just.ro + integrare Google Drive API...")
+    
+    # 1. Inițializăm serviciul Google Drive
+    try:
+        gdrive_service = obtine_serviciu_gdrive()
+        print("🔓 Conexiune la Google Drive stabilită cu succes.")
+    except Exception as e:
+        print(f"💥 Eroare critică la inițializarea Google Drive: {e}")
+        sys.exit(1)
 
-if __name__ == "__main__":
-    descarca_date_just()
+    # 2. Inițializăm clientul SOAP Zeep
+    settings = Settings(strict=False, xml_huge_tree=True)
+    client = Client(WSDL_URL, settings=settings)
+    
+    token_manager = TokenManager(client)
+    ani_de_procesat = list(range(AN_START, AN_STOP + 1))
+    
+    print(f"📅 Interval ani: {AN_START} - {AN_STOP}")
+    print(f"🧵 Thread-uri active: {MAX_THREADS}\n")
+    
+    # 3. Rulăm pool-ul de thread-uri în paralel
+    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+        futures = [
+            executor.submit(proceseaza_an, an, token_manager, client, gdrive_service) 
+            for an in ani_de_procesat
+        ]
+        for future in futures:
+            future.result()
+
+    print("\n🏁 Gata! Toate legile au fost colectate și urcate direct în folderul tău din Google Drive.")
+
+if __name__ == '__main__':
+    main()
