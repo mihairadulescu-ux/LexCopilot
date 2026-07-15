@@ -4,8 +4,8 @@ import threading
 import requests
 from concurrent.futures import ThreadPoolExecutor
 
-# URL-ul corect extras din structura WSDL-ului (se termină cu /basic)
-URL_API = "http://legislatie.just.ro/apiws/FreeWebService.svc/basic"
+# Endpoint-ul SOAP real de 4 litere: /SOAP
+URL_API = "http://legislatie.just.ro/apiws/FreeWebService.svc/SOAP"
 FOLDER_DESCARCARE = "legi_xml_brut"
 os.makedirs(FOLDER_DESCARCARE, exist_ok=True)
 
@@ -16,7 +16,7 @@ def safe_print(message):
         print(message, flush=True)
 
 def obtine_token_brut():
-    """Obține token-ul printr-un apel POST SOAP simplu la endpoint-ul basic."""
+    """Obține token-ul printr-un apel POST SOAP simplu la endpoint-ul /SOAP."""
     headers = {
         "Content-Type": "text/xml; charset=utf-8",
         "SOAPAction": "http://tempuri.org/IFreeWebService/GetToken"
@@ -93,7 +93,7 @@ def crawleaza_an_complet(token, an):
         xml_brut = descarca_pagina_xml(token, an, pagina)
         
         if not xml_brut:
-            # Dacă serverul a dat eroare temporară de rețea, mai încercăm o dată înainte de a renunța
+            # Dacă serverul a dat eroare temporară de rețea, mai încercăm o dată
             time.sleep(2)
             xml_brut = descarca_pagina_xml(token, an, pagina)
             if not xml_brut:
@@ -112,7 +112,7 @@ def crawleaza_an_complet(token, an):
         safe_print(f"💾 [An {an}][Pagina {pagina}] XML salvat.")
         pagina += 1
         
-        # O mică pauză de 100ms ca să nu punem prea multă presiune deodată
+        # O mică pauză de 100ms
         time.sleep(0.1)
 
 def porneste_crawler():
@@ -127,7 +127,6 @@ def porneste_crawler():
     safe_print(f"🚀 Pornim exact {max_paralel} descărcări în paralel...")
     
     with ThreadPoolExecutor(max_workers=max_paralel) as executor:
-        # Folosim o funcție lambda curată pentru map-ul paralel
         executor.map(lambda an: crawleaza_an_complet(token, an), ani_de_procesat)
 
 if __name__ == "__main__":
