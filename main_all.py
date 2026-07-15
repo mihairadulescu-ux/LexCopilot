@@ -24,7 +24,7 @@ GOOGLE_DRIVE_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
 START_YEAR = 1900
-END_YEAR = 2026  # Limita superioară de rulare
+END_YEAR = 2026  # Limita superioară de rulare (actualizat pentru 2026)
 
 
 def get_drive_service():
@@ -52,7 +52,7 @@ def get_already_downloaded_pages(service, target_year):
     """Scanează folderul Google Drive și returnează paginile deja descărcate PENTRU UN AN ANUME."""
     pages = set()
     page_token = None
-    # Căutăm fișierele cu formatul tău specific de denumire
+    # Căutăm extrem de specific doar fișierele din anul curent
     query = f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and name contains 'brut_legislatie_{target_year}_pag' and trashed = false"
 
     try:
@@ -68,9 +68,16 @@ def get_already_downloaded_pages(service, target_year):
 
             for file in response.get('files', []):
                 name = file.get('name', '')
-                match = re.search(r"pag(\d+)\.xml", name)
+                # Expresie regulată extrem de strictă: caută '_pag' urmat de numere, chiar înainte de '.xml'
+                # Astfel evităm să confundăm anul target_year (de ex. 1900) cu numărul paginii.
+                match = re.search(r"_pag(\d+)\.xml$", name)
                 if match:
-                    pages.add(int(match.group(1)))
+                    valoare_pagina = int(match.group(1))
+                    # Filtru de siguranță: nicio pagină reală într-un an normal pe Just.ro nu depășește 150
+                    if valoare_pagina < 150:
+                        pages.add(valoare_pagina)
+                    else:
+                        print(f"{GALBEN}⚠️ Ignorat număr pagină suspect în Drive: {valoare_pagina} (din fișierul: {name}){RESET}")
 
             page_token = response.get('nextPageToken', None)
             if not page_token:
@@ -120,7 +127,7 @@ def download_year(drive_service, composite_type_name, target_year):
     pages_to_process = []
     if downloaded_pages:
         max_page = max(downloaded_pages)
-        print(f"📦 {len(downloaded_pages)} pagini găsite în Drive pentru {target_year}. (Ultima pagină descărcată: {max_page})")
+        print(f"📦 {len(downloaded_pages)} pagini găsite în Drive pentru {target_year}. (Ultima pagină reală scanată: {max_page})")
         
         all_expected_pages = set(range(1, max_page + 1))
         gaps = sorted(list(all_expected_pages - downloaded_pages))
@@ -252,7 +259,7 @@ def download_laws_main():
                 print(f"{ROSU}💥 Eroare catastrofală izolată pentru anul {year}: {year_error}. Mergem la următorul.{RESET}")
                 time.sleep(60)
 
-        print(f"\n{VERDE}🎉🎉 PROCES COMPLETAT. Total fișiere încărcate în Drive: {total_files_all_years}{RESET}")
+        print(f"\n{VERDE}🎉🎉 PROCES COMPLETAT. Total fișiere noi încărcate în Drive: {total_files_all_years}{RESET}")
 
     except Exception as e:
         print(f"{ROSU}💥 Eroare critică la inițializare: {str(e)}{RESET}")
