@@ -1,4 +1,5 @@
-name: Descarcare XML de pe legislatie.just.ro
+name: Ruleaza Crawler Legislație Just
+
 on:
   workflow_dispatch: # Permite declanșarea manuală a crawler-ului din interfața GitHub
   schedule:
@@ -15,8 +16,7 @@ jobs:
     - name: Configureaza mediul Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.13'
-        cache: 'pip' # Optimizează timpul de rulare salvând cache-ul librăriilor
+        python-version: '3.10'
 
     - name: Instaleaza dependentele in runner
       run: |
@@ -25,7 +25,6 @@ jobs:
 
     - name: Ruleaza Scriptul de Descarcare Legislatie
       env:
-        # Mapăm secretul tău de pe GitHub direct în variabila pe care o caută scriptul Python
         GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
       run: |
         python main_all.py
