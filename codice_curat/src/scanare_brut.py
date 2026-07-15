@@ -49,25 +49,28 @@ def extrage_metadate_din_xml(xml_content):
         return None, None
 
 def descarca_si_scaneaza_xmluri(service):
-    """Listare brută a conținutului din folder, cu diagnosticare directă."""
+    """Listare brută a conținutului din folder, compatibilă cu Shared Drives."""
     emitenti_counter = Counter()
     tipuri_acte_counter = Counter()
     
-    # Cerem pur și simplu toate fișierele din folder, fără nicio filtrare preliminară de tip sau nume
+    # Interogare de bază
     query = f"'{FOLDER_SURSA_ID}' in parents and trashed = false"
     
-    print(f"Începem interogarea folderului sursă: {FOLDER_SURSA_ID}")
+    print(f"Începem interogarea folderului sursă (inclusiv Shared Drives): {FOLDER_SURSA_ID}")
     
     toate_fisierele = []
     page_token = None
     
     while True:
         try:
+            # Am adăugat suportul complet pentru Shared Drives aici
             results = service.files().list(
                 q=query, 
                 fields="nextPageToken, files(id, name, mimeType)", 
                 pageSize=1000,
-                pageToken=page_token
+                pageToken=page_token,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
             ).execute()
             
             toate_fisierele.extend(results.get("files", []))
@@ -78,18 +81,14 @@ def descarca_si_scaneaza_xmluri(service):
             print(f"Eroare critică la listarea fișierelor: {e}")
             break
 
-    # Diagnosticare: Arătăm ce am găsit în folder
     if not toate_fisierele:
-        print("\n!!! ATENȚIE: API-ul Google Drive a returnat 0 fișiere în acest folder.")
-        print("Motive posibile:")
-        print("1. Folderul este gol.")
-        print("2. Contul de serviciu (Service Account) NU are de fapt permisiune de citire/vizualizare pe acest folder specific.")
-        print("Recomandare: Verifică dacă adresa de e-mail a contului de serviciu are drept de 'Viewer' sau 'Editor' adăugat direct pe folderul sursă.")
+        print("\n!!! API-ul Google Drive a returnat tot 0 fișiere.")
+        print("Dacă folderul nu e gol și permisiunile sunt bune, verifică dacă ID-ul este exact al folderului (și nu cumva un shortcut).")
         return emitenti_counter, tipuri_acte_counter
 
     print(f"\nAPI-ul a detectat {len(toate_fisierele)} elemente în folder.")
     
-    # Filtrăm fișierele XML direct în codul Python pentru siguranță completă
+    # Filtrare după extensia .xml
     toate_xmlurile = [f for f in toate_fisierele if f['name'].lower().endswith('.xml')]
     
     print(f"Dintre acestea, {len(toate_xmlurile)} sunt fișiere cu extensia '.xml'.")
@@ -142,7 +141,14 @@ def salveaza_csv_in_drive(service, nume_fisier, date, antet):
     output.close()
     
     query = f"'{FOLDER_METADATE_ID}' in parents and name = '{nume_fisier}' and trashed = false"
-    existing_files = service.files().list(q=query, fields="files(id)").execute().get("files", [])
+    
+    # Adăugat suport Shared Drives și la căutarea CSV-ului de destinație
+    existing_files = service.files().list(
+        q=query, 
+        fields="files(id)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True
+    ).execute().get("files", [])
     
     media = MediaIoBaseUpload(
         io.BytesIO(csv_data), 
@@ -152,14 +158,22 @@ def salveaza_csv_in_drive(service, nume_fisier, date, antet):
     
     if existing_files:
         file_id = existing_files[0]["id"]
-        service.files().update(fileId=file_id, media_body=media).execute()
+        service.files().update(
+            fileId=file_id, 
+            media_body=media,
+            supportsAllDrives=True
+        ).execute()
         print(f"Fișierul {nume_fisier} a fost actualizat cu succes în folderul /Metadate.")
     else:
         metadata = {
             "name": nume_fisier,
             "parents": [FOLDER_METADATE_ID]
         }
-        service.files().create(body=metadata, media_body=media).execute()
+        service.files().create(
+            body=metadata, 
+            media_body=media,
+            supportsAllDrives=True
+        ).execute()
         print(f"Fișierul nou {nume_fisier} a fost creat cu succes în folderul /Metadate.")
 
 def main():
