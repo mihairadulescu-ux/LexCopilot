@@ -12,10 +12,15 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 # ======================================================================
-# CONFIGURARE GOOGLE DRIVE
+# CONFIGURARE GOOGLE DRIVE ȘI ANI DINAMICI (GITHUB MATRIX)
 # ======================================================================
 GOOGLE_DRIVE_FOLDER_ID = "1c8SEo8UrQVe6qgzPFGLXJFiMyLeI-r8D"
-MAX_DOWNLOAD_WORKERS = 25  # Numărul de thread-uri pentru citirea paralelă a fișierelor dummy
+MAX_DOWNLOAD_WORKERS = 40  # Numărul de thread-uri pentru citirea paralelă a fișierelor dummy
+
+# Preluăm anii din mediu (GitHub Actions) sau din argumente de consolă.
+# Dacă nu sunt definite, pornesc implicit pe tot intervalul de siguranță.
+START_YEAR = int(os.getenv("START_YEAR", "2000"))
+END_YEAR = int(os.getenv("END_YEAR", "2026"))
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -30,7 +35,6 @@ def extrage_contor_bis(status_string):
     """
     if not status_string:
         return 0
-    # Extragem doar caracterele numerice din textul stării
     cifre = "".join([c for c in status_string if c.isdigit()])
     if cifre:
         return int(cifre)
@@ -45,7 +49,6 @@ def obtine_creds():
 def instantiaza_drive(creds=None):
     if not creds:
         creds = obtine_creds()
-    # cache_discovery=False previne request-uri HTTP suplimentare inutile la inițializare
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 def decodific_si_proceseaza_dummy(creds, f_id, nume):
@@ -68,12 +71,17 @@ def decodific_si_proceseaza_dummy(creds, f_id, nume):
     except Exception:
         return nume, "dummy_final"
 
-def adu_fisiere_existente_in_drive(drive_service, folder_id):
+def adu_fisiere_existente_in_drive(drive_service, folder_id, an_start, an_stop):
     existente = {}
-    page_token = None
-    query = f"'{folder_id}' in parents and trashed = false"
     
-    print("   ↳ Scanăm metadatele din Drive...", flush=True)
+    # CONSTRUIRE QUERY PARȚIAL: Cerem doar fișierele din anii alocați acestui workflow!
+    # Format: (name contains 'MO_PI_2001_' or name contains 'MO_PI_2002_')
+    conditii_ani = " or ".join([f"name contains 'MO_PI_{an}_'" for an in range(an_start, an_stop + 1)])
+    query = f"'{folder_id}' in parents and ({conditii_ani}) and trashed = false"
+    
+    page_token = None
+    print(f"   ↳ Scanăm metadatele din Drive STRICT pentru anii {an_start} - {an_stop}...", flush=True)
+    
     while True:
         response = drive_service.files().list(
             q=query, 
@@ -102,12 +110,11 @@ def adu_fisiere_existente_in_drive(drive_service, folder_id):
     fisiere_de_verificat = [n for n, v in existente.items() if v["status"] == "dummy_verificabil"]
     if fisiere_de_verificat:
         total_verificabile = len(fisiere_de_verificat)
-        print(f"   ↳ Am detectat {total_verificabile} fișiere dummy de 1 byte. Pornim citirea paralelă cu {MAX_DOWNLOAD_WORKERS} thread-uri...", flush=True)
+        print(f"   ↳ Am detectat {total_verificabile} fișiere dummy în intervalul cerut. Pornim citirea paralelă cu {MAX_DOWNLOAD_WORKERS} thread-uri...", flush=True)
         
         creds = obtine_creds()
         progres = 0
         
-        # Execuție paralelă (I/O-bound) folosind ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=MAX_DOWNLOAD_WORKERS) as executor:
             futures = {
                 executor.submit(decodific_si_proceseaza_dummy, creds, existente[nume]["id"], nume): nume
@@ -147,17 +154,19 @@ def incarca_sau_actualizeaza_in_drive(drive_service, cale_locala, folder_id, fil
         print(f"❌ [Drive Err] Eroare scriere/update {nume_fisier}: {e}", flush=True)
     return False
 
+
 # ======================================================================
 # CORE CRAWLER INTELIGENT CU TIMEOUT EXTINS PENTRU FIȘIERE MARI
 # ======================================================================
 def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
     url_template = "https://monitoruloficial.ro/Monitorul-Oficial--PI--{numar}--{an}.html"
     
-    print("🔄 Pasul 1: Conectare la Google Drive și preluare index detaliat...", flush=True)
+    print(f"🔄 Pasul 1: Conectare la Google Drive (Interval de scanare: {an_start} - {am_stop})...", flush=True)
     try:
         drive_service = instantiaza_drive()
-        inventar_drive = adu_fisiere_existente_in_drive(drive_service, GOOGLE_DRIVE_FOLDER_ID)
-        print(f"📊 Scanare finalizată. Detectate {len(inventar_drive)} înregistrări în cloud.", flush=True)
+        # Pasăm intervalul anilor pentru a filtra căutarea direct în cloud!
+        inventar_drive = adu_fisiere_existente_in_drive(drive_service, GOOGLE_DRIVE_FOLDER_ID, an_start, am_stop)
+        print(f"📊 Scanare finalizată. Detectate {len(inventar_drive)} înregistrări locale în cloud pe acest interval.", flush=True)
     except Exception as e:
         print(f"🛑 Eroare critică la inițializarea Google Drive: {e}", flush=True)
         return
@@ -231,7 +240,7 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
 
     total_lipsa = len(coada_descarcare)
     if total_lipsa == 0:
-        print("\n🎉 Toate fișierele sunt la zi! Nimic de descărcat.", flush=True)
+        print("\n🎉 Toate fișierele sunt la zi pentru acest interval! Nimic de descărcat.", flush=True)
         return
         
     print(f"\n🚀 Pasul 3: Începem descărcarea a {total_lipsa} fișiere în coadă...", flush=True)
@@ -399,9 +408,15 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
         except Exception as e:
             print(f"⚠️ Nu am putut genera fișierul de descărcare manuală: {e}", flush=True)
     else:
-        print("\n🎉 Rularea completă s-a terminat cu succes!", flush=True)
+        print("\n🎉 Rularea completă s-a terminat cu succes pentru acest segment!", flush=True)
 
 if __name__ == "__main__":
-    an_s = int(sys.argv[1]) if len(sys.argv) >= 3 else 2000
-    an_f = int(sys.argv[2]) if len(sys.argv) >= 3 else 2026
+    # Suportă atât argumente din consolă (sys.argv) cât și variabilele de mediu din GitHub Actions
+    if len(sys.argv) >= 3:
+        an_s = int(sys.argv[1])
+        an_f = int(sys.argv[2])
+    else:
+        an_s = START_YEAR
+        an_f = END_YEAR
+        
     descarca_monitoare_precalculat(an_start=an_s, am_stop=an_f)
