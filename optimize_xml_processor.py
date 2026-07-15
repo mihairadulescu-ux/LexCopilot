@@ -9,22 +9,22 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
-# Configurare ID-uri din mediu sau constante
+# Configurare ID-uri
 XML_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
 METADATA_FOLDER_ID = "1Cpxs20QAtAPw_RIUsOOecJON9hHPlBXf"
-NUM_WORKERS = 4  # Numărul de procese paralele
-SAVE_INTERVAL = 500  # Salvare și upload la fiecare 500 de fișiere procesate
-LOCAL_CSV_PATH = "metadate_istorice_temp.csv"
+NUM_WORKERS = 4  
+SAVE_INTERVAL = 500  
+
+LOCAL_TIP_ACT_PATH = "tipuri_acte_temp.csv"
+LOCAL_EMITENT_PATH = "emitenti_temp.csv"
 
 def print_flush(message):
-    """Printează și golește buffer-ul instantaneu pentru GitHub Actions."""
     print(message, flush=True)
 
 def get_drive_service():
-    """Construiește o instanță curată și izolată a serviciului Google Drive."""
     sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if not sa_json:
-        raise ValueError("Lipsește GOOGLE_SERVICE_ACCOUNT_JSON din variabilele de mediu!")
+        raise ValueError("Lipsește GOOGLE_SERVICE_ACCOUNT_JSON!")
     
     creds_info = json.loads(sa_json)
     creds = service_account.Credentials.from_service_account_info(
@@ -33,31 +33,39 @@ def get_drive_service():
     )
     return build('drive', 'v3', credentials=creds, cache_discovery=False)
 
-def parse_xml_stream(xml_content):
-    """Parsează rapid XML-ul și extrage toate tag-urile ca metadate."""
-    metadata_list = []
+def parse_xml_for_normalization(xml_content):
+    """
+    Parsează XML-ul și extrage doar valorile unice pentru tip act și emitent.
+    """
+    tipuri_acte = set()
+    emitenti = set()
+    
     try:
         context = ET.iterparse(io.BytesIO(xml_content), events=('end',))
         for event, elem in context:
-            if len(elem) > 0 and elem.tag != 'Root': 
-                record = {}
-                for child in elem:
-                    if child.text and child.text.strip():
-                        record[child.tag] = child.text.strip()
-                    for attr_name, attr_val in child.attrib.items():
-                        record[f"{child.tag}_{attr_name}"] = attr_val
-                
-                if record:
-                    metadata_list.append(record)
-                    
-                elem.clear()  # Eliberăm imediat memoria RAM pentru a preveni acumulările
+            tag_lower = elem.tag.lower()
+            
+            # Detecție flexibilă pentru tipuri de acte/documente
+            is_tip_act = ("tip" in tag_lower and "act" in tag_lower) or ("tip" in tag_lower and "doc" in tag_lower)
+            
+            # Detecție flexibilă pentru emitenți
+            is_emitent = "emitent" in tag_lower or "emit" in tag_lower
+            
+            if is_tip_act or is_emitent:
+                val = elem.text.strip() if elem.text else ""
+                if val and len(val) <= 250:  # Limită preventivă pentru lungimea metadatelor
+                    if is_tip_act:
+                        tipuri_acte.add(val)
+                    if is_emitent:
+                        emitenti.add(val)
+                        
+            elem.clear()  # Eliberăm imediat nodul din RAM
     except Exception:
         pass
-            
-    return metadata_list
+        
+    return list(tipuri_acte), list(emitenti)
 
 def mark_as_processed(service, file_id, file_name):
-    """Marchează fișierul pe Google Drive ca fiind procesat prin appProperties."""
     try:
         service.files().update(
             fileId=file_id,
@@ -65,13 +73,9 @@ def mark_as_processed(service, file_id, file_name):
             supportsAllDrives=True
         ).execute()
     except Exception as e:
-        print_flush(f"[Avertisment] Nu s-a putut marca fișierul ca procesat pe Drive ({file_name}): {e}")
+        print_flush(f"[Avertisment] Nu s-a putut marca ca procesat {file_name}: {e}")
 
 def download_and_parse(file_id, file_name):
-    """
-    Descarcă, parsează și marchează XML-ul ca procesat.
-    Rulează într-un proces complet izolat, cu mecanism de retry la erorile SSL/rețea.
-    """
     retries = 3
     for attempt in range(retries):
         try:
@@ -85,27 +89,24 @@ def download_and_parse(file_id, file_name):
                 _, done = downloader.next_chunk()
                 
             xml_bytes = fh.getvalue()
-            records = parse_xml_stream(xml_bytes)
+            tipuri, emitenti = parse_xml_for_normalization(xml_bytes)
             
-            # Dacă s-a descărcat cu succes și s-a încercat parsarea, îl marcăm ca procesat pe Drive
             mark_as_processed(service, file_id, file_name)
-            return records
+            return tipuri, emitenti
             
         except Exception as e:
             if attempt < retries - 1:
-                # Așteptare progresivă înainte de retry în caz de mică pierdere de conexiune
                 time.sleep(1.5 * (attempt + 1))
                 continue
             else:
-                print_flush(f"[Eroare] Eșec definitiv la fișierul {file_name} după {retries} încercări: {str(e)}")
-                return []
+                print_flush(f"[Eroare] Eșec definitiv la {file_name} după {retries} încercări: {str(e)}")
+                return [], []
 
-def save_to_drive(service, local_file_path, drive_file_id=None):
-    """Urcă sau actualizează fișierul CSV pe Google Drive cu suport pentru Shared Drives."""
+def save_to_drive(service, local_file_path, filename_on_drive, drive_file_id=None):
     media = MediaFileUpload(local_file_path, mimetype='text/csv', resumable=True)
     
     if drive_file_id:
-        print_flush(f"-> Se actualizează CSV-ul pe Drive (File ID: {drive_file_id})...")
+        print_flush(f"-> Se actualizează {filename_on_drive} pe Drive (File ID: {drive_file_id})...")
         updated_file = service.files().update(
             fileId=drive_file_id,
             media_body=media,
@@ -113,9 +114,9 @@ def save_to_drive(service, local_file_path, drive_file_id=None):
         ).execute()
         return updated_file.get('id')
     else:
-        print_flush("-> Se creează fișierul CSV nou pe Drive...")
+        print_flush(f"-> Se creează fișierul {filename_on_drive} pe Drive...")
         file_metadata = {
-            'name': 'metadate_istorice_optimizat.csv',
+            'name': filename_on_drive,
             'parents': [METADATA_FOLDER_ID]
         }
         created_file = service.files().create(
@@ -128,37 +129,50 @@ def save_to_drive(service, local_file_path, drive_file_id=None):
 
 def main():
     main_service = get_drive_service()
+    print_flush(f"[INFO] Se listează TOATE fișierele neprocesate din folderul XML (ID: {XML_FOLDER_ID})...")
     
-    # 1. Listăm doar fișierele XML din folderul sursă care NU au fost marcate deja drept procesate
-    print_flush(f"[INFO] Se listează fișierele neprocesate din folderul XML (ID: {XML_FOLDER_ID})...")
-    
-    # Query inteligent: caută doar unde appProperties.procesat nu este 'true'
     query = f"'{XML_FOLDER_ID}' in parents and trashed = false and not appProperties has {{ key='procesat' and value='true' }}"
     
-    results = main_service.files().list(
-        q=query,
-        fields="files(id, name)",
-        pageSize=1000,
-        includeItemsFromAllDrives=True,
-        supportsAllDrives=True
-    ).execute()
+    files = []
+    page_token = None
     
-    files = results.get('files', [])
+    # Paginare infinită: strângem absolut toate fișierele disponibile pe Drive, nu doar primele 1000
+    while True:
+        results = main_service.files().list(
+            q=query,
+            fields="nextPageToken, files(id, name)",
+            pageSize=1000,
+            pageToken=page_token,
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True
+        ).execute()
+        
+        batch = results.get('files', [])
+        files.extend(batch)
+        print_flush(f"[INFO] S-au încărcat {len(files)} fișiere neprocesate din listă...")
+        
+        page_token = results.get('nextPageToken')
+        if not page_token:
+            break
+            
     if not files:
         print_flush("[INFO] Toate fișierele din folder sunt deja procesate sau folderul este gol!")
         return
 
-    print_flush(f"[INFO] Succes! Am găsit {len(files)} fișiere rămase de procesat.")
+    print_flush(f"[INFO] Gata lista! Pornim procesarea pentru TOATE cele {len(files)} fișiere găsite.")
     
-    all_records = []
+    all_tipuri_acte = set()
+    all_emitenti = set()
+    
     processed_count = 0
-    drive_csv_id = None
+    drive_tip_act_id = None
+    drive_emitent_id = None
     
-    if os.path.exists(LOCAL_CSV_PATH):
-        os.remove(LOCAL_CSV_PATH)
-        
-    # 2. Procesăm fișierele neprocesate în paralel folosind procese izolate
-    print_flush(f"[INFO] Pornim procesarea asincronă cu {NUM_WORKERS} procese izolate...")
+    for path in [LOCAL_TIP_ACT_PATH, LOCAL_EMITENT_PATH]:
+        if os.path.exists(path):
+            os.remove(path)
+            
+    print_flush(f"[INFO] Pornim procesarea asincronă cu {NUM_WORKERS} procese...")
     
     with ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
         futures = {
@@ -169,45 +183,64 @@ def main():
         for future in as_completed(futures):
             file_name = futures[future]
             try:
-                records = future.result()
-                all_records.extend(records)
+                tipuri, emitenti = future.result()
+                all_tipuri_acte.update(tipuri)
+                all_emitenti.update(emitenti)
             except Exception as exc:
-                print_flush(f"[Eroare Proces] Fișierul {file_name} a generat o excepție gravă în executor: {exc}")
+                print_flush(f"[Eroare Proces] Fișierul {file_name} a generat o excepție gravă: {exc}")
                 
             processed_count += 1
-            print_flush(f"[{processed_count}/{len(files)}] Procesat cu succes: {file_name}")
+            print_flush(f"[{processed_count}/{len(files)}] Procesat: {file_name}")
                 
-            # Sincronizare periodică pe Drive
+            # Sincronizare periodică pe Drive la fiecare SAVE_INTERVAL sau la finalul tuturor fișierelor
             if processed_count % SAVE_INTERVAL == 0 or processed_count == len(files):
-                print_flush(f"\n[Sincronizare] Salvare intermediară la {processed_count} fișiere...")
+                print_flush(f"\n[Sincronizare] Salvare nomenclatoare la {processed_count} fișiere...")
                 
-                if all_records:
-                    headers = set()
-                    for r in all_records:
-                        headers.update(r.keys())
-                    headers = sorted(list(headers))
-                    
-                    with open(LOCAL_CSV_PATH, 'w', newline='', encoding='utf-8') as f:
-                        writer = csv.DictWriter(f, fieldnames=headers)
-                        writer.writeheader()
-                        writer.writerows(all_records)
-                    
+                # 1. Salvare Nomenclator Tip Acte
+                if all_tipuri_acte:
+                    with open(LOCAL_TIP_ACT_PATH, 'w', newline='', encoding='utf-8') as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["Valoare_Unica"])
+                        for val in sorted(list(all_tipuri_acte)):
+                            writer.writerow([val])
                     try:
-                        # Upload sigur (nu dă crash întregului proces dacă eșuează temporar o rețea de upload)
-                        drive_csv_id = save_to_drive(main_service, LOCAL_CSV_PATH, drive_csv_id)
-                        print_flush(f"[Sincronizare] Finalizată cu succes pentru primele {processed_count} fișiere!\n")
-                    except Exception as upload_err:
-                        print_flush(f"[Eroare Sincronizare] Nu s-a putut încărca batch-ul pe Drive: {upload_err}")
-                else:
-                    print_flush("[Sincronizare] Nu există date noi în acest calup.\n")
+                        drive_tip_act_id = save_to_drive(
+                            main_service, 
+                            LOCAL_TIP_ACT_PATH, 
+                            "nomenclator_tip_act.csv", 
+                            drive_tip_act_id
+                        )
+                    except Exception as e:
+                        print_flush(f"[Eroare Sincronizare Tip Act]: {e}")
+                
+                # 2. Salvare Nomenclator Emitenți
+                if all_emitenti:
+                    with open(LOCAL_EMITENT_PATH, 'w', newline='', encoding='utf-8') as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["Valoare_Unica"])
+                        for val in sorted(list(all_emitenti)):
+                            writer.writerow([val])
+                    try:
+                        drive_emitent_id = save_to_drive(
+                            main_service, 
+                            LOCAL_EMITENT_PATH, 
+                            "nomenclator_emitent.csv", 
+                            drive_emitent_id
+                        )
+                    except Exception as e:
+                        print_flush(f"[Eroare Sincronizare Emitent]: {e}")
+                
+                print_flush("[Sincronizare] Finalizată cu succes pentru nomenclatoare!\n")
 
-    if os.path.exists(LOCAL_CSV_PATH):
-        try:
-            os.remove(LOCAL_CSV_PATH)
-        except OSError:
-            pass
+    # Curățenie locală finală
+    for path in [LOCAL_TIP_ACT_PATH, LOCAL_EMITENT_PATH]:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
-    print_flush(f"[FINAL] Procesare completă! S-au prelucrat {processed_count} fișiere noi în această rulare.")
+    print_flush(f"[FINAL] Procesare completă! S-au generat cu succes nomenclatoarele cu valori unice pentru toate cele {processed_count} fișiere.")
 
 if __name__ == "__main__":
     main()
