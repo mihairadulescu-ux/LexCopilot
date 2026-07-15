@@ -4,14 +4,14 @@ from concurrent.futures import ThreadPoolExecutor
 from zeep import Client, Settings
 from zeep.exceptions import Fault
 
-# Activăm logarea pentru a vedea detaliile SOAP în consolă (la fel ca în logurile tale)
+# Activăm logarea pentru detalii suplimentare
 logging.basicConfig(level=logging.INFO)
-logging.getLogger('zeep.transports').setLevel(logging.DEBUG)
+logging.getLogger('zeep.transports').setLevel(logging.WARNING) # Am redus din logurile XML să fie consola curată
 
 # Configurații API Just.ro
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
-# Configurare Zeep pentru a fi mai tolerant cu schemele XML
+# Configurare Zeep pentru a tolera schemele XML complexe
 settings = Settings(strict=False, xml_huge_tree=True)
 client = Client(wsdl=WSDL_URL, settings=settings)
 
@@ -25,7 +25,6 @@ CHIEI_PERMISE_SOAP = {
     'SearchTitlu'
 }
 
-# Blocaj pentru a asigura scrierea ordonată în consolă din thread-uri diferite
 print_lock = threading.Lock()
 
 def safe_print(message):
@@ -36,7 +35,6 @@ def obtine_token_nou():
     """Obține un token proaspăt de sesiune de la API-ul Just.ro."""
     try:
         safe_print("[🔑] Inițializare: Obținem token nou pentru Portalul Legislativ...")
-        # Apelăm metoda GetToken expusă de serviciul SOAP
         token = client.service.GetToken()
         safe_print(f"[🔑] Token generat cu succes: {token[:15]}...")
         return token
@@ -46,19 +44,15 @@ def obtine_token_nou():
 
 def curata_si_formateaza_parametri(parametri_raw):
     """
-    Filtrează dicționarul de parametri pentru a păstra doar cheile permise 
-    și formatează corect tipurile de date conform WSDL-ului (int și string).
+    Filtrează dicționarul de parametri pentru a păstra doar cheile permise.
     """
     parametri_curati = {}
-    
     for cheie in CHIEI_PERMISE_SOAP:
         valoare = parametri_raw.get(cheie, None)
         
-        # Tratăm parametrii numerici (trebuie să fie int)
         if cheie in ['NumarPagina', 'RezultatePagina']:
             parametri_curati[cheie] = int(valoare) if valoare is not None else 0
         else:
-            # Tratăm parametrii de tip text (trebuie să fie string, nu None)
             if valoare is None:
                 parametri_curati[cheie] = ""
             else:
@@ -67,49 +61,47 @@ def curata_si_formateaza_parametri(parametri_raw):
     return parametri_curati
 
 def crawleaza_an_si_pagina(token, an, pagina=0, rezultate_per_pagina=50):
-    """Trimite cererea de căutare curățată către API."""
+    """Trimite cererea de căutare corectată structural către API."""
     
-    # Aceștia sunt parametrii compleți pe care probabil îi avea crawlerul tău inițial
+    # Parametrii tăi originali
     parametri_raw = {
         'NumarPagina': pagina,
         'RezultatePagina': rezultate_per_pagina,
         'SearchAn': an,
-        'SearchDomeniu': None,      # Va fi eliminat la filtrare
-        'SearchEmitent': None,      # Va fi eliminat la filtrare
-        'SearchModificata': None,   # Va fi eliminat la filtrare
+        'SearchDomeniu': None,
+        'SearchEmitent': None,
+        'SearchModificata': None,
         'SearchNumar': None,
-        'SearchRepublicata': None,  # Va fi eliminat la filtrare (Cauza erorii!)
+        'SearchRepublicata': None, # Aceasta era prima eroare (eliminată prin filtrare)
         'SearchText': None,
-        'SearchTip': None,          # Va fi eliminat la filtrare
+        'SearchTip': None,
         'SearchTitlu': None
     }
     
-    # Aplicăm curățarea automată
+    # Curățăm parametrii pentru CompositeType
     parametri_filtrati = curata_si_formateaza_parametri(parametri_raw)
     
-    safe_print(f"🔍 [An {an}][Pagina {pagina}] Trimitem cerere cu parametrii filtrați: {parametri_filtrati}")
+    safe_print(f"🔍 [An {an}][Pagina {pagina}] Trimitem cerere către API...")
     
     try:
-        # Recreăm structura exactă pe care o cere serviciul SOAP Just.ro.
-        # În funcție de numele exact al metodei din WSDL, acesta se apelează de regulă ca mai jos.
-        # Parametrul 'SearchParam' este obiectul de tip CompositeType.
+        # CORECTURĂ: Am schimbat din SearchParam/token în SearchModel/tokenKey
         rezultat = client.service.Search(
-            token=token,
-            SearchParam=parametri_filtrati
+            SearchModel=parametri_filtrati,
+            tokenKey=token
         )
         
         safe_print(f"✅ [An {an}][Pagina {pagina}] Succes! Am primit rezultatele.")
         return rezultat
         
     except Fault as soap_fault:
-        safe_print(f"⚠️ [An {an}] Eroare de protocol SOAP la pagina {pagina}: {soap_fault}")
+        safe_print(f"⚠️ [An {an}] Eroare SOAP: {soap_fault}")
     except Exception as e:
-        safe_print(f"⚠️ [An {an}] Excepție neașteptată la pagina {pagina}: {e}")
+        safe_print(f"⚠️ [An {an}] Excepție neașteptată: {e}")
     
     return None
 
 def porneste_crawler():
-    """Funcția principală care orchestrează thread-urile și intervalul de ani."""
+    """Funcția principală care orchestrează thread-urile."""
     token = obtine_token_nou()
     if not token:
         safe_print("🛑 Imposibil de continuat fără token valid.")
@@ -121,12 +113,8 @@ def porneste_crawler():
     safe_print(f"📅 Interval ani selectat: 2000 - 2019")
     safe_print(f"🧵 Thread-uri active: {max_threads}")
     
-    # Folosim un ThreadPoolExecutor pentru a gestiona cele 4 thread-uri simultan
     with ThreadPoolExecutor(max_workers=max_threads) as executor:
-        # Trimitem joburile în paralel pentru fiecare an în parte (începând cu pagina 0)
         futures = [executor.submit(crawleaza_an_si_pagina, token, an, 0) for an in ani_de_procesat]
-        
-        # Așteptăm ca toate thread-urile să își termine execuția curentă
         for future in futures:
             future.result()
 
