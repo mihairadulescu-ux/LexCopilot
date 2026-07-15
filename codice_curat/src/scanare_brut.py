@@ -7,7 +7,8 @@ from collections import Counter
 import xml.etree.ElementTree as ET
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+# IMPORT CORECTAT: Am adăugat MediaIoBaseUpload pentru fluxuri în memorie
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 # ID-urile folderelor tale din Google Drive
 FOLDER_SURSA_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
@@ -63,7 +64,7 @@ def descarca_si_scaneaza_xmluri(service):
     files = results.get("files", [])
     
     if not files:
-        print("Nu s-au găsit fișiere XML în folderul sursă.")
+        print("Nu s-au găsit fișiere XML în folderul sursă. Verifică dacă ai dat share folderului cu emailul din Service Account!")
         return emitenti_counter, tipuri_acte_counter
 
     print(f"Am găsit {len(files)} fișiere XML. Începe scanarea...")
@@ -113,7 +114,8 @@ def salveaza_csv_in_drive(service, nume_fisier, date, antet):
     query = f"'{FOLDER_METADATE_ID}' in parents and name = '{nume_fisier}' and trashed = false"
     existing_files = service.files().list(q=query, fields="files(id)").execute().get("files", [])
     
-    media = MediaFileUpload(
+    # REPARAT: Folosim MediaIoBaseUpload în loc de MediaFileUpload pentru fișiere virtuale
+    media = MediaIoBaseUpload(
         io.BytesIO(csv_data), 
         mimetype="text/csv", 
         resumable=True
@@ -138,11 +140,13 @@ def main():
         service = obtine_serviciu_drive()
         emitenti, tipuri_acte = descarca_si_scaneaza_xmluri(service)
         
-        # Salvare rezultate în folderul /Metadate din Drive
-        salveaza_csv_in_drive(service, "emitenti_brut.csv", emitenti, ["Emitent_Original", "Aparitii"])
-        salveaza_csv_in_drive(service, "tipuri_acte_brut.csv", tipuri_acte, ["TipAct_Original", "Aparitii"])
-        
-        print("Procesul s-a încheiat cu succes! Fișierele sunt gata pentru normalizare.")
+        # Dacă am găsit date relevante, le exportăm
+        if emitenti or tipuri_acte:
+            salveaza_csv_in_drive(service, "emitenti_brut.csv", emitenti, ["Emitent_Original", "Aparitii"])
+            salveaza_csv_in_drive(service, "tipuri_acte_brut.csv", tipuri_acte, ["TipAct_Original", "Aparitii"])
+            print("Procesul s-a încheiat cu succes! Fișierele sunt gata pentru normalizare.")
+        else:
+            print("Nu s-a generat niciun raport deoarece nu au putut fi citite XML-uri.")
     except Exception as e:
         print(f"A apărut o eroare critică în timpul execuției: {e}")
 
