@@ -80,23 +80,18 @@ def incarca_in_google_drive(continut_xml, nume_fisier):
 
 def descarca_pagina_direct(client_soap, token, an, pagina):
     """
-    Trimite cererea SOAP secvențial. Datele sunt izolate complet 
-    pentru că rulăm pe un singur fir de execuție.
+    Trimite cererea SOAP și returnează direct rezultatul apelului, 
+    care este stringul XML decodificat și curat.
     """
     search_model = client_soap.factory.create('SearchModel')
     search_model.NumarPagina = pagina
     search_model.RezultatePagina = 50
     search_model.SearchAn = an
     
-    # Trimite request-ul SOAP
-    client_soap.service.Search(search_model, token)
+    # Executăm apelul SOAP și salvăm direct rezultatul întors de server!
+    rezultat_xml = client_soap.service.Search(search_model, token)
     
-    # Obține XML-ul brut
-    xml_brut = client_soap.last_received()
-    
-    if not xml_brut:
-        return None
-    return str(xml_brut)
+    return rezultat_xml
 
 def crawleaza_an_complet(client_soap, token, an):
     """Parcurge pagină cu pagină pentru un singur an, complet secvențial."""
@@ -105,29 +100,29 @@ def crawleaza_an_complet(client_soap, token, an):
         print(f"📥 [An {an}][Pagina {pagina}] Se descarcă de pe Just...", flush=True)
         
         try:
-            xml_brut = descarca_pagina_direct(client_soap, token, an, pagina)
+            xml_curat = descarca_pagina_direct(client_soap, token, an, pagina)
         except Exception as e:
             print(f"⚠️ [An {an}][Pagina {pagina}] Eroare: {e}. Reîncercăm peste 5 secunde...", flush=True)
             time.sleep(5)
             try:
-                xml_brut = descarca_pagina_direct(client_soap, token, an, pagina)
+                xml_curat = descarca_pagina_direct(client_soap, token, an, pagina)
             except Exception:
                 print(f"❌ [An {an}][Pagina {pagina}] Eșec definitiv la descărcare.", flush=True)
                 break
 
-        if not xml_brut:
-            print(f"🛑 [An {an}] Nu s-a putut obține răspuns pentru pagina {pagina}. Ne oprim.", flush=True)
+        if not xml_curat:
+            print(f"🛑 [An {an}] Răspunsul este gol pentru pagina {pagina}. Ne oprim.", flush=True)
             break
             
-        # Verificăm dacă structura XML returnată conține date reale (legi)
-        if "<Legi />" in xml_brut or "<Legi" not in xml_brut or "<Id>" not in xml_brut:
+        # Acum verificările vor funcționa perfect pe XML-ul curat
+        if "<Legi />" in xml_curat or "<Legi" not in xml_curat or "<Id>" not in xml_curat:
             print(f"🛑 [An {an}] S-au terminat paginile la indexul {pagina}.", flush=True)
             break
             
         nume_fisier = f"an_{an}_pag_{pagina}.xml"
         
         # Urcăm fișierul imediat
-        drive_file_id = incarca_in_google_drive(xml_brut, nume_fisier)
+        drive_file_id = incarca_in_google_drive(xml_curat, nume_fisier)
         
         if drive_file_id:
             print(f"☁️ [An {an}][Pagina {pagina}] Salvat în Shared Drive! ID: {drive_file_id[:10]}...", flush=True)
@@ -135,8 +130,8 @@ def crawleaza_an_complet(client_soap, token, an):
             print(f"❌ [An {an}][Pagina {pagina}] Eșec la salvarea în Shared Drive.", flush=True)
             
         pagina += 1
-        # O mică pauză de 200ms între pagini pentru a fi buni cetățeni ai internetului
-        time.sleep(0.2)
+        # O mică pauză de protectie
+        time.sleep(0.3)
 
 def porneste_crawler():
     # 1. Conexiune Google Drive
@@ -168,8 +163,7 @@ def porneste_crawler():
     # Parcurgem anii unul câte unul
     for an in ani_de_procesat:
         crawleaza_an_complet(client_soap, token, an)
-        # O mică pauză de un sfert de secundă între ani
-        time.sleep(0.25)
+        time.sleep(0.5)
 
     print("✅ Descărcarea s-a încheiat cu succes pentru toți anii!", flush=True)
 
