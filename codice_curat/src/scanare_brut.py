@@ -45,44 +45,62 @@ def extrage_metadate_din_xml(xml_content):
         tip_act = curata_text(tip_act_elem.text) if tip_act_elem is not None else None
         
         return emitent, tip_act
-    except Exception as e:
+    except Exception:
         return None, None
 
 def descarca_si_scaneaza_xmluri(service):
-    """Căutare simplă și plată, bazată pe numele fișierului."""
+    """Listare brută a conținutului din folder, cu diagnosticare directă."""
     emitenti_counter = Counter()
     tipuri_acte_counter = Counter()
     
-    # Folosim o căutare flexibilă după extensia .xml în loc de mimeType strict
-    query = f"'{FOLDER_SURSA_ID}' in parents and name contains '.xml' and trashed = false"
+    # Cerem pur și simplu toate fișierele din folder, fără nicio filtrare preliminară de tip sau nume
+    query = f"'{FOLDER_SURSA_ID}' in parents and trashed = false"
     
-    print("Începe căutarea fișierelor .xml direct în folder...")
+    print(f"Începem interogarea folderului sursă: {FOLDER_SURSA_ID}")
     
-    toate_xmlurile = []
+    toate_fisierele = []
     page_token = None
     
     while True:
         try:
             results = service.files().list(
                 q=query, 
-                fields="nextPageToken, files(id, name)", 
+                fields="nextPageToken, files(id, name, mimeType)", 
                 pageSize=1000,
                 pageToken=page_token
             ).execute()
             
-            toate_xmlurile.extend(results.get("files", []))
+            toate_fisierele.extend(results.get("files", []))
             page_token = results.get('nextPageToken')
             if not page_token:
                 break
         except Exception as e:
-            print(f"Eroare la listarea fișierelor: {e}")
+            print(f"Eroare critică la listarea fișierelor: {e}")
             break
-            
-    if not toate_xmlurile:
-        print("Nu s-au găsit fișiere care să conțină '.xml' în nume direct în folderul sursă.")
+
+    # Diagnosticare: Arătăm ce am găsit în folder
+    if not toate_fisierele:
+        print("\n!!! ATENȚIE: API-ul Google Drive a returnat 0 fișiere în acest folder.")
+        print("Motive posibile:")
+        print("1. Folderul este gol.")
+        print("2. Contul de serviciu (Service Account) NU are de fapt permisiune de citire/vizualizare pe acest folder specific.")
+        print("Recomandare: Verifică dacă adresa de e-mail a contului de serviciu are drept de 'Viewer' sau 'Editor' adăugat direct pe folderul sursă.")
         return emitenti_counter, tipuri_acte_counter
 
-    print(f"Am găsit {len(toate_xmlurile)} fișiere XML. Începe scanarea lor...")
+    print(f"\nAPI-ul a detectat {len(toate_fisierele)} elemente în folder.")
+    
+    # Filtrăm fișierele XML direct în codul Python pentru siguranță completă
+    toate_xmlurile = [f for f in toate_fisierele if f['name'].lower().endswith('.xml')]
+    
+    print(f"Dintre acestea, {len(toate_xmlurile)} sunt fișiere cu extensia '.xml'.")
+    
+    if not toate_xmlurile:
+        print("\nExemple de fișiere detectate în folder (primele 5):")
+        for f in toate_fisierele[:5]:
+            print(f" - Nume: {f['name']} | Tip MIME: {f['mimeType']}")
+        return emitenti_counter, tipuri_acte_counter
+
+    print("Începe descărcarea și scanarea XML-urilor...")
     
     for idx, file in enumerate(toate_xmlurile, 1):
         file_id = file["id"]
@@ -154,7 +172,7 @@ def main():
             salveaza_csv_in_drive(service, "tipuri_acte_brut.csv", tipuri_acte, ["TipAct_Original", "Aparitii"])
             print("Procesul s-a încheiat cu succes!")
         else:
-            print("Nu s-au putut colecta metadate. Asigură-te că fișierele din folder au extensia '.xml'.")
+            print("Nu s-au putut colecta date.")
     except Exception as e:
         print(f"A apărut o eroare critică în timpul execuției: {e}")
 
