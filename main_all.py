@@ -108,28 +108,22 @@ def crawleaza_an_complet(client_soap, token, an):
                 print(f"❌ [An {an}][Pagina {pagina}] Eșec definitiv la descărcare.", flush=True)
                 break
 
-        # Convertim răspunsul în text indiferent de ce tip de obiect ne returnează suds
-        xml_text = str(raspuns).strip()
-
-        # --- DIAGNOZĂ SALVATOARE (Debug logs) ---
-        print(f"🔍 [DEBUG An {an}] Tip răspuns: {type(raspuns)} | Lungime text: {len(xml_text)}", flush=True)
-        if len(xml_text) > 0:
-            # Afișăm primele 200 de caractere ca să vedem exact structura primită în consolă
-            print(f"🔍 [DEBUG An {an}] Preview răspuns: {xml_text[:200]}...", flush=True)
-        # ----------------------------------------
-
-        # Verificăm dacă structura XML returnată conține date reale
-        if not xml_text or "<Legi />" in xml_text or "<Legi" not in xml_text or "<Id>" not in xml_text:
-            print(f"🛑 [An {an}] S-au terminat paginile sau structura nu este validă la indexul {pagina}.", flush=True)
+        # Verificăm dacă structura de date conține legi (folosind structura nativă Python)
+        if not raspuns or not hasattr(raspuns, 'Legi') or not raspuns.Legi:
+            print(f"🛑 [An {an}] S-au terminat paginile la indexul {pagina}.", flush=True)
             break
             
+        # Extragem XML-ul brut (SOAP Envelope complet) direct din tranzacția HTTP
+        xml_text_brut = str(client_soap.last_received())
+        
         nume_fisier = f"an_{an}_pag_{pagina}.xml"
         
-        # Urcăm fișierul în Drive
-        drive_file_id = incarca_in_google_drive(xml_text, nume_fisier)
+        # Urcăm fișierul XML brut în Drive
+        drive_file_id = incarca_in_google_drive(xml_text_brut, nume_fisier)
         
         if drive_file_id:
-            print(f"☁️ [An {an}][Pagina {pagina}] Salvat în Shared Drive! ID: {drive_file_id[:10]}...", flush=True)
+            numar_legi = len(raspuns.Legi)
+            print(f"☁️ [An {an}][Pagina {pagina}] Salvat cu succes! Conține {numar_legi} legi. ID Drive: {drive_file_id[:10]}...", flush=True)
         else:
             print(f"❌ [An {an}][Pagina {pagina}] Eșec la salvarea în Shared Drive.", flush=True)
             
