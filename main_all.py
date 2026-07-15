@@ -41,7 +41,6 @@ def obtine_serviciu_gdrive():
         creds = service_account.Credentials.from_service_account_info(
             info, scopes=['https://www.googleapis.com/auth/drive']
         )
-        # Folosim versiunea v3 a API-ului
         return build('drive', 'v3', credentials=creds)
     except Exception as e:
         print(f"❌ EROARE CRITICĂ la inițializarea credențialelor Google: {e}")
@@ -61,7 +60,7 @@ class TokenManager:
         with self.lock:
             if self.token is None or forta_reproaspatare:
                 if forta_reproaspatare:
-                    print("\n[🔑] Tokenul a expirat. Generăm unul nou...")
+                    print("\n[🔑] Tokenul a expirat sau este invalid. Generăm unul nou...")
                 else:
                     print("\n[🔑] Inițializare: Obținem token nou pentru Portalul Legislativ...")
                 
@@ -109,43 +108,60 @@ def proceseaza_an(an, token_manager, client, gdrive_service):
     token = token_manager.get_valid_token()
     
     while True:
+        # Trimitem structura COMPLETĂ cerută de .NET WCF, chiar și campurile goale (nule).
+        # Fără ele, serverul Just.ro ignoră parametrii și returnează 0 rezultate.
         search_params = {
             'NumarPagina': pagina,
             'RezultatePagina': rezultate_pe_pagina,
             'SearchAn': an,
+            'SearchDomeniu': None,
+            'SearchEmitent': None,
+            'SearchModificata': None,
+            'SearchNumar': None,
+            'SearchRepublicata': None,
+            'SearchText': None,
+            'SearchTip': None,
+            'SearchTitlu': None
         }
         
         try:
+            # Apelăm serviciul SOAP transmițând parametrii compleți și tokenul
             response = client.service.Search(search_params, token)
             
-            if response and hasattr(response, 'Legi') and response.Legi:
+            if response and hasattr(response, 'Legi') and response.Legi and hasattr(response.Legi, 'Legi'):
                 lista_legi = response.Legi.Legi
+                
+                # Dacă lista este goală, înseamnă că am parcurs toate paginile din acest an
                 if not lista_legi:
-                    print(f"✅ [An {an}] Finalizat complet.")
+                    print(f"✅ [An {an}] Finalizat complet (s-a atins sfârșitul listei).")
                     break
                 
                 # Construim structura fișierului în memorie
                 buffer_text = []
                 for lege in lista_legi:
-                    buffer_text.append(f"ID: {lege.IdValoare} | Titlu: {lege.Titlu} | Data: {lege.DataVigoare}")
+                    id_val = getattr(lege, 'IdValoare', 'N/A')
+                    titlu_val = getattr(lege, 'Titlu', 'Fără Titlu')
+                    data_val = getattr(lege, 'DataVigoare', 'Fără Dată')
+                    buffer_text.append(f"ID: {id_val} | Titlu: {titlu_val} | Data: {data_val}")
                 
                 continut_final = "\n".join(buffer_text)
                 nume_fisier_gdrive = f"legi_{an}_pag_{pagina}.txt"
                 
-                # Încărcare în GDrive folosind parametrii corporate corectati
+                # Încărcare în GDrive corporate
                 incarca_in_gdrive(gdrive_service, nume_fisier_gdrive, continut_final)
                 
                 print(f"☁️ [An {an}] Pagina {pagina} salvată direct în GDrive ({len(lista_legi)} acte).")
                 pagina += 1
                 
-                time.sleep(random.uniform(0.3, 0.6))
+                # Delay de siguranță pentru a evita blocarea pe IP de către API-ul guvernamental
+                time.sleep(random.uniform(0.5, 1.2))
                 
             else:
-                print(f"ℹ️ [An {an}] S-a atins capătul listei la pagina {pagina}.")
+                print(f"ℹ️ [An {an}] Nu s-au întors date la pagina {pagina} (Răspuns gol).")
                 break
                 
         except Fault as soap_fault:
-            # Tratăm expirarea tokenului de Portalul Legislativ
+            # Tratăm expirarea tokenului de pe portal
             fault_string = str(soap_fault).lower()
             if "token" in fault_string or "expired" in fault_string or "invalid" in fault_string:
                 token = token_manager.get_valid_token(forta_reproaspatare=True)
@@ -177,7 +193,7 @@ def main():
     print(f"📅 Interval ani selectat: {AN_START} - {AN_STOP}")
     print(f"🧵 Thread-uri active: {MAX_THREADS}\n")
     
-    # 3. Pornim execuția paralelă
+    # 3. Pornim execuția paralelă pe ani
     with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         futures = [
             executor.submit(proceseaza_an, an, token_manager, client, gdrive_service) 
