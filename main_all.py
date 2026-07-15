@@ -1,146 +1,129 @@
 import os
-import logging
+import time
 import threading
+import requests
 from concurrent.futures import ThreadPoolExecutor
-from zeep import Client, Settings
-from zeep.exceptions import Fault
-from zeep.plugins import HistoryPlugin  # Necesar pentru a prinde XML-ul brut
-from lxml import etree                  # Pentru a procesa și formata frumos XML-ul
 
-# Reducem logurile la minim
-logging.basicConfig(level=logging.INFO)
-logging.getLogger('zeep.transports').setLevel(logging.WARNING)
-
-# URL-ul oficial pentru Portalul Legislativ Just.ro
-WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
-
-# Folderul unde se vor salva XML-urile
+# Configurare
+URL_API = "http://legislatie.just.ro/apiws/FreeWebService.svc"
 FOLDER_DESCARCARE = "legi_xml_brut"
 os.makedirs(FOLDER_DESCARCARE, exist_ok=True)
-
-# Singurele 6 chei permise de structura "CompositeType" a API-ului
-CHIEI_PERMISE_SOAP = {
-    'NumarPagina',
-    'RezultatePagina',
-    'SearchAn',
-    'SearchNumar',
-    'SearchText',
-    'SearchTitlu'
-}
 
 print_lock = threading.Lock()
 
 def safe_print(message):
     with print_lock:
-        print(message)
+        print(message, flush=True)
 
-def curata_si_formateaza_parametri(parametri_raw):
-    parametri_curati = {}
-    for cheie in CHIEI_PERMISE_SOAP:
-        valoare = parametri_raw.get(cheie, None)
-        
-        if cheie in ['NumarPagina', 'RezultatePagina']:
-            parametri_curati[cheie] = int(valoare) if valoare is not None else 0
-        else:
-            if valoare is None:
-                parametri_curati[cheie] = ""
-            else:
-                parametri_curati[cheie] = str(valoare)
-                
-    return parametri_curati
-
-def salveaza_xml_fizic(an, pagina, xml_element):
-    """Transformă elementul XML primit într-un string formatat și îl scrie pe disk."""
-    # Convertim elementul XML în bytes (cu indentare frumoasă)
-    xml_brut_bytes = etree.tostring(xml_element, pretty_print=True, encoding='utf-8')
+def obtine_token_brut():
+    """Obține token-ul printr-un apel POST SOAP simplu."""
+    headers = {
+        "Content-Type": "text/xml; charset=utf-8",
+        "SOAPAction": "http://tempuri.org/IFreeWebService/GetToken"
+    }
     
-    # Numele fișierului brut (ex: legi_xml_brut/an_2000_pag_0.xml)
-    nume_fisier = os.path.join(FOLDER_DESCARCARE, f"an_{an}_pag_{pagina}.xml")
+    # Plicul SOAP standard pentru a cere Token-ul
+    soap_envelope = """<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tem="http://tempuri.org/">
+       <soapenv:Header/>
+       <soapenv:Body>
+          <tem:GetToken/>
+       </soapenv:Body>
+    </soapenv:Envelope>"""
     
-    with open(nume_fisier, "wb") as f:
-        f.write(xml_brut_bytes)
-        
-    safe_print(f"💾 [An {an}][Pagina {pagina}] XML brut salvat în: {nume_fisier}")
-
-def crawleaza_an_complet(an, rezultate_per_pagina=50):
-    """
-    Descarcă TOATE paginile sub formă de XML brut pentru un an anume.
-    Fiecare fir de execuție își creează propriul client cu propriul istoric (Thread-Safe).
-    """
-    # Creăm un istoric și un client Zeep dedicat pentru acest thread
-    history = HistoryPlugin()
-    settings = Settings(strict=False, xml_huge_tree=True)
-    client = Client(wsdl=WSDL_URL, settings=settings, plugins=[history])
-    
-    # Obținem token-ul în interiorul thread-ului
     try:
-        token = client.service.GetToken()
+        safe_print("[🔑] Solicităm token nou...")
+        response = requests.post(URL_API, data=soap_envelope, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        # Extragem token-ul direct din XML-ul primit prin string manipulation simplu
+        text = response.text
+        start = text.find("<GetTokenResult>") + len("<GetTokenResult>")
+        end = text.find("</GetTokenResult>")
+        
+        if start != -1 and end != -1:
+            token = text[start:end]
+            safe_print(f"[🔑] Token primit cu succes: {token[:15]}...")
+            return token
     except Exception as e:
-        safe_print(f"🛑 [An {an}] Nu s-a putut obține token-ul: {e}")
-        return
+        safe_print(f"❌ Eroare la obținerea token-ului: {e}")
+    return None
 
-    pagina = 0
+def descarca_pagina_xml(token, an, pagina, rezultate_per_pagina=50):
+    """Trimite cererea de căutare și salvează XML-ul brut direct de pe rețea."""
+    headers = {
+        "Content-Type": "text/xml; charset=utf-8",
+        "SOAPAction": "http://tempuri.org/IFreeWebService/Search"
+    }
     
+    # Plicul SOAP brut pentru căutare (SearchModel)
+    soap_envelope = f"""<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tem="http://tempuri.org/" xmlns:leg="http://schemas.datacontract.org/2004/07/Legislatie.Just.Data.Models">
+       <soapenv:Header/>
+       <soapenv:Body>
+          <tem:Search>
+             <tem:SearchModel>
+                <leg:NumarPagina>{pagina}</leg:NumarPagina>
+                <leg:RezultatePagina>{rezultate_per_pagina}</leg:RezultatePagina>
+                <leg:SearchAn>{an}</leg:SearchAn>
+                <leg:SearchNumar></leg:SearchNumar>
+                <leg:SearchText></leg:SearchText>
+                <leg:SearchTitlu></leg:SearchTitlu>
+             </tem:SearchModel>
+             <tem:tokenKey>{token}</tem:tokenKey>
+          </tem:Search>
+       </soapenv:Body>
+    </soapenv:Envelope>"""
+
+    try:
+        response = requests.post(URL_API, data=soap_envelope, headers=headers, timeout=30)
+        response.raise_for_status()
+        return response.text
+    except Exception as e:
+        safe_print(f"⚠️ [An {an}][Pagina {pagina}] Eroare la descărcare: {e}")
+        return None
+
+def crawleaza_an_complet(token, an):
+    """Descarcă paginile rând pe rând pentru anul curent."""
+    pagina = 0
     while True:
-        parametri_raw = {
-            'NumarPagina': pagina,
-            'RezultatePagina': rezultate_per_pagina,
-            'SearchAn': an,
-            'SearchDomeniu': None,
-            'SearchEmitent': None,
-            'SearchModificata': None,
-            'SearchNumar': None,
-            'SearchRepublicata': None,
-            'SearchText': None,
-            'SearchTip': None,
-            'SearchTitlu': None
-        }
+        safe_print(f"📥 [An {an}][Pagina {pagina}] Se descarcă...")
         
-        parametri_filtrati = curata_si_formateaza_parametri(parametri_raw)
-        safe_print(f"🔍 [An {an}][Pagina {pagina}] Se descarcă XML-ul...")
+        xml_brut = descarca_pagina_xml(token, an, pagina)
         
-        try:
-            # Apelăm serverul Just.ro
-            rezultat = client.service.Search(
-                SearchModel=parametri_filtrati,
-                tokenKey=token
-            )
-            
-            # Verificăm dacă răspunsul conține date valide
-            # (dacă rezultatul e complet gol sau nu conține legi, ne oprim)
-            if not rezultat or not hasattr(rezultat, 'Legi') or not rezultat.Legi or len(rezultat.Legi._value_1) == 0:
-                safe_print(f"🛑 [An {an}] Nu mai există pagini. Ne oprim la pagina {pagina}.")
-                break
-                
-            # Dacă avem date, extragem XML-ul brut primit prin rețea de la pluginul de istoric
-            xml_primit = history.last_received
-            
-            if xml_primit is not None:
-                salveaza_xml_fizic(an, pagina, xml_primit)
-            else:
-                safe_print(f"⚠️ [An {an}][Pagina {pagina}] Nu s-a putut captura XML-ul din istoric.")
-            
-            pagina += 1
-            
-        except Fault as soap_fault:
-            safe_print(f"⚠️ [An {an}] Eroare SOAP la pagina {pagina}: {soap_fault}")
+        if not xml_brut:
             break
-        except Exception as e:
-            safe_print(f"⚠️ [An {an}] Excepție la pagina {pagina}: {e}")
+            
+        # Verificăm dacă răspunsul este gol sau nu conține legi (semn că s-a terminat anul)
+        # Verificare simplă pe textul XML ca să nu mai încărcăm librării de parsare
+        if "<Legi />" in xml_brut or "<Legi>" not in xml_brut or "<Id>" not in xml_brut:
+            safe_print(f"🛑 [An {an}] S-au terminat paginile la indexul {pagina}.")
             break
+            
+        # Salvăm fișierul XML brut pe disk exact așa cum a venit
+        nume_fisier = os.path.join(FOLDER_DESCARCARE, f"an_{an}_pag_{pagina}.xml")
+        with open(nume_fisier, "w", encoding="utf-8") as f:
+            f.write(xml_brut)
+            
+        safe_print(f"💾 [An {an}][Pagina {pagina}] XML salvat.")
+        pagina += 1
+        
+        # O mică pauză de bun simț între pagini
+        time.sleep(0.1)
 
 def porneste_crawler():
-    """Pornește descărcarea legislativă pe 4 fire de execuție în paralel."""
-    ani_de_procesat = list(range(2000, 2020))  # Intervalul tău: 2000 - 2019
-    max_threads = 4
+    token = obtine_token_brut()
+    if not token:
+        return
+        
+    ani_de_procesat = list(range(2000, 2020)) # Anii de descărcat: 2000 - 2019
+    max_paralel = 4
     
     safe_print(f"📅 Interval ani: 2000 - 2019")
-    safe_print(f"🧵 Se pornesc cele {max_threads} thread-uri active...")
+    safe_print(f"🚀 Pornim exact {max_paralel} descărcări în paralel...")
     
-    # Împărțim munca în mod egal pe thread-uri
-    with ThreadPoolExecutor(max_workers=max_threads) as executor:
-        # Trimitem doar anul ca parametru; fiecare thread își va genera singur token-ul lui și clientul lui SOAP securizat
-        executor.map(crawleaza_an_complet, ani_de_procesat)
+    # ThreadPoolExecutor doar va rula fix 4 funcții în paralel deodată
+    with ThreadPoolExecutor(max_workers=max_paralel) as executor:
+        # Fiecare worker ia câte un an, îl descarcă cap-coadă, apoi trece la următorul an rămas liber
+        executor.map(lambda an: crawleaza_an_complet(token, an), ani_de_procesat)
 
 if __name__ == "__main__":
     porneste_crawler()
