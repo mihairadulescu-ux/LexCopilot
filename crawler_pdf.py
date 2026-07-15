@@ -15,13 +15,26 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 # CONFIGURARE GOOGLE DRIVE
 # ======================================================================
 GOOGLE_DRIVE_FOLDER_ID = "1c8SEo8UrQVe6qgzPFGLXJFiMyLeI-r8D"
-MAX_DOWNLOAD_WORKERS = 40  # Numărul de thread-uri pentru citirea paralelă a fișierelor dummy
+MAX_DOWNLOAD_WORKERS = 25  # Numărul de thread-uri pentru citirea paralelă a fișierelor dummy
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0"
 ]
+
+def extrage_contor_bis(status_string):
+    """
+    Extrage în siguranță numărul contorului din stări precum 'dummy_1', 'dummy_2' sau 'dummy_verificabil'.
+    Dacă nu găsește cifre sau starea nu e validă, returnează 0 (începe contorizarea de la zero).
+    """
+    if not status_string:
+        return 0
+    # Extragem doar caracterele numerice din textul stării
+    cifre = "".join([c for c in status_string if c.isdigit()])
+    if cifre:
+        return int(cifre)
+    return 0
 
 def obtine_creds():
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
@@ -32,7 +45,7 @@ def obtine_creds():
 def instantiaza_drive(creds=None):
     if not creds:
         creds = obtine_creds()
-    # cache_discovery=False previne request-uri HTTP suplimentare la inițializare
+    # cache_discovery=False previne request-uri HTTP suplimentare inutile la inițializare
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 def decodific_si_proceseaza_dummy(creds, f_id, nume):
@@ -293,10 +306,12 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                                 valoare_fantomă = " "
                             elif este_bis:
                                 creeaza_fantomă = True
-                                contor_vechi = int(item["status_actual"].split('_')[1]) if item["status_actual"] else 0
+                                contor_vechi = extrage_contor_bis(item["status_actual"])
                                 urmatorul_contor = contor_vechi + 1
                                 valoare_fantomă = str(urmatorul_contor) if urmatorul_contor < 6 else " "
-                                print(f"💡 Serverul a trimis HTML. Incrementăm contorul Bis la: {valoare_fantomă}", flush=True)
+                                
+                                text_afisat = valoare_fantomă if valoare_fantomă != " " else "[Abandonat (spațiu)]"
+                                print(f"💡 Serverul a trimis HTML. Incrementăm contorul Bis la: {text_afisat}", flush=True)
                             else:
                                 print(f"⚠️ Eroare: HTML primit la un fișier SIMPLU. Îl ocolim fără dummy.", flush=True)
                             break
@@ -330,10 +345,12 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                     break
                 elif este_bis:
                     creeaza_fantomă = True
-                    contor_vechi = int(item["status_actual"].split('_')[1]) if item["status_actual"] else 0
+                    contor_vechi = extrage_contor_bis(item["status_actual"])
                     urmatorul_contor = contor_vechi + 1
                     valoare_fantomă = str(urmatorul_contor) if urmatorul_contor < 6 else " "
-                    print(f"💡 Eroare conexiune pentru Bis. Incrementăm contorul la: {valoare_fantomă}", flush=True)
+                    
+                    text_afisat = valoare_fantomă if valoare_fantomă != " " else "[Abandonat (spațiu)]"
+                    print(f"💡 Eroare conexiune pentru Bis. Incrementăm contorul la: {text_afisat}", flush=True)
                     break
                 
                 time.sleep(random.uniform(15.0, 30.0))
