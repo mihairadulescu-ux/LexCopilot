@@ -14,8 +14,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
-          cache: 'pip'
+          python-version: '3.13' # Am lăsat 3.13, versiunea stabilă detectată de runner-ul tău
 
       - name: Install dependencies
         run: |
