@@ -8,7 +8,7 @@ import os
 import time
 import re
 import json
-import datetim
+import datetime
 from lxml import etree
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -24,7 +24,7 @@ GOOGLE_DRIVE_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
 START_YEAR = 1900
-END_YEAR = 2026  # Actualizat automat la anul curent din rulare
+END_YEAR = 2026  # Limita superioară de rulare
 
 
 def get_drive_service():
@@ -35,11 +35,11 @@ def get_drive_service():
     github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     
     if github_secret:
-        print("🤖 [Cloud Mode] Autentificare în Google Drive folosind GitHub Secrets...")
+        print(f"{VERDE}🤖 [Cloud Mode] Autentificare în Google Drive folosind GitHub Secrets...{RESET}")
         service_account_info = json.loads(github_secret)
         creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=scopes)
     else:
-        print("💻 [Local Mode] Autentificare în Google Drive folosind service_account.json local...")
+        print(f"{GALBEN}💻 [Local Mode] Autentificare în Google Drive folosind service_account.json local...{RESET}")
         credentials_path = "service_account.json"
         if not os.path.exists(credentials_path):
             raise FileNotFoundError(f"Nu s-a găsit fișierul de autentificare '{credentials_path}' pentru rularea locală!")
@@ -52,7 +52,7 @@ def get_already_downloaded_pages(service, target_year):
     """Scanează folderul Google Drive și returnează paginile deja descărcate PENTRU UN AN ANUME."""
     pages = set()
     page_token = None
-    # Interogare optimizată pentru a căuta fișierele cu formatul brut specificat
+    # Căutăm fișierele cu formatul tău specific de denumire
     query = f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and name contains 'brut_legislatie_{target_year}_pag' and trashed = false"
 
     try:
@@ -78,7 +78,7 @@ def get_already_downloaded_pages(service, target_year):
 
         return pages
     except Exception as e:
-        print(f"⚠️ Atenție: Nu am putut scana complet folderul din Drive ({e}). Continuăm cu riscul de duplicare.")
+        print(f"{ROSU}⚠️ Atenție: Nu am putut scana complet folderul din Drive ({e}). Continuăm cu risc de duplicare.{RESET}")
         return set()
 
 
@@ -93,17 +93,16 @@ def upload_to_drive(service, filename, content_bytes):
             fields="id",
             supportsAllDrives=True,
         ).execute()
-        print(f"✅ Fișier salvat în Drive: {filename} (ID: {file.get('id')})")
+        print(f"{VERDE}✅ Fișier salvat în Drive: {filename} (ID: {file.get('id')}){RESET}")
         return True
     except Exception as e:
-        print(f"❌ Eroare la upload în Drive pentru {filename}: {e}")
+        print(f"{ROSU}❌ Eroare la upload în Drive pentru {filename}: {e}{RESET}")
         return False
 
 
 def create_fresh_soap_client():
     """Creează o instanță curată de client SOAP cu timeout-uri robuste extinse."""
     history = HistoryPlugin()
-    # Folosim timeout-uri generoase pentru a evita "Read Timeout" pe conexiunile mai slabe din cloud
     transport = Transport(timeout=90, operation_timeout=120)  
     client = Client(WSDL_URL, transport=transport, plugins=[history])
     return client, history
@@ -112,25 +111,24 @@ def create_fresh_soap_client():
 def download_year(drive_service, composite_type_name, target_year):
     """
     Descarcă toate paginile pentru UN singur an folosind o coadă dinamică 
-    cu protecție totală împotriva erorilor de rețea.
+    cu protecție împotriva erorilor de rețea.
     """
-    print(f"\n{'='*70}\n📅 AN INDUSTRIAL: {target_year}\n{'='*70}")
+    print(f"\n{GALBEN}{'='*70}\n📅 AN INDUSTRIAL: {target_year}\n{'='*70}{RESET}")
 
     downloaded_pages = get_already_downloaded_pages(drive_service, target_year)
     
     pages_to_process = []
     if downloaded_pages:
         max_page = max(downloaded_pages)
-        print(f"📦 {len(downloaded_pages)} pagini găsite în Drive pentru {target_year}. (Ultima pagină: {max_page})")
+        print(f"📦 {len(downloaded_pages)} pagini găsite în Drive pentru {target_year}. (Ultima pagină descărcată: {max_page})")
         
         all_expected_pages = set(range(1, max_page + 1))
         gaps = sorted(list(all_expected_pages - downloaded_pages))
         
         if gaps:
-            print(f"🛠️ Detectat {len(gaps)} pagini lipsă (lacune) în istoric: {gaps}. Le recuperăm primele!")
+            print(f"{GALBEN}🛠️ Detectat {len(gaps)} pagini lipsă (lacune) în istoric: {gaps}. Le recuperăm primele!{RESET}")
             pages_to_process.extend(gaps)
         
-        # Continuăm descărcarea de la următoarea pagină nouă după cea mai mare găsită
         next_new_page = max_page + 1
     else:
         print(f"🆕 An complet nou detectat. Începem descărcarea de la pagina 1.")
@@ -140,24 +138,24 @@ def download_year(drive_service, composite_type_name, target_year):
     files_saved = 0
     consecutive_empty_pages = 0
 
-    # Pasul 1: Inițializăm clientul SOAP și obținem token-ul oferit automat de API-ul Free
     client = None
     history = None
     token_key = None
     
+    # Încercare de conectare inițială la server
     for init_attempt in range(1, 6):
         try:
             client, history = create_fresh_soap_client()
             token_key = client.service.GetToken()
             break
         except Exception as e:
-            print(f"🚨 [Init Err] Serverul Just.ro nu răspunde pentru {target_year} (Tentativa {init_attempt}/5): {e}")
+            print(f"{ROSU}🚨 [Init Err] Serverul Just.ro nu răspunde pentru {target_year} (Tentativa {init_attempt}/5): {e}{RESET}")
             if init_attempt == 5:
-                print(f"🛑 Abandonăm temporar anul {target_year} din cauza serverului.")
+                print(f"{ROSU}🛑 Abandonăm temporar anul {target_year} din cauza indisponibilității serverului.{RESET}")
                 return 0
             time.sleep(30 * init_attempt)
 
-    # Pasul 2: Procesarea paginilor din coadă
+    # Procesarea paginilor
     while True:
         if pages_to_process:
             current_page = pages_to_process.pop(0)
@@ -180,10 +178,9 @@ def download_year(drive_service, composite_type_name, target_year):
             try:
                 if attempt > 0:
                     wait_time = 30 * attempt
-                    print(f"⏳ [Așteptare Recovery] Reîncercare {attempt}/{max_retries} peste {wait_time}s...")
+                    print(f"{GALBEN}⏳ [Așteptare Recovery] Reîncercare {attempt}/{max_retries} peste {wait_time}s...{RESET}")
                     time.sleep(wait_time)
                     
-                    print("🔄 Resetare fizică client SOAP și re-autentificare preventivă...")
                     client, history = create_fresh_soap_client()
                     token_key = client.service.GetToken()
 
@@ -197,34 +194,33 @@ def download_year(drive_service, composite_type_name, target_year):
                     SearchAn=str(target_year),
                 )
 
-                # Apelul API propriu-zis
                 client.service.Search(SearchModel=search_model, tokenKey=token_key)
                 retry_success = True
                 break
             except Exception as soap_error:
-                print(f"⚠️ Eroare detectată la interogare la pagina {current_page}: {soap_error}")
-                token_key = None  # Resetăm token-ul pentru a forța regenerarea lui la retry
+                print(f"{ROSU}⚠️ Eroare la pagina {current_page}: {soap_error}{RESET}")
+                token_key = None  # Resetăm token-ul pentru a-l reface la reîncercare
 
         if not retry_success:
-            print(f"🛑 Pagina {current_page} ({target_year}) a eșuat critic după toate tentativele. Trecem mai departe.")
+            print(f"{ROSU}🛑 Pagina {current_page} ({target_year}) a eșuat critic după toate tentativele. Continuăm.{RESET}")
             if not is_gap_repair:
                 consecutive_empty_pages = 0
             continue
 
-        # Pasul 3: Extragerea XML-ului brut din istoricul tranzacției SOAP
+        # Extragere XML brut din istoric
         last_response_envelope = history.last_received["envelope"]
         raw_xml_bytes = etree.tostring(last_response_envelope, pretty_print=True, encoding="utf-8")
         raw_xml_string = raw_xml_bytes.decode("utf-8")
 
-        # Verificăm dacă pagina conține legi valide în răspuns
+        # Verificare pagină goală (sfârșitul setului de date)
         if "<a:Legi>" not in raw_xml_string and "<Legi>" not in raw_xml_string:
             if not is_gap_repair:
                 consecutive_empty_pages += 1
                 if consecutive_empty_pages >= 2:
-                    print(f"✅ Anul {target_year} finalizat complet (am primit răspunsuri goale consecutive)!")
+                    print(f"{VERDE}✅ Anul {target_year} finalizat complet (răspunsuri goale consecutive!){RESET}")
                     break
             else:
-                print(f"⚠️ Notă: Pagina de reparare {current_page} a întors un răspuns gol.")
+                print(f"{GALBEN}⚠️ Pagina de reparație {current_page} a întors un răspuns gol.{RESET}")
         else:
             if not is_gap_repair:
                 consecutive_empty_pages = 0
@@ -234,18 +230,17 @@ def download_year(drive_service, composite_type_name, target_year):
             if success:
                 files_saved += 1
 
-        time.sleep(3.0)  # Pauză de bun-simț între apeluri ca să nu ne blocheze firewall-ul lor
+        time.sleep(3.0)  # Pauză anti-spam protectivă
 
     return files_saved
 
 
-def download_laws_local():
-    """Rulează descărcarea istorică fără întreruperi la erori globale."""
+def download_laws_main():
+    """Funcția principală care orchestrează descărcarea pe ani."""
     try:
-        print(f"🚀 Pornire motor industrial auto-reparabil: {START_YEAR}–{END_YEAR}...")
+        print(f"{VERDE}🚀 Pornire motor industrial auto-reparabil: {START_YEAR}–{END_YEAR}...{RESET}")
         drive_service = get_drive_service()
         
-        # Namespace-ul corect pentru structura de date a serviciului public gratuit
         composite_type_name = "{http://schemas.datacontract.org/2004/07/FreeWebService}CompositeType"
         total_files_all_years = 0
         
@@ -254,152 +249,14 @@ def download_laws_local():
                 files_saved = download_year(drive_service, composite_type_name, year)
                 total_files_all_years += files_saved
             except Exception as year_error:
-                print(f"💥 Eroare catastrofală izolată pentru anul {year}: {year_error}. Trecem la anul următor.")
+                print(f"{ROSU}💥 Eroare catastrofală izolată pentru anul {year}: {year_error}. Mergem la următorul.{RESET}")
                 time.sleep(60)
 
-        print(f"\n🎉🎉 PROCES FINALIZAT. Total fișiere noi injectate în Drive: {total_files_all_years}")
+        print(f"\n{VERDE}🎉🎉 PROCES COMPLETAT. Total fișiere încărcate în Drive: {total_files_all_years}{RESET}")
 
     except Exception as e:
-        print(f"💥 Eroare critică la inițializarea Google Drive: {str(e)}")
+        print(f"{ROSU}💥 Eroare critică la inițializare: {str(e)}{RESET}")
 
 
 if __name__ == "__main__":
-    download_laws_local()
-GALBEN = "\033[93m"
-ROSU = "\033[91m"
-RESET = "\033[0m"
-
-# --- URL ORIGINAL (HTTP) ---
-WSDL_URL = "http://legislatie.just.ro/api/legis/LegislatieService.svc"
-
-# User-Agent-ul de browser folosit anterior
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-
-CURRENT_TOKEN = None
-
-def obtine_token_nou():
-    """Apelează serviciul public pentru a genera un token nou."""
-    global CURRENT_TOKEN
-    print(f"{GALBEN}[-] Se încearcă conectarea la Just.ro pentru un token nou...{RESET}", flush=True)
-    
-    headers = {
-        "Content-Type": "text/xml; charset=utf-8",
-        "SOAPAction": "http://tempuri.org/ILegislatieService/GetToken",
-        "User-Agent": USER_AGENT
-    }
-    
-    soap_request = """<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tem="http://tempuri.org/">
-       <soapenv:Header/>
-       <soapenv:Body>
-          <tem:GetToken/>
-       </soapenv:Body>
-    </soapenv:Envelope>"""
-    
-    try:
-        response = requests.post(WSDL_URL, data=soap_request, headers=headers, timeout=15)
-        if response.status_code == 200:
-            root = ET.fromstring(response.content)
-            namespaces = {'s': 'http://schemas.xmlsoap.org/soap/envelope/', 't': 'http://tempuri.org/'}
-            token_element = root.find('.//t:GetTokenResult', namespaces)
-            if token_element is not None and token_element.text:
-                CURRENT_TOKEN = token_element.text
-                print(f"{VERDE}[+] Token nou obținut cu succes: {CURRENT_TOKEN[:15]}...{RESET}", flush=True)
-                return CURRENT_TOKEN
-        print(f"{ROSU}[!] Serverul a răspuns cu codul: {response.status_code}{RESET}", flush=True)
-    except Exception as e:
-        print(f"{ROSU}[!] Eroare la generarea token-ului: {e}{RESET}", flush=True)
-    
-    return None
-
-
-def executa_cerere_search(an, pagina):
-    """Trimite cererea XML de căutare pentru un anumit an și pagină."""
-    global CURRENT_TOKEN
-    
-    if not CURRENT_TOKEN:
-        obtine_token_nou()
-        if not CURRENT_TOKEN:
-            return None
-        
-    headers = {
-        "Content-Type": "text/xml; charset=utf-8",
-        "SOAPAction": "http://tempuri.org/ILegislatieService/Search",
-        "User-Agent": USER_AGENT
-    }
-    
-    soap_request = f"""<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns0="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="http://schemas.microsoft.com/2003/10/Serialization/Arrays" xmlns:ns2="http://tempuri.org/">
-       <SOAP-ENV:Header/>
-       <ns0:Body>
-          <ns2:Search>
-             <ns2:SearchModel>
-                <ns1:NumarPagina>{pagina}</ns1:NumarPagina>
-                <ns1:RezultatePagina>100</ns1:RezultatePagina>
-                <ns1:SearchAn>{an}</ns1:SearchAn>
-             </ns2:SearchModel>
-             <ns2:tokenKey>{CURRENT_TOKEN}</ns2:tokenKey>
-          </ns2:Search>
-       </ns0:Body>
-    </SOAP-ENV:Envelope>"""
-
-    try:
-        response = requests.post(WSDL_URL, data=soap_request, headers=headers, timeout=15)
-        return response
-    except Exception as e:
-        print(f"{ROSU}[!] Eroare conexiune la Search (An {an}, Pag {pagina}): {e}{RESET}", flush=True)
-        return None
-
-
-def ruleaza_scraping(an_start, an_end):
-    global CURRENT_TOKEN
-    
-    for an in range(an_start, an_end + 1):
-        pagina = 0
-        while True:
-            # --- LOGICA DE SKIP CU FORMATUL TĂU BRUT ORIGINAL ---
-            nume_fisier = f"brut_legislatie_{an}_pag{pagina}.xml"
-            
-            if os.path.exists(nume_fisier):
-                print(f"{GALBEN}[~] Pasăm peste: {nume_fisier} există deja.{RESET}", flush=True)
-                pagina += 1
-                continue
-            
-            print(f"[*] Se descarcă: Anul {an}, Pagina {pagina}...", flush=True)
-            response = executa_cerere_search(an, pagina)
-            
-            if response is None:
-                print(f"{ROSU}[!] Reîncercăm peste 10 secunde...{RESET}", flush=True)
-                time.sleep(10)
-                continue
-                
-            response_text = response.text
-            
-            # Auto-reparare token la expirare
-            if "TOKEN INVALID" in response_text or "REGENERATI TOKEN" in response_text:
-                print(f"{GALBEN}[!] Token expirat! Regenerăm...{RESET}", flush=True)
-                obtine_token_nou()
-                continue 
-                
-            if response.status_code != 200:
-                print(f"{ROSU}[!] Eroare HTTP {response.status_code}. Reîncercăm...{RESET}", flush=True)
-                time.sleep(5)
-                continue
-
-            # --- SALVARE CU NAMING-UL TĂU BRUT ---
-            try:
-                with open(nume_fisier, "w", encoding="utf-8") as f:
-                    f.write(response_text)
-                print(f"{VERDE}[+] Fișier salvat cu succes: {nume_fisier}{RESET}", flush=True)
-            except Exception as e:
-                print(f"{ROSU}[!] Eroare salvare {nume_fisier}: {e}{RESET}", flush=True)
-            
-            # Oprire pagină când nu mai sunt rezultate
-            if "<a:TipAct>" not in response_text and "SearchResult" in response_text:
-                print(f"[*] Gata cu paginile pe anul {an}.", flush=True)
-                break
-                
-            pagina += 1
-            time.sleep(1)
-
-
-if __name__ == "__main__":
-    ruleaza_scraping(2000, 2026)
+    download_laws_main()
