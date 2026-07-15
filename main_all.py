@@ -89,7 +89,7 @@ def incarca_in_gdrive(service, nume_fisier, continut_text):
     fh = io.BytesIO(continut_text.encode('utf-8'))
     media = MediaIoBaseUpload(fh, mimetype='text/plain', resumable=True)
     
-    # Trimitem fișierul la Google Drive API cu suport complet pentru Shared Drives
+    # Parametri compleți pentru a ne asigura că este acceptat pe Shared Drive corporate
     service.files().create(
         body=file_metadata,
         media_body=media,
@@ -108,60 +108,72 @@ def proceseaza_an(an, token_manager, client, gdrive_service):
     token = token_manager.get_valid_token()
     
     while True:
-        # Trimitem structura COMPLETĂ cerută de .NET WCF, chiar și campurile goale (nule).
-        # Fără ele, serverul Just.ro ignoră parametrii și returnează 0 rezultate.
-        search_params = {
+        # Respectăm structura XML exactă din specificație utilizând un dicționar nativ,
+        # lăsând Zeep să facă serializarea corectă a tipurilor opționale/nule.
+        search_model = {
             'NumarPagina': pagina,
             'RezultatePagina': rezultate_pe_pagina,
             'SearchAn': an,
-            'SearchDomeniu': None,
-            'SearchEmitent': None,
-            'SearchModificata': None,
             'SearchNumar': None,
-            'SearchRepublicata': None,
             'SearchText': None,
-            'SearchTip': None,
             'SearchTitlu': None
         }
         
         try:
-            # Apelăm serviciul SOAP transmițând parametrii compleți și tokenul
-            response = client.service.Search(search_params, token)
+            # Apelăm metoda Search cu denumirile exacte de parametri din WSDL: SearchModel și tokenKey
+            response = client.service.Search(SearchModel=search_model, tokenKey=token)
             
-            if response and hasattr(response, 'Legi') and response.Legi and hasattr(response.Legi, 'Legi'):
-                lista_legi = response.Legi.Legi
-                
-                # Dacă lista este goală, înseamnă că am parcurs toate paginile din acest an
-                if not lista_legi:
-                    print(f"✅ [An {an}] Finalizat complet (s-a atins sfârșitul listei).")
+            lista_legi = None
+            if response:
+                # Modificare critică de parsare: response (SearchResult) conține direct lista 'Legi'
+                if hasattr(response, 'Legi') and response.Legi:
+                    if isinstance(response.Legi, list):
+                        lista_legi = response.Legi
+                    elif hasattr(response.Legi, 'Legi') and response.Legi.Legi:
+                        # Fallback în caz că structura XML se imbrivează în funcție de versiunea parserului local
+                        lista_legi = response.Legi.Legi
+                    else:
+                        lista_legi = response.Legi
+
+                # Dacă am identificat lista și conține elemente
+                if lista_legi:
+                    # Construim structura fișierului în memorie
+                    buffer_text = []
+                    for lege in lista_legi:
+                        id_val = getattr(lege, 'IdValoare', 'N/A')
+                        titlu_val = getattr(lege, 'Titlu', 'Fără Titlu')
+                        data_val = getattr(lege, 'DataVigoare', 'Fără Dată')
+                        emitent_val = getattr(lege, 'Emitent', 'Fără Emitent')
+                        numar_val = getattr(lege, 'Numar', 'Fără Număr')
+                        
+                        buffer_text.append(
+                            f"ID: {id_val} | "
+                            f"Numar: {numar_val} | "
+                            f"Emitent: {emitent_val} | "
+                            f"Data: {data_val} | "
+                            f"Titlu: {titlu_val}"
+                        )
+                    
+                    continut_final = "\n".join(buffer_text)
+                    nume_fisier_gdrive = f"legi_{an}_pag_{pagina}.txt"
+                    
+                    # Încărcare în GDrive corporate
+                    incarca_in_gdrive(gdrive_service, nume_fisier_gdrive, continut_final)
+                    
+                    print(f"☁️ [An {an}] Pagina {pagina} salvată direct în GDrive ({len(lista_legi)} acte).")
+                    pagina += 1
+                    
+                    # Delay politicos pentru a nu fi blocați de protecția firewall-ului Just
+                    time.sleep(random.uniform(0.6, 1.2))
+                    
+                else:
+                    print(f"✅ [An {an}] Finalizat complet (fără alte rezultate la pagina {pagina}).")
                     break
-                
-                # Construim structura fișierului în memorie
-                buffer_text = []
-                for lege in lista_legi:
-                    id_val = getattr(lege, 'IdValoare', 'N/A')
-                    titlu_val = getattr(lege, 'Titlu', 'Fără Titlu')
-                    data_val = getattr(lege, 'DataVigoare', 'Fără Dată')
-                    buffer_text.append(f"ID: {id_val} | Titlu: {titlu_val} | Data: {data_val}")
-                
-                continut_final = "\n".join(buffer_text)
-                nume_fisier_gdrive = f"legi_{an}_pag_{pagina}.txt"
-                
-                # Încărcare în GDrive corporate
-                incarca_in_gdrive(gdrive_service, nume_fisier_gdrive, continut_final)
-                
-                print(f"☁️ [An {an}] Pagina {pagina} salvată direct în GDrive ({len(lista_legi)} acte).")
-                pagina += 1
-                
-                # Delay de siguranță pentru a evita blocarea pe IP de către API-ul guvernamental
-                time.sleep(random.uniform(0.5, 1.2))
-                
             else:
                 print(f"ℹ️ [An {an}] Nu s-au întors date la pagina {pagina} (Răspuns gol).")
                 break
                 
         except Fault as soap_fault:
-            # Tratăm expirarea tokenului de pe portal
             fault_string = str(soap_fault).lower()
             if "token" in fault_string or "expired" in fault_string or "invalid" in fault_string:
                 token = token_manager.get_valid_token(forta_reproaspatare=True)
