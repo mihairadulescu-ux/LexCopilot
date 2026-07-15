@@ -6,7 +6,7 @@ import threading
 import subprocess
 import sys
 
-# --- AUTO-INSTALARE SUDS DACĂ LIPSEȘTE (SIGURANȚĂ DUBLĂ) ---
+# --- AUTO-INSTALARE SUDS DACĂ LIPSEȘTE ---
 try:
     from suds.client import Client
 except ImportError:
@@ -37,6 +37,7 @@ AN_STOP = 2019
 
 print_lock = threading.Lock()
 drive_service_lock = threading.Lock()
+soap_client_lock = threading.Lock()  # Lock-ul salvator care previne coliziunile pe conexiunea SOAP
 _drive_service = None
 
 def safe_print(message):
@@ -44,7 +45,7 @@ def safe_print(message):
         print(message, flush=True)
 
 def obtine_serviciu_drive():
-    """Inițializează serviciul Google Drive (Thread-Safe) conform configurării tale."""
+    """Inițializează serviciul Google Drive (Thread-Safe)."""
     global _drive_service
     with drive_service_lock:
         if _drive_service is not None:
@@ -88,61 +89,43 @@ def incarca_in_google_drive(continut_xml, nume_fisier):
         safe_print(f"❌ Eroare Google Drive la încărcarea {nume_fisier}: {e}")
         return None
 
-def obtine_token_sesiune():
-    """Obține un singur token valid pe care îl vom partaja între toate thread-urile."""
-    try:
-        safe_print("[🔑 Just] Inițializăm un client SOAP temporar pentru a cere token-ul general...")
-        client_temp = Client(URL_API, cache=None)
-        token = client_temp.service.GetToken()
-        safe_print(f"[🔑 Just] Token generat cu succes pentru sesiune: {token[:15]}...")
-        return token
-    except Exception as e:
-        safe_print(f"❌ Nu s-a putut obține token-ul legislativ: {e}")
-        return None
-
-def descarca_si_incarca_pagina(client_soap, token, an, pagina):
+def descarca_pagina_safe(client_soap, token, an, pagina):
     """
-    Descarcă pagina prin SOAP folosind clientul dedicat al thread-ului actual,
-    apoi urcă rezultatul direct în Google Drive.
+    Folosește un singur client SOAP partajat, dar securizează apelul la nivel de rețea.
+    Astfel, serverul Just.ro primește cererile pe rând, prevenind complet blocajele 503.
     """
-    search_model = client_soap.factory.create('SearchModel')
-    search_model.NumarPagina = pagina
-    search_model.RezultatePagina = 50
-    search_model.SearchAn = an
-    
-    # Executăm căutarea prin SOAP
-    client_soap.service.Search(search_model, token)
-    
-    # Interceptăm XML-ul brut sosit special pe această instanță de client (complet Thread-Safe!)
-    xml_brut = client_soap.last_received()
+    with soap_client_lock:
+        search_model = client_soap.factory.create('SearchModel')
+        search_model.NumarPagina = pagina
+        search_model.RezultatePagina = 50
+        search_model.SearchAn = an
+        
+        # Trimite request-ul SOAP
+        client_soap.service.Search(search_model, token)
+        
+        # Obține XML-ul brut sosit special pentru acest request securizat
+        xml_brut = client_soap.last_received()
+        
+        # O mică pauză de curtoazie (100ms) în interiorul lock-ului pentru a nu bombarda serverul Just
+        time.sleep(0.1)
+        
     if not xml_brut:
         return None
-    
     return str(xml_brut)
 
-def crawleaza_an_complet(token, an):
-    """
-    Fiecare thread își creează propriul său client SOAP ne-partajat (Thread-Safe)
-    pentru a evita ca răspunsurile XML să se amestece între ani.
-    """
-    safe_print(f"🔄 [An {an}] Pornire descărcare. Se inițializează clientul SOAP dedicat...")
-    try:
-        client_soap_dedicat = Client(URL_API, cache=None)
-    except Exception as e:
-        safe_print(f"❌ [An {an}] Nu s-a putut crea clientul SOAP dedicat: {e}")
-        return
-
+def crawleaza_an_complet(client_soap, token, an):
+    """Ciclează prin toate paginile anului primit."""
     pagina = 0
     while True:
-        safe_print(f"📥 [An {an}][Pagina {pagina}] Se descarcă de pe Just...")
+        safe_print(f"📥 [An {an}][Pagina {pagina}] Se trimite cererea către Just...")
         
         try:
-            xml_brut = descarca_si_incarca_pagina(client_soap_dedicat, token, an, pagina)
+            xml_brut = descarca_pagina_safe(client_soap, token, an, pagina)
         except Exception as e:
-            safe_print(f"⚠️ [An {an}][Pagina {pagina}] Eroare temporară: {e}. Reîncercăm peste 4 secunde...")
-            time.sleep(4)
+            safe_print(f"⚠️ [An {an}][Pagina {pagina}] Eroare: {e}. Reîncercăm peste 5 secunde...")
+            time.sleep(5)
             try:
-                xml_brut = descarca_si_incarca_pagina(client_soap_dedicat, token, an, pagina)
+                xml_brut = descarca_pagina_safe(client_soap, token, an, pagina)
             except Exception:
                 safe_print(f"❌ [An {an}][Pagina {pagina}] Eșec definitiv la descărcare.")
                 break
@@ -150,12 +133,14 @@ def crawleaza_an_complet(token, an):
         if not xml_brut:
             break
             
-        # Verificăm dacă am terminat paginile cu legi
+        # Analizăm structura brută a răspunsului primit
         if "<Legi />" in xml_brut or "<Legi" not in xml_brut or "<Id>" not in xml_brut:
             safe_print(f"🛑 [An {an}] S-au terminat paginile la indexul {pagina}.")
             break
             
         nume_fisier = f"an_{an}_pag_{pagina}.xml"
+        
+        # Încărcarea în Drive rulează în afara lock-ului, deci este complet asincronă și rapidă!
         drive_file_id = incarca_in_google_drive(xml_brut, nume_fisier)
         
         if drive_file_id:
@@ -164,7 +149,6 @@ def crawleaza_an_complet(token, an):
             safe_print(f"❌ [An {an}][Pagina {pagina}] Eșec la salvarea în Shared Drive.")
             
         pagina += 1
-        time.sleep(0.2)  # Pauză fină pentru a menține conexiunea curată
 
 def porneste_crawler():
     # 1. Test conexiune Google Drive
@@ -176,19 +160,26 @@ def porneste_crawler():
         safe_print(f"❌ Conexiunea la Google Drive a eșuat: {e}")
         return
 
-    # 2. Obținem un token de sesiune
-    token = obtine_token_sesiune()
-    if not token:
+    # 2. Inițializare unică și controlată a clientului SOAP general
+    try:
+        safe_print("[🔑 Just] Inițializăm un singur client SOAP general (WSDL setup)...")
+        client_soap_global = Client(URL_API, cache=None)
+        
+        safe_print("[🔑 Just] Solicităm tokenul de sesiune...")
+        token = client_soap_global.service.GetToken()
+        safe_print(f"[🔑 Just] Token primit cu succes: {token[:15]}...")
+    except Exception as e:
+        safe_print(f"❌ Nu s-a putut contacta serverul Just pentru inițializare: {e}")
         return
         
     ani_de_procesat = list(range(AN_START, AN_STOP + 1))
-    max_paralel = 4  # Conexiuni paralele optime pentru a nu bloca IP-ul
+    max_paralel = 4  # Menținem pool-ul de thread-uri, dar apelurile de rețea Just vor fi sincronizate politicos
     
     safe_print(f"📅 Interval ani selectat: {AN_START} - {AN_STOP}")
-    safe_print(f"🚀 Pornim cele {max_paralel} descărcări paralele direct către Shared Drive...")
+    safe_print(f"🚀 Pornim motorul asincron de procesare...")
     
     with ThreadPoolExecutor(max_workers=max_paralel) as executor:
-        executor.map(lambda an: crawleaza_an_complet(token, an), ani_de_procesat)
+        executor.map(lambda an: crawleaza_an_complet(client_soap_global, token, an), ani_de_procesat)
 
 if __name__ == "__main__":
     porneste_crawler()
