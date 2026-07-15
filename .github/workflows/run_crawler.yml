@@ -1,4 +1,4 @@
-name: Executie Robot Legislatie Industrial
+name: Descarcare XML de pe legislatie.just.ro
 
 on:
   schedule:
