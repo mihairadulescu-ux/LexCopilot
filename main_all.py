@@ -2,9 +2,10 @@ import os
 import io
 import time
 import random
+import sys
+import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
-from pathlib import Path
 
 # Librării SOAP și Google API
 from zeep import Client, Settings
@@ -21,38 +22,30 @@ AN_START = 2000
 AN_STOP = 2019
 MAX_THREADS = 4
 
-# ID-ul folderului tău shared Google Drive primit
+# ID-ul folderului tău shared Google Drive
 GDRIVE_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
 
 # ======================================================================
-# 🔑 CLIENT GOOGLE DRIVE (Autentificare automată în GitHub)
+# 🔑 CLIENT GOOGLE DRIVE (Autentificare strict prin GitHub Secrets)
 # ======================================================================
 def obtine_serviciu_gdrive():
-    """Inițializează clientul Google Drive folosind secretele din mediu."""
-    # În GitHub Actions, este recomandat să salvezi JSON-ul cheii într-un Secret (ex: GDRIVE_CREDENTIALS)
-    cheie_json = os.environ.get("GDRIVE_CREDENTIALS")
+    """Inițializează clientul Google Drive folosind secretul din mediul GitHub Actions."""
+    cheie_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     
-    if cheie_json:
-        # Dacă secretul este stocat ca string JSON brut în variabilele de mediu
-        import json
+    if not cheie_json:
+        print("❌ EROARE CRITICĂ: Variabila GOOGLE_SERVICE_ACCOUNT_JSON nu este configurată în mediu!")
+        sys.exit(1)
+        
+    try:
         info = json.loads(cheie_json)
         creds = service_account.Credentials.from_service_account_info(
-            info, scopes=['https://www.googleapis.com/auth/drive.file']
+            info, scopes=['https://www.googleapis.com/auth/drive']
         )
-    else:
-        # Căutare fallback locală/manuală dacă rulezi pe local
-        cale_cheie_locala = Path("credentials.json")
-        if cale_cheie_locala.exists():
-            creds = service_account.Credentials.from_service_account_file(
-                str(cale_cheie_locala), scopes=['https://www.googleapis.com/auth/drive.file']
-            )
-        else:
-            raise RuntimeError(
-                "❌ Nu s-au găsit credențialele Google Drive! "
-                "Asigură-te că ai setat variabila de mediu GDRIVE_CREDENTIALS sau fișierul credentials.json."
-            )
-            
-    return build('drive', 'v3', credentials=creds)
+        # Folosim versiunea v3 a API-ului
+        return build('drive', 'v3', credentials=creds)
+    except Exception as e:
+        print(f"❌ EROARE CRITICĂ la inițializarea credențialelor Google: {e}")
+        sys.exit(1)
 
 
 # ======================================================================
@@ -84,25 +77,26 @@ class TokenManager:
             return self.token
 
 # ======================================================================
-# 📤 LOGICĂ DE SALVARE ÎN GOOGLE DRIVE
+# 📤 LOGICĂ DE SALVARE ÎN GOOGLE DRIVE CORPORATE
 # ======================================================================
 def incarca_in_gdrive(service, nume_fisier, continut_text):
-    """Încarcă un fișier text direct în folderul shared Google Drive, fără salvare locală."""
+    """Încarcă un fișier text direct în folderul shared corporate Google Drive."""
     file_metadata = {
         'name': nume_fisier,
         'parents': [GDRIVE_FOLDER_ID]
     }
     
-    # Transformăm textul în stream de octeți în memorie
+    # Pregătim textul în memorie ca stream de octeți
     fh = io.BytesIO(continut_text.encode('utf-8'))
     media = MediaIoBaseUpload(fh, mimetype='text/plain', resumable=True)
     
-    # Trimitem fișierul la Google Drive API (suportă drive-uri partajate prin supportsAllDrives)
+    # Trimitem fișierul la Google Drive API cu suport complet pentru Shared Drives
     service.files().create(
         body=file_metadata,
         media_body=media,
         fields='id',
-        supportsAllDrives=True  # Important pentru Shared Drive
+        supportsAllDrives=True,              # Permite crearea în Shared Drive corporate
+        keepRevisionForever=False
     ).execute()
 
 # ======================================================================
@@ -138,7 +132,7 @@ def proceseaza_an(an, token_manager, client, gdrive_service):
                 continut_final = "\n".join(buffer_text)
                 nume_fisier_gdrive = f"legi_{an}_pag_{pagina}.txt"
                 
-                # Încărcare direct în folderul shared Google Drive
+                # Încărcare în GDrive folosind parametrii corporate corectati
                 incarca_in_gdrive(gdrive_service, nume_fisier_gdrive, continut_final)
                 
                 print(f"☁️ [An {an}] Pagina {pagina} salvată direct în GDrive ({len(lista_legi)} acte).")
@@ -151,6 +145,7 @@ def proceseaza_an(an, token_manager, client, gdrive_service):
                 break
                 
         except Fault as soap_fault:
+            # Tratăm expirarea tokenului de Portalul Legislativ
             fault_string = str(soap_fault).lower()
             if "token" in fault_string or "expired" in fault_string or "invalid" in fault_string:
                 token = token_manager.get_valid_token(forta_reproaspatare=True)
@@ -166,15 +161,11 @@ def proceseaza_an(an, token_manager, client, gdrive_service):
 # 🏁 FLUX PRINCIPAL
 # ======================================================================
 def main():
-    print("🚀 Pornire Crawler Just.ro + integrare Google Drive API...")
+    print("🚀 Pornire Crawler Just.ro + integrare Google Drive API (Shared Drive Corporate)...")
     
     # 1. Inițializăm serviciul Google Drive
-    try:
-        gdrive_service = obtine_serviciu_gdrive()
-        print("🔓 Conexiune la Google Drive stabilită cu succes.")
-    except Exception as e:
-        print(f"💥 Eroare critică la inițializarea Google Drive: {e}")
-        sys.exit(1)
+    gdrive_service = obtine_serviciu_gdrive()
+    print("🔓 Conexiune securizată la Google Drive realizată.")
 
     # 2. Inițializăm clientul SOAP Zeep
     settings = Settings(strict=False, xml_huge_tree=True)
@@ -183,10 +174,10 @@ def main():
     token_manager = TokenManager(client)
     ani_de_procesat = list(range(AN_START, AN_STOP + 1))
     
-    print(f"📅 Interval ani: {AN_START} - {AN_STOP}")
+    print(f"📅 Interval ani selectat: {AN_START} - {AN_STOP}")
     print(f"🧵 Thread-uri active: {MAX_THREADS}\n")
     
-    # 3. Rulăm pool-ul de thread-uri în paralel
+    # 3. Pornim execuția paralelă
     with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         futures = [
             executor.submit(proceseaza_an, an, token_manager, client, gdrive_service) 
@@ -195,7 +186,7 @@ def main():
         for future in futures:
             future.result()
 
-    print("\n🏁 Gata! Toate legile au fost colectate și urcate direct în folderul tău din Google Drive.")
+    print("\n🏁 Succes! Toate datele au fost colectate și urcate în Shared Drive-ul companiei.")
 
 if __name__ == '__main__':
     main()
