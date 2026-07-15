@@ -58,12 +58,58 @@ def extrage_metadate_din_xml(xml_content):
                 break
                 
         return emitent, tip_act
-    except Exception as e:
+    except Exception:
         # Returnăm None în caz de eroare de parsare, dar lăsăm scriptul să meargă mai departe
         return None, None
 
+def salveaza_csv_in_drive(service, nume_fisier, date, antet):
+    """Salvează sau suprascrie CSV-ul generat direct în folderul /Metadate."""
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(antet)
+    for element, count in date.most_common():
+        writer.writerow([element, count])
+    
+    csv_data = output.getvalue().encode('utf-8')
+    output.close()
+    
+    query = f"'{FOLDER_METADATE_ID}' in parents and name = '{nume_fisier}' and trashed = false"
+    
+    existing_files = service.files().list(
+        q=query, 
+        fields="files(id)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True
+    ).execute().get("files", [])
+    
+    media = MediaIoBaseUpload(
+        io.BytesIO(csv_data), 
+        mimetype="text/csv", 
+        resumable=True
+    )
+    
+    if existing_files:
+        file_id = existing_files[0]["id"]
+        service.files().update(
+            fileId=file_id, 
+            media_body=media,
+            supportsAllDrives=True
+        ).execute()
+        print(f"[{time.strftime('%H:%M:%S')}] Fișierul {nume_fisier} a fost salvat/actualizat în /Metadate.")
+    else:
+        metadata = {
+            "name": nume_fisier,
+            "parents": [FOLDER_METADATE_ID]
+        }
+        service.files().create(
+            body=metadata, 
+            media_body=media,
+            supportsAllDrives=True
+        ).execute()
+        print(f"[{time.strftime('%H:%M:%S')}] Fișierul nou {nume_fisier} a fost creat cu succes în /Metadate.")
+
 def descarca_si_scaneaza_xmluri(service):
-    """Listare și scanare cu status update detaliat și progres în consolă."""
+    """Listare și scanare cu status update detaliat și autosave intermediar."""
     emitenti_counter = Counter()
     tipuri_acte_counter = Counter()
     
@@ -134,7 +180,7 @@ def descarca_si_scaneaza_xmluri(service):
             if tip_act:
                 tipuri_acte_counter[tip_act] += 1
                 
-            # Din 100 în 100 de fișiere, afișăm un status intermediar complet
+            # Din 100 în 100 de fișiere, afișăm un status intermediar complet în consolă
             if idx % 100 == 0:
                 elapsed = time.time() - start_time
                 viteza = idx / elapsed if elapsed > 0 else 0
@@ -145,12 +191,21 @@ def descarca_si_scaneaza_xmluri(service):
                 print(f"  > Viteza de procesare: {viteza:.2f} fișiere/secundă")
                 print(f"  > Emitenți unici detectați până acum: {len(emitenti_counter)}")
                 print(f"  > Tipuri de acte unice detectate până acum: {len(tipuri_acte_counter)}")
-                # Afișăm top 3 din fiecare pentru confirmare vizuală rapidă
                 if emitenti_counter:
                     print(f"  > Exemple emitenți: {dict(emitenti_counter.most_common(3))}")
                 if tipuri_acte_counter:
                     print(f"  > Exemple tipuri: {dict(tipuri_acte_counter.most_common(3))}")
                 print("------------------------------------------\n")
+
+            # Salvare intermediară (Autosave) din 500 în 500 de fișiere
+            if idx % 500 == 0:
+                print(f"\n[{time.strftime('%H:%M:%S')}] [Autosave] Se salvează progresul curent în Google Drive...")
+                try:
+                    salveaza_csv_in_drive(service, "emitenti_brut.csv", emitenti_counter, ["Emitent_Original", "Aparitii"])
+                    salveaza_csv_in_drive(service, "tipuri_acte_brut.csv", tipuri_acte_counter, ["TipAct_Original", "Aparitii"])
+                    print(f"[{time.strftime('%H:%M:%S')}] [Autosave] Salvare finalizată cu succes.\n")
+                except Exception as e:
+                    print(f"\n[Avertisment Autosave] Salvarea intermediară a eșuat ({e}). Continuăm rularea...\n")
                 
         except Exception as e:
             print(f"\n[Eroare] Eșec la procesarea fișierului {file_name}: {e}")
@@ -161,58 +216,14 @@ def descarca_si_scaneaza_xmluri(service):
     
     return emitenti_counter, tipuri_acte_counter
 
-def salveaza_csv_in_drive(service, nume_fisier, date, antet):
-    """Salvează sau suprascrie CSV-ul generat direct în folderul /Metadate."""
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(antet)
-    for element, count in date.most_common():
-        writer.writerow([element, count])
-    
-    csv_data = output.getvalue().encode('utf-8')
-    output.close()
-    
-    query = f"'{FOLDER_METADATE_ID}' in parents and name = '{nume_fisier}' and trashed = false"
-    
-    existing_files = service.files().list(
-        q=query, 
-        fields="files(id)",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True
-    ).execute().get("files", [])
-    
-    media = MediaIoBaseUpload(
-        io.BytesIO(csv_data), 
-        mimetype="text/csv", 
-        resumable=True
-    )
-    
-    if existing_files:
-        file_id = existing_files[0]["id"]
-        service.files().update(
-            fileId=file_id, 
-            media_body=media,
-            supportsAllDrives=True
-        ).execute()
-        print(f"[{time.strftime('%H:%M:%S')}] Fișierul {nume_fisier} a fost actualizat cu succes în /Metadate.")
-    else:
-        metadata = {
-            "name": nume_fisier,
-            "parents": [FOLDER_METADATE_ID]
-        }
-        service.files().create(
-            body=metadata, 
-            media_body=media,
-            supportsAllDrives=True
-        ).execute()
-        print(f"[{time.strftime('%H:%M:%S')}] Fișierul nou {nume_fisier} a fost creat cu succes în /Metadate.")
-
 def main():
     try:
         service = obtine_serviciu_drive()
         emitenti, tipuri_acte = descarca_si_scaneaza_xmluri(service)
         
         if emitenti or tipuri_acte:
+            # Salvarea finală decisivă
+            print(f"\n[{time.strftime('%H:%M:%S')}] [Salvare Finală] Se scriu datele definitive în Google Drive...")
             salveaza_csv_in_drive(service, "emitenti_brut.csv", emitenti, ["Emitent_Original", "Aparitii"])
             salveaza_csv_in_drive(service, "tipuri_acte_brut.csv", tipuri_acte, ["TipAct_Original", "Aparitii"])
             print(f"[{time.strftime('%H:%M:%S')}] Procesul complet s-a încheiat cu succes!")
