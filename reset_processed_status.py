@@ -6,7 +6,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 XML_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
-MAX_WORKERS = 10  # Numărul de thread-uri paralele (poți urca la 15-20 dacă vrei și mai rapid)
+MAX_WORKERS = 20  # Numărul de thread-uri paralele (poți urca la 15-20 dacă vrei și mai rapid)
 
 def print_flush(message):
     print(message, flush=True)
