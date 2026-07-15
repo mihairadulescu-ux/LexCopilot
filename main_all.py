@@ -22,7 +22,7 @@ AN_START = 2000
 AN_STOP = 2019
 MAX_THREADS = 4
 
-# ID-ul folderului tău shared Google Drive
+# ID-ul folderului tău shared Google Drive corporate
 GDRIVE_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
 
 # ======================================================================
@@ -89,7 +89,7 @@ def incarca_in_gdrive(service, nume_fisier, continut_text):
     fh = io.BytesIO(continut_text.encode('utf-8'))
     media = MediaIoBaseUpload(fh, mimetype='text/plain', resumable=True)
     
-    # Parametri compleți pentru a ne asigura că este acceptat pe Shared Drive corporate
+    # Parametri specifici pentru Shared Drive corporate
     service.files().create(
         body=file_metadata,
         media_body=media,
@@ -108,8 +108,8 @@ def proceseaza_an(an, token_manager, client, gdrive_service):
     token = token_manager.get_valid_token()
     
     while True:
-        # Respectăm structura XML exactă din specificație utilizând un dicționar nativ,
-        # lăsând Zeep să facă serializarea corectă a tipurilor opționale/nule.
+        # Respectăm structura XML din specificația oficială.
+        # Lăsăm Zeep să se ocupe de serializarea corectă a valorilor None (i:nil="true")
         search_model = {
             'NumarPagina': pagina,
             'RezultatePagina': rezultate_pe_pagina,
@@ -120,54 +120,58 @@ def proceseaza_an(an, token_manager, client, gdrive_service):
         }
         
         try:
-            # Apelăm metoda Search cu denumirile exacte de parametri din WSDL: SearchModel și tokenKey
+            # Apelăm metoda Search folosind denumirile exacte de parametri din specificație
             response = client.service.Search(SearchModel=search_model, tokenKey=token)
             
             lista_legi = None
             if response:
-                # Modificare critică de parsare: response (SearchResult) conține direct lista 'Legi'
-                if hasattr(response, 'Legi') and response.Legi:
+                # Parsare dinamică și ultra-robustă a structurii de răspuns
+                if hasattr(response, 'Legi') and response.Legi is not None:
                     if isinstance(response.Legi, list):
                         lista_legi = response.Legi
-                    elif hasattr(response.Legi, 'Legi') and response.Legi.Legi:
-                        # Fallback în caz că structura XML se imbrivează în funcție de versiunea parserului local
+                    elif hasattr(response.Legi, 'Legi') and isinstance(response.Legi.Legi, list):
                         lista_legi = response.Legi.Legi
                     else:
-                        lista_legi = response.Legi
+                        lista_legi = [response.Legi]  # În caz că întoarce un singur obiect în loc de listă
 
-                # Dacă am identificat lista și conține elemente
+                # Dacă am găsit legi în această pagină
                 if lista_legi:
-                    # Construim structura fișierului în memorie
                     buffer_text = []
                     for lege in lista_legi:
+                        # Extragem metadatele istorice complete (cu fallback-uri sigure în caz de valori lipsă)
                         id_val = getattr(lege, 'IdValoare', 'N/A')
+                        tip_val = getattr(lege, 'TipAct', 'N/A')
+                        numar_val = getattr(lege, 'Numar', 'N/A')
+                        emitent_val = getattr(lege, 'Emitent', 'N/A')
+                        data_val = getattr(lege, 'DataVigoare', 'N/A')
+                        pub_val = getattr(lege, 'Publicatie', 'N/A')
                         titlu_val = getattr(lege, 'Titlu', 'Fără Titlu')
-                        data_val = getattr(lege, 'DataVigoare', 'Fără Dată')
-                        emitent_val = getattr(lege, 'Emitent', 'Fără Emitent')
-                        numar_val = getattr(lege, 'Numar', 'Fără Număr')
                         
+                        # Salvăm un format curat, perfect lizibil
                         buffer_text.append(
                             f"ID: {id_val} | "
-                            f"Numar: {numar_val} | "
+                            f"Tip: {tip_val} | "
+                            f"Nr: {numar_val} | "
                             f"Emitent: {emitent_val} | "
                             f"Data: {data_val} | "
+                            f"Publicație: {pub_val} | "
                             f"Titlu: {titlu_val}"
                         )
                     
                     continut_final = "\n".join(buffer_text)
                     nume_fisier_gdrive = f"legi_{an}_pag_{pagina}.txt"
                     
-                    # Încărcare în GDrive corporate
+                    # Încărcăm fișierul direct în Shared Drive-ul companiei
                     incarca_in_gdrive(gdrive_service, nume_fisier_gdrive, continut_final)
                     
                     print(f"☁️ [An {an}] Pagina {pagina} salvată direct în GDrive ({len(lista_legi)} acte).")
                     pagina += 1
                     
-                    # Delay politicos pentru a nu fi blocați de protecția firewall-ului Just
+                    # Un mic delay protectiv împotriva blocărilor temporare de IP
                     time.sleep(random.uniform(0.6, 1.2))
                     
                 else:
-                    print(f"✅ [An {an}] Finalizat complet (fără alte rezultate la pagina {pagina}).")
+                    print(f"✅ [An {an}] Finalizat complet la pagina {pagina} (fără alte rezultate).")
                     break
             else:
                 print(f"ℹ️ [An {an}] Nu s-au întors date la pagina {pagina} (Răspuns gol).")
