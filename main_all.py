@@ -21,8 +21,8 @@ from zeep.plugins import HistoryPlugin
 GOOGLE_DRIVE_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
-START_YEAR = 2020
-END_YEAR = 2026
+START_YEAR = 2010
+END_YEAR = 2019
 
 # Numărul de thread-uri paralele (3-4 este optim pentru a nu fi blocați de Just.ro)
 MAX_WORKERS = 5 
