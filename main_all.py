@@ -3,7 +3,7 @@ import time
 import requests
 import xml.etree.ElementTree as ET
 
-# --- CODURI CULORI ANSI PENTRU CONSOLĂ (se văd verzi pe GitHub) ---
+# --- CODURI CULORI ANSI PENTRU CONSOLĂ ---
 VERDE = "\033[92m"
 GALBEN = "\033[93m"
 ROSU = "\033[91m"
@@ -17,7 +17,6 @@ CURRENT_TOKEN = None
 def obtine_token_nou():
     """Apelează serviciul public pentru a genera un token nou."""
     global CURRENT_TOKEN
-    # flush=True obligă GitHub să afișeze instant acest mesaj!
     print(f"{GALBEN}[-] Se încearcă conectarea la Just.ro pentru un token nou...{RESET}", flush=True)
     
     headers = {
@@ -33,7 +32,6 @@ def obtine_token_nou():
     </soapenv:Envelope>"""
     
     try:
-        # Am scăzut timeout la 10 secunde ca să nu stea blocat infinit dacă GitHub e blocat de Just.ro
         response = requests.post(WSDL_URL, data=soap_request, headers=headers, timeout=10)
         if response.status_code == 200:
             root = ET.fromstring(response.content)
@@ -45,7 +43,7 @@ def obtine_token_nou():
                 return CURRENT_TOKEN
         print(f"{ROSU}[!] Serverul a răspuns cu codul: {response.status_code}{RESET}", flush=True)
     except requests.exceptions.Timeout:
-        print(f"{ROSU}[!] TIMEOUT: Serverul Just.ro nu a răspuns în 10 secunde. Probabil IP-ul de GitHub este blocat!{RESET}", flush=True)
+        print(f"{ROSU}[!] TIMEOUT: Serverul Just.ro nu a răspuns în 10 secunde.{RESET}", flush=True)
     except Exception as e:
         print(f"{ROSU}[!] Eroare la generarea token-ului: {e}{RESET}", flush=True)
     
@@ -59,7 +57,7 @@ def executa_cerere_search(an, pagina):
     if not CURRENT_TOKEN:
         obtine_token_nou()
         if not CURRENT_TOKEN:
-            return None # Dacă tot nu avem token, nu mai facem cererea
+            return None
         
     headers = {
         "Content-Type": "text/xml; charset=utf-8",
@@ -94,9 +92,9 @@ def ruleaza_scraping(an_start, an_end):
     for an in range(an_start, an_end + 1):
         pagina = 0
         while True:
-            nume_fisier = f"response_raw_{an}_pag_{pagina}.xml"
+            # --- LOGICA DE SKIP CU FORMATUL TĂU BRUT ---
+            nume_fisier = f"brut_legislatie_{an}_pag{pagina}.xml"
             
-            # --- LOGICA DE SKIP ---
             if os.path.exists(nume_fisier):
                 print(f"{GALBEN}[~] Pasăm peste: {nume_fisier} există deja.{RESET}", flush=True)
                 pagina += 1
@@ -122,7 +120,7 @@ def ruleaza_scraping(an_start, an_end):
                 time.sleep(5)
                 continue
 
-            # --- SALVARE ---
+            # --- SALVARE CU NAMING-UL TĂU BRUT ---
             try:
                 with open(nume_fisier, "w", encoding="utf-8") as f:
                     f.write(response_text)
@@ -139,4 +137,5 @@ def ruleaza_scraping(an_start, an_end):
 
 
 if __name__ == "__main__":
+    # Rulează direct pe GitHub Actions de la 2000 la 2026.
     ruleaza_scraping(2000, 2026)
