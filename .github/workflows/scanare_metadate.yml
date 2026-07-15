@@ -1,29 +1,28 @@
-name: Scanare Metadate (CodiceCurat)
+name: Procesare Acte Normative
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Îl poți porni manual când dorești
 
 jobs:
-  run-scan:
+  procesare:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
+    - name: Checkout cod
       uses: actions/checkout@v4
 
-    - name: Set up Python
+    - name: Configurare Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.13'
 
-    - name: Install dependencies
+    # Pasul 1: Sincronizează datele din Google Drive local pe runner-ul GitHub
+    # Folosește un utilitar precum rclone sau gdrive-cli cu credențialele tale salvate în GitHub Secrets
+    - name: Descarcă datele din Google Drive
       run: |
-        python -m pip install --upgrade pip
-        pip install google-auth google-api-python-client
+        echo "Aici rulează comanda care descarcă fișierele din Drive într-un folder local './date_brute'"
+        # Exemplu ipotetic: rclone sync gdrive:acte ./date_brute
 
-    - name: Run Scanare Script
-      env:
-        # Aici am mapat secretul tău exact așa cum se numește în GitHub Settings
-        GDRIVE_CREDENTIALS: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }} 
-      run: |
-        python codice_curat/src/scanare_brut.py
+    # Pasul 2: Rulează scriptul de procesare în paralel direct pe fișierele locale
+    - name: Rulează Extractorul de Metadate (Paralel)
+      run: python script_procesare.py
