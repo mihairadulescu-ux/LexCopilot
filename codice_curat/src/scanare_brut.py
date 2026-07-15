@@ -1,236 +1,139 @@
-import os
-import json
 import re
-import csv
-import io
-import time
-from collections import Counter
-import xml.etree.ElementTree as ET
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+from datetime import datetime
 
-# ID-urile folderelor tale din Google Drive
-FOLDER_SURSA_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
-FOLDER_METADATE_ID = "1Cpxs20QAtAPw_RIUsOOecJON9hHPlBXf"
+class RawMetadataExtractor:
+    def __init__(self, text: str):
+        self.text = text
+        self.metadata = {}
 
-def obtine_serviciu_drive():
-    """Autentificare securizată folosind cheia secretă din GitHub Actions."""
-    creds_json = os.environ.get("GDRIVE_CREDENTIALS")
-    if not creds_json:
-        raise ValueError("Eroare: Variabila de mediu GDRIVE_CREDENTIALS lipsește din GitHub Secrets!")
-    
-    info = json.loads(creds_json)
-    creds = service_account.Credentials.from_service_account_info(
-        info, scopes=["https://www.googleapis.com/auth/drive"]
-    )
-    return build("drive", "v3", credentials=creds)
+    def extract_all(self) -> dict:
+        """Rulează toate extractoarele de metadate brute."""
+        self.metadata["emitent_brut"] = self.extract_raw_emitter()
+        self.metadata["tip_act_brut"] = self.extract_raw_act_type()
+        self.metadata["date_calendaristice_brute"] = self.extract_raw_dates()
+        self.metadata["structura_articole_brute"] = self.extract_raw_structure()
+        self.metadata["formule_modificare_brute"] = self.extract_raw_modification_formulas()
+        return self.metadata
 
-def curata_text(text):
-    if not text:
-        return ""
-    return re.sub(r'\s+', ' ', text).strip()
-
-def extrage_metadate_din_xml(xml_content):
-    """
-    Extrage emitentul și tipul actului din XML-ul brut.
-    Folosește o metodă imună la namespace-uri (caută tag-uri care se termină în 'Emitent' sau 'TipAct').
-    """
-    try:
-        root = ET.fromstring(xml_content)
+    def extract_raw_emitter(self) -> str:
+        """
+        Caută emitentul în primele linii ale documentului.
+        De obicei apare după 'EMITENT' sau la începutul actului.
+        """
+        # Căutăm tipare precum "EMITENT: <Nume>" sau "EMITENT <Nume>" în primele 1000 de caractere
+        header_area = self.text[:1000]
+        match = re.search(r'(?:EMITENT|EMITENTUL)[:\s]+([^\n\r]+)', header_area, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
         
-        emitent = None
-        tip_act = None
+        # Fallback: primele linii dacă nu există cuvântul cheie "EMITENT"
+        lines = [line.strip() for line in header_area.split('\n') if line.strip()]
+        for line in lines[:5]:
+            if any(kw in line.upper() for kw in ["MINISTERUL", "GUVERNUL", "PARLAMENTUL", "AUTORITATEA", "AGENȚIA", "AGENCIA", "CURTEA"]):
+                return line
+        return "Nespecificat/Nedetectat"
+
+    def extract_raw_act_type(self) -> str:
+        """Extractează tipul brut de act (Lege, OUG, Ordin, Decizie etc.)."""
+        # Căutăm la începutul documentului cuvinte cheie specifice
+        header_area = self.text[:500]
+        act_types_patterns = [
+            r'\bLEGE\b', r'\bORDONANȚĂ DE URGENȚĂ\b', r'\bORDONANTA DE URGENTA\b', 
+            r'\bORDONANȚĂ\b', r'\bORDONANTA\b', r'\bHOTĂRÂRE\b', r'\bHOTARARE\b', 
+            r'\bORDIN\b', r'\bDECIZIE\b', r'\bDECRET\b', r'\bINSTRUCTIUNI\b', r'\bINSTRUCȚIUNI\b'
+        ]
         
-        # Iterăm prin toate elementele din XML și căutăm potriviri ignorând namespace-ul
-        for elem in root.iter():
-            # În ElementTree, tag-ul complet arată ca "{http://namespace}NumeTag" sau simplu "NumeTag"
-            # extragem doar partea de după acoladă (numele local al tag-ului)
-            local_name = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+        for pattern in act_types_patterns:
+            match = re.search(pattern, header_area, re.IGNORECASE)
+            if match:
+                return match.group(0).strip()
+        return "Tip Act Nedetectat"
+
+    def extract_raw_dates(self) -> dict:
+        """
+        Extrage datele calendaristice brute menționate în contextul publicării
+        sau adoptării actului (ex: 'publicat în Monitorul Oficial din 15 iulie 2026').
+        """
+        # Căutăm structuri de date românești (ex: 15 iulie 2026 sau 15.07.2026)
+        date_pattern = r'\b(\d{1,2}\s+(?:ianuarie|februarie|martie|aprilie|mai|iunie|iulie|august|septembrie|octombrie|noiembrie|decembrie|ian|feb|mar|apr|mai|iun|iul|aug|sept|oct|nov|dec)\s+\d{4})|\b(\d{1,2}[\./\-]\d{1,2}[\./\-]\d{4})\b'
+        
+        dates_found = []
+        for match in re.finditer(date_pattern, self.text, re.IGNORECASE):
+            dates_found.append(match.group(0))
             
-            if local_name == "Emitent" and elem.text:
-                emitent = curata_text(elem.text)
-            elif local_name == "TipAct" and elem.text:
-                tip_act = curata_text(elem.text)
-                
-            # Dacă le-am găsit pe amândouă, ne putem opri mai devreme
-            if emitent and tip_act:
-                break
-                
-        return emitent, tip_act
-    except Exception:
-        # Returnăm None în caz de eroare de parsare, dar lăsăm scriptul să meargă mai departe
-        return None, None
-
-def salveaza_csv_in_drive(service, nume_fisier, date, antet):
-    """Salvează sau suprascrie CSV-ul generat direct în folderul /Metadate."""
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(antet)
-    for element, count in date.most_common():
-        writer.writerow([element, count])
-    
-    csv_data = output.getvalue().encode('utf-8')
-    output.close()
-    
-    query = f"'{FOLDER_METADATE_ID}' in parents and name = '{nume_fisier}' and trashed = false"
-    
-    existing_files = service.files().list(
-        q=query, 
-        fields="files(id)",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True
-    ).execute().get("files", [])
-    
-    media = MediaIoBaseUpload(
-        io.BytesIO(csv_data), 
-        mimetype="text/csv", 
-        resumable=True
-    )
-    
-    if existing_files:
-        file_id = existing_files[0]["id"]
-        service.files().update(
-            fileId=file_id, 
-            media_body=media,
-            supportsAllDrives=True
-        ).execute()
-        print(f"[{time.strftime('%H:%M:%S')}] Fișierul {nume_fisier} a fost salvat/actualizat în /Metadate.")
-    else:
-        metadata = {
-            "name": nume_fisier,
-            "parents": [FOLDER_METADATE_ID]
+        return {
+            "toate_datele_gasite": list(set(dates_found))[:5], # primele 5 date brute găsite
+            "context_data_publicare": self._get_context("Monitorul Oficial", 100)
         }
-        service.files().create(
-            body=metadata, 
-            media_body=media,
-            supportsAllDrives=True
-        ).execute()
-        print(f"[{time.strftime('%H:%M:%S')}] Fișierul nou {nume_fisier} a fost creat cu succes în /Metadate.")
 
-def descarca_si_scaneaza_xmluri(service):
-    """Listare și scanare cu status update detaliat și autosave intermediar."""
-    emitenti_counter = Counter()
-    tipuri_acte_counter = Counter()
-    
-    query = f"'{FOLDER_SURSA_ID}' in parents and trashed = false"
-    
-    print(f"[{time.strftime('%H:%M:%S')}] Pasul 1: Interogare fișiere din folderul sursă...")
-    
-    toate_fisierele = []
-    page_token = None
-    
-    while True:
-        try:
-            results = service.files().list(
-                q=query, 
-                fields="nextPageToken, files(id, name, mimeType)", 
-                pageSize=1000,
-                pageToken=page_token,
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True
-            ).execute()
-            
-            toate_fisierele.extend(results.get("files", []))
-            page_token = results.get('nextPageToken')
-            if not page_token:
-                break
-        except Exception as e:
-            print(f"Eroare critică la listarea fișierelor: {e}")
-            break
-
-    if not toate_fisierele:
-        print("\n!!! API-ul Google Drive a returnat 0 fișiere.")
-        return emitenti_counter, tipuri_acte_counter
-
-    toate_xmlurile = [f for f in toate_fisierele if f['name'].lower().endswith('.xml')]
-    total_xmluri = len(toate_xmlurile)
-    
-    print(f"[{time.strftime('%H:%M:%S')}] Pasul 2: S-au detectat în total {len(toate_fisierele)} elemente.")
-    print(f" -> Dintre acestea, {total_xmluri} sunt fișiere XML valide.")
-    
-    if total_xmluri == 0:
-        print("Nu s-au găsit XML-uri de procesat.")
-        return emitenti_counter, tipuri_acte_counter
-
-    print(f"\n[{time.strftime('%H:%M:%S')}] Pasul 3: Începe descărcarea și procesarea în timp real...\n")
-    
-    start_time = time.time()
-    
-    for idx, file in enumerate(toate_xmlurile, 1):
-        file_id = file["id"]
-        file_name = file["name"]
+    def extract_raw_structure(self) -> list:
+        """
+        Identifică structura de capitole, articole și alineate în formă brută.
+        """
+        structure = []
+        # Căutăm "Art. 1", "Articolul 1", "Capitolul I", "Sectiunea 1" etc.
+        patterns = {
+            "CAPITOL": r'\b(?:CAPITOLUL|CAPITOL)\s+([IVXLCDM\d]+)',
+            "SECTIUNE": r'\b(?:SECȚIUNEA|SECTIUNEA|SECȚIUNE|SECTIUNE)\s+(\d+|[IVXLCDM]+)',
+            "ARTICOL": r'\b(?:ARTICOLUL|ART\.)\s+(\d+)'
+        }
         
-        try:
-            # Afișăm în consolă fișierul curent
-            print(f"[{idx}/{total_xmluri}] Se procesează: {file_name}...", end="\r", flush=True)
-            
-            request = service.files().get_media(fileId=file_id)
-            file_buffer = io.BytesIO()
-            downloader = MediaIoBaseDownload(file_buffer, request)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
-            
-            xml_content = file_buffer.getvalue()
-            emitent, tip_act = extrage_metadate_din_xml(xml_content)
-            
-            if emitent:
-                emitenti_counter[emitent] += 1
-            if tip_act:
-                tipuri_acte_counter[tip_act] += 1
+        for unit_type, pattern in patterns.items():
+            matches = re.findall(pattern, self.text, re.IGNORECASE)
+            if matches:
+                structure.append(f"{unit_type} brute găsite: {list(set(matches))[:10]}") # limităm la primele 10 pentru vizualizare
                 
-            # Din 100 în 100 de fișiere, afișăm un status intermediar complet în consolă
-            if idx % 100 == 0:
-                elapsed = time.time() - start_time
-                viteza = idx / elapsed if elapsed > 0 else 0
-                estimat_ramas = (total_xmluri - idx) / viteza if viteza > 0 else 0
-                
-                print(f"\n--- [Status intermediar {idx}/{total_xmluri}] ---")
-                print(f"  > Timp scurs: {int(elapsed)}s | Rămase aproximative: {int(estimat_ramas)}s")
-                print(f"  > Viteza de procesare: {viteza:.2f} fișiere/secundă")
-                print(f"  > Emitenți unici detectați până acum: {len(emitenti_counter)}")
-                print(f"  > Tipuri de acte unice detectate până acum: {len(tipuri_acte_counter)}")
-                if emitenti_counter:
-                    print(f"  > Exemple emitenți: {dict(emitenti_counter.most_common(3))}")
-                if tipuri_acte_counter:
-                    print(f"  > Exemple tipuri: {dict(tipuri_acte_counter.most_common(3))}")
-                print("------------------------------------------\n")
+        return structure
 
-            # Salvare intermediară (Autosave) din 500 în 500 de fișiere
-            if idx % 500 == 0:
-                print(f"\n[{time.strftime('%H:%M:%S')}] [Autosave] Se salvează progresul curent în Google Drive...")
-                try:
-                    salveaza_csv_in_drive(service, "emitenti_brut.csv", emitenti_counter, ["Emitent_Original", "Aparitii"])
-                    salveaza_csv_in_drive(service, "tipuri_acte_brut.csv", tipuri_acte_counter, ["TipAct_Original", "Aparitii"])
-                    print(f"[{time.strftime('%H:%M:%S')}] [Autosave] Salvare finalizată cu succes.\n")
-                except Exception as e:
-                    print(f"\n[Avertisment Autosave] Salvarea intermediară a eșuat ({e}). Continuăm rularea...\n")
-                
-        except Exception as e:
-            print(f"\n[Eroare] Eșec la procesarea fișierului {file_name}: {e}")
-            
-    total_time = time.time() - start_time
-    print(f"\n\n[{time.strftime('%H:%M:%S')}] Scanarea a fost finalizată în {total_time:.2f} secunde.")
-    print(f" -> Total fișiere scanate cu succes: {idx}")
-    
-    return emitenti_counter, tipuri_acte_counter
-
-def main():
-    try:
-        service = obtine_serviciu_drive()
-        emitenti, tipuri_acte = descarca_si_scaneaza_xmluri(service)
+    def extract_raw_modification_formulas(self) -> list:
+        """
+        Extrage paragrafele brute care conțin formule tipice de modificare, 
+        abrogare, completare sau prorogare.
+        """
+        formulas = []
+        keywords = [
+            r'se abrogă', r'se abroga', 
+            r'se modifică', r'se modifica', 
+            r'se completează', r'se completeaza', 
+            r'se suspendă', r'se suspenda', 
+            r'se prorogă', r'se proroga'
+        ]
         
-        if emitenti or tipuri_acte:
-            # Salvarea finală decisivă
-            print(f"\n[{time.strftime('%H:%M:%S')}] [Salvare Finală] Se scriu datele definitive în Google Drive...")
-            salveaza_csv_in_drive(service, "emitenti_brut.csv", emitenti, ["Emitent_Original", "Aparitii"])
-            salveaza_csv_in_drive(service, "tipuri_acte_brut.csv", tipuri_acte, ["TipAct_Original", "Aparitii"])
-            print(f"[{time.strftime('%H:%M:%S')}] Procesul complet s-a încheiat cu succes!")
-        else:
-            print("Nu s-au putut colecta metadate valide din XML-urile procesate.")
-    except Exception as e:
-        print(f"A apărut o eroare critică în timpul execuției: {e}")
+        # Împărțim textul în propoziții/fraze brute pentru a izola contextul
+        sentences = re.split(r'[\.\n]', self.text)
+        for sentence in sentences:
+            sentence_clean = sentence.strip()
+            if any(re.search(kw, sentence_clean, re.IGNORECASE) for kw in keywords):
+                if len(sentence_clean) > 10 and sentence_clean not in formulas:
+                    formulas.append(sentence_clean[:150] + "...") # luăm doar începutul frazei brute
+                    
+        return formulas[:10] # limităm la primele 10 formule brute detectate
 
+    def _get_context(self, keyword: str, chars_around: int) -> str:
+        """Funcție ajutătoare pentru a extrage contextul din jurul unui cuvânt cheie."""
+        idx = self.text.lower().find(keyword.lower())
+        if idx != -1:
+            start = max(0, idx - chars_around)
+            end = min(len(self.text), idx + len(keyword) + chars_around)
+            return "..." + self.text[start:end].replace('\n', ' ').strip() + "..."
+        return "Nu s-a găsit context"
+
+# --- EXEMPLU DE RULARE PE TEXT BRUT ---
 if __name__ == "__main__":
-    main()
+    exemplu_text_lege = """
+    MONITORUL OFICIAL AL ROMÂNIEI, PARTEA I, Nr. 542 din 15 iulie 2026.
+    EMITENT: MINISTERUL FINANȚELOR
+    ORDIN pentru modificarea unor norme metodologice.
+    
+    Având în vedere referatul de aprobare...
+    CAPITOLUL I: Dispoziții generale.
+    Art. 1. - Prezentele norme se aplică instituțiilor publice.
+    Art. 2. - La data intrării în vigoare a prezentului ordin, se abrogă Articolul 5 din Ordinul nr. 120/2021.
+    Art. 3. - Articolul 10 din Legea nr. 227/2015 se modifică și va avea următorul cuprins...
+    """
+    
+    extractor = RawMetadataExtractor(exemplu_text_lege)
+    rezultate_brute = extractor.extract_all()
+    
+    import json
+    print(json.dumps(rezultate_brute, indent=4, ensure_ascii=False))
