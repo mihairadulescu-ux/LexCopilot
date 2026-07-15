@@ -3,7 +3,9 @@ import sys
 import time
 import random
 import io
+import json
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import httpx
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -13,6 +15,7 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 # CONFIGURARE GOOGLE DRIVE
 # ======================================================================
 GOOGLE_DRIVE_FOLDER_ID = "1c8SEo8UrQVe6qgzPFGLXJFiMyLeI-r8D"
+MAX_DOWNLOAD_WORKERS = 40  # Numărul de thread-uri pentru citirea paralelă a fișierelor dummy
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -20,13 +23,37 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0"
 ]
 
-def instantiaza_drive():
+def obtine_creds():
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
         raise EnvironmentError("❌ Lipseste secretul GOOGLE_SERVICE_ACCOUNT_JSON!")
-    import json
     info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
-    creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
-    return build("drive", "v3", credentials=creds)
+    return Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
+
+def instantiaza_drive(creds=None):
+    if not creds:
+        creds = obtine_creds()
+    # cache_discovery=False previne request-uri HTTP suplimentare la inițializare
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+def decodific_si_proceseaza_dummy(creds, f_id, nume):
+    """Rulează în interiorul unui thread pentru a citi conținutul unui singur fișier dummy."""
+    try:
+        service = instantiaza_drive(creds)
+        request = service.files().get_media(fileId=f_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while done is False:
+            _, done = downloader.next_chunk()
+        
+        continut = fh.getvalue().decode('utf-8', errors='ignore').strip()
+        
+        if continut.isdigit() and 1 <= int(continut) <= 5:
+            return nume, f"dummy_{continut}"
+        else:
+            return nume, "dummy_final"
+    except Exception:
+        return nume, "dummy_final"
 
 def adu_fisiere_existente_in_drive(drive_service, folder_id):
     existente = {}
@@ -61,32 +88,31 @@ def adu_fisiere_existente_in_drive(drive_service, folder_id):
             
     fisiere_de_verificat = [n for n, v in existente.items() if v["status"] == "dummy_verificabil"]
     if fisiere_de_verificat:
-        print(f"   ↳ Am detectat {len(fisiere_de_verificat)} fișiere dummy de 1 byte. Le citim contorul...", flush=True)
+        total_verificabile = len(fisiere_de_verificat)
+        print(f"   ↳ Am detectat {total_verificabile} fișiere dummy de 1 byte. Pornim citirea paralelă cu {MAX_DOWNLOAD_WORKERS} thread-uri...", flush=True)
         
-        for nume in fisiere_de_verificat:
-            f_id = existente[nume]["id"]
-            try:
-                request = drive_service.files().get_media(fileId=f_id)
-                fh = io.BytesIO()
-                downloader = MediaIoBaseDownload(fh, request)
-                done = False
-                while done is False:
-                    _, done = downloader.next_chunk()
+        creds = obtine_creds()
+        progres = 0
+        
+        # Execuție paralelă (I/O-bound) folosind ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=MAX_DOWNLOAD_WORKERS) as executor:
+            futures = {
+                executor.submit(decodific_si_proceseaza_dummy, creds, existente[nume]["id"], nume): nume
+                for nume in fisiere_de_verificat
+            }
+            
+            for future in as_completed(futures):
+                nume, status_rezultat = future.result()
+                existente[nume]["status"] = status_rezultat
                 
-                continut = fh.getvalue().decode('utf-8', errors='ignore').strip()
-                
-                if continut.isdigit() and 1 <= int(continut) <= 5:
-                    existente[nume]["status"] = f"dummy_{continut}"
-                else:
-                    existente[nume]["status"] = "dummy_final"
-            except Exception:
-                existente[nume]["status"] = "dummy_final"
-                
+                progres += 1
+                if progres % 500 == 0 or progres == total_verificabile:
+                    print(f"      [Progres] Citit contor pentru {progres}/{total_verificabile} fișiere dummy...", flush=True)
+                    
     return existente
 
 def incarca_sau_actualizeaza_in_drive(drive_service, cale_locala, folder_id, file_id_existent=None):
     nume_fisier = cale_locala.name
-    # Folosim chunksize pentru a asigura un upload stabil de tip resumable pentru fișiere mari
     media = MediaFileUpload(str(cale_locala), mimetype='application/pdf', chunksize=1024*1024*5, resumable=True)
     try:
         if file_id_existent:
@@ -95,7 +121,6 @@ def incarca_sau_actualizeaza_in_drive(drive_service, cale_locala, folder_id, fil
             metadata = {'name': nume_fisier, 'parents': [folder_id]}
             request = drive_service.files().create(body=metadata, media_body=media, fields='id', supportsAllDrives=True)
             
-        # Încărcare controlată în bucăți pentru a rezista la deconectări
         response = None
         while response is None:
             status, response = request.next_chunk()
@@ -107,7 +132,6 @@ def incarca_sau_actualizeaza_in_drive(drive_service, cale_locala, folder_id, fil
             return True
     except Exception as e:
         print(f"❌ [Drive Err] Eroare scriere/update {nume_fisier}: {e}", flush=True)
-        # Dacă fișierul local încă există, îl păstrăm pentru încercări viitoare
     return False
 
 # ======================================================================
@@ -180,7 +204,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                         status_actual = meta["status"]
                     else:
                         if var["tip"] == "simplu" or meta["status"] == "ok":
-                            # Nu mai printăm zeci de mii de mesaje verzi ca să nu umplem log-urile din consola GitHub / terminal
                             pass
                 
                 if trebuie_descarcat:
@@ -203,7 +226,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
     director_temp = Path("./temp_pdf_download")
     director_temp.mkdir(exist_ok=True)
     
-    # 🛠️ TIMEOUT EXTREM DE REZISTENT PENTRU FIȘIERE MARI (6 minute citire, 30s conectare)
     timeout_resilient = httpx.Timeout(timeout=360.0, connect=30.0, read=360.0)
     
     erori_consecutive_an = {}
@@ -230,7 +252,7 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
         creeaza_fantomă = False
         valoare_fantomă = " "
         
-        limită_reincercări = 1 if (este_special or este_bis) else 4  # 4 încercări pentru numere simple mari
+        limită_reincercări = 1 if (este_special or este_bis) else 4
         incercari = 0
         
         cale_locala = director_temp / nume_pdf
@@ -238,7 +260,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
         
         while incercari < limită_reincercări:
             try:
-                # Timp de așteptare politicos, crescător la reîncercări (exponential backoff)
                 sleep_time = random.uniform(1.5, 3.0) if incercari == 0 else random.uniform(10.0, 20.0) * incercari
                 time.sleep(sleep_time)
                 
@@ -250,7 +271,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                 if cale_temp.exists():
                     cale_temp.unlink()
                 
-                # Descarcă prin streaming ghidat
                 with httpx.Client(headers=headers, timeout=timeout_resilient, follow_redirects=True) as client:
                     with client.stream("GET", url) as response:
                         
@@ -266,7 +286,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                         
                         response.raise_for_status()
                         
-                        # Verificare tip conținut direct din stream
                         content_type = response.headers.get("Content-Type", "").lower()
                         if "application/pdf" not in content_type:
                             if este_special:
@@ -282,10 +301,9 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                                 print(f"⚠️ Eroare: HTML primit la un fișier SIMPLU. Îl ocolim fără dummy.", flush=True)
                             break
                         
-                        # Descărcare activă în bucăți
                         total_bytes = 0
                         with open(cale_temp, "wb") as f:
-                            for chunk in response.iter_bytes(chunk_size=131072): # Chunk de 128KB pentru a maximiza I/O pe fișiere mari
+                            for chunk in response.iter_bytes(chunk_size=131072):
                                 f.write(chunk)
                                 total_bytes += len(chunk)
                                 
@@ -318,7 +336,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                     print(f"💡 Eroare conexiune pentru Bis. Incrementăm contorul la: {valoare_fantomă}", flush=True)
                     break
                 
-                # Așteptare lungă în caz de eroare, ca să lăsăm serverul Just să se relaxeze
                 time.sleep(random.uniform(15.0, 30.0))
                 
         if descarcat_ok:
@@ -354,7 +371,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
         for f in fisiere_esuate_protejate:
             print(f"  - {f['nume']}", flush=True)
             
-        # 📂 SCRIEM AUTOMAT ÎN FIȘIER EXTERN PENTRU DESCĂRCARE MANUALĂ
         cale_fisier_manual = Path("liste_descarcare_manuala.txt")
         try:
             with open(cale_fisier_manual, "w", encoding="utf-8") as f_manual:
