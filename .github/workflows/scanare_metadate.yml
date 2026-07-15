@@ -1,6 +1,5 @@
 name: Scanare Metadate (CodiceCurat)
 
-# Permite rularea manuală din interfața GitHub (butonul Run workflow)
 on:
   workflow_dispatch:
 
@@ -15,18 +14,16 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-size: '3.10'
+        python-version: '3.10'
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # Adaugă aici librăriile necesare dacă folosești pydrive sau google-api
         pip install google-auth google-api-python-client
 
     - name: Run Scanare Script
       env:
-        # Aici mapăm secretele pe care le ai deja în repo pentru accesul la Drive
-        # Ajustează numele variabilelor (ex: GDRIVE_CREDENTIALS) ca să se potrivească cu ce ai deja configurat în GitHub Secrets
-        GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }} 
+        # Aici am mapat secretul tău exact așa cum se numește în GitHub Settings
+        GDRIVE_CREDENTIALS: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }} 
       run: |
         python codice_curat/src/scanare_brut.py
