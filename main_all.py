@@ -9,8 +9,11 @@ GALBEN = "\033[93m"
 ROSU = "\033[91m"
 RESET = "\033[0m"
 
-# --- URL REAL JUST.RO ---
+# --- URL ORIGINAL (HTTP) ---
 WSDL_URL = "http://legislatie.just.ro/api/legis/LegislatieService.svc"
+
+# User-Agent-ul de browser folosit anterior
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 CURRENT_TOKEN = None
 
@@ -21,7 +24,8 @@ def obtine_token_nou():
     
     headers = {
         "Content-Type": "text/xml; charset=utf-8",
-        "SOAPAction": "http://tempuri.org/ILegislatieService/GetToken"
+        "SOAPAction": "http://tempuri.org/ILegislatieService/GetToken",
+        "User-Agent": USER_AGENT
     }
     
     soap_request = """<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tem="http://tempuri.org/">
@@ -32,7 +36,7 @@ def obtine_token_nou():
     </soapenv:Envelope>"""
     
     try:
-        response = requests.post(WSDL_URL, data=soap_request, headers=headers, timeout=10)
+        response = requests.post(WSDL_URL, data=soap_request, headers=headers, timeout=15)
         if response.status_code == 200:
             root = ET.fromstring(response.content)
             namespaces = {'s': 'http://schemas.xmlsoap.org/soap/envelope/', 't': 'http://tempuri.org/'}
@@ -42,8 +46,6 @@ def obtine_token_nou():
                 print(f"{VERDE}[+] Token nou obținut cu succes: {CURRENT_TOKEN[:15]}...{RESET}", flush=True)
                 return CURRENT_TOKEN
         print(f"{ROSU}[!] Serverul a răspuns cu codul: {response.status_code}{RESET}", flush=True)
-    except requests.exceptions.Timeout:
-        print(f"{ROSU}[!] TIMEOUT: Serverul Just.ro nu a răspuns în 10 secunde.{RESET}", flush=True)
     except Exception as e:
         print(f"{ROSU}[!] Eroare la generarea token-ului: {e}{RESET}", flush=True)
     
@@ -61,7 +63,8 @@ def executa_cerere_search(an, pagina):
         
     headers = {
         "Content-Type": "text/xml; charset=utf-8",
-        "SOAPAction": "http://tempuri.org/ILegislatieService/Search"
+        "SOAPAction": "http://tempuri.org/ILegislatieService/Search",
+        "User-Agent": USER_AGENT
     }
     
     soap_request = f"""<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns0="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="http://schemas.microsoft.com/2003/10/Serialization/Arrays" xmlns:ns2="http://tempuri.org/">
@@ -79,7 +82,7 @@ def executa_cerere_search(an, pagina):
     </SOAP-ENV:Envelope>"""
 
     try:
-        response = requests.post(WSDL_URL, data=soap_request, headers=headers, timeout=10)
+        response = requests.post(WSDL_URL, data=soap_request, headers=headers, timeout=15)
         return response
     except Exception as e:
         print(f"{ROSU}[!] Eroare conexiune la Search (An {an}, Pag {pagina}): {e}{RESET}", flush=True)
@@ -92,7 +95,7 @@ def ruleaza_scraping(an_start, an_end):
     for an in range(an_start, an_end + 1):
         pagina = 0
         while True:
-            # --- LOGICA DE SKIP CU FORMATUL TĂU BRUT ---
+            # --- LOGICA DE SKIP CU FORMATUL TĂU BRUT ORIGINAL ---
             nume_fisier = f"brut_legislatie_{an}_pag{pagina}.xml"
             
             if os.path.exists(nume_fisier):
@@ -110,6 +113,7 @@ def ruleaza_scraping(an_start, an_end):
                 
             response_text = response.text
             
+            # Auto-reparare token la expirare
             if "TOKEN INVALID" in response_text or "REGENERATI TOKEN" in response_text:
                 print(f"{GALBEN}[!] Token expirat! Regenerăm...{RESET}", flush=True)
                 obtine_token_nou()
@@ -128,6 +132,7 @@ def ruleaza_scraping(an_start, an_end):
             except Exception as e:
                 print(f"{ROSU}[!] Eroare salvare {nume_fisier}: {e}{RESET}", flush=True)
             
+            # Oprire pagină când nu mai sunt rezultate
             if "<a:TipAct>" not in response_text and "SearchResult" in response_text:
                 print(f"[*] Gata cu paginile pe anul {an}.", flush=True)
                 break
@@ -137,5 +142,4 @@ def ruleaza_scraping(an_start, an_end):
 
 
 if __name__ == "__main__":
-    # Rulează direct pe GitHub Actions de la 2000 la 2026.
     ruleaza_scraping(2000, 2026)
