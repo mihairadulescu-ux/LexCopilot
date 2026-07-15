@@ -26,4 +26,4 @@ jobs:
     - name: Rulează procesorul XML
       env:
         GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-      run: python optimize_xml_processor.py
+      run: python -u optimize_xml_processor.py
