@@ -21,7 +21,7 @@ AN_STOP_DEFAULT = 2019  # Setează aici anul de oprire dorit (ex: 2019, 2026 etc
 # CONFIGURARE GOOGLE DRIVE & RETRY
 # ======================================================================
 GOOGLE_DRIVE_FOLDER_ID = "1c8SEo8UrQVe6qgzPFGLXJFiMyLeI-r8D"
-MAX_DOWNLOAD_WORKERS = 25  # Numărul de thread-uri pentru citirea paralelă a fișierelor dummy
+MAX_DOWNLOAD_WORKERS = 40  # Numărul de thread-uri pentru citirea paralelă a fișierelor dummy
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
