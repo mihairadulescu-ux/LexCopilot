@@ -1,358 +1,413 @@
 import os
+import sys
 import time
-import re
 import random
-import datetime
+import io
 import json
-import threading
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from lxml import etree
-from google.oauth2 import service_account
+import httpx
+from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaInMemoryUpload
-from google.auth.transport.requests import Request
-import google.auth.transport.requests
-import httplib2
-from zeep import Client
-from zeep.transports import Transport
-from zeep.plugins import HistoryPlugin
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
-# CONFIGURĂRI ELEMENTE DE BAZĂ REȚEAUA INDUSTRIALĂ
-GOOGLE_DRIVE_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
-WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
+# ======================================================================
+# ⚙️ CONFIGURARE INTERVAL ANI (Singurul loc pe care trebuie să îl modifici)
+# ======================================================================
+AN_START_DEFAULT = 2000
+AN_STOP_DEFAULT = 2019  # Setează aici anul de oprire dorit (ex: 2019, 2026 etc.)
 
-START_YEAR = 2010
-END_YEAR = 2019
+# ======================================================================
+# CONFIGURARE GOOGLE DRIVE & RETRY
+# ======================================================================
+GOOGLE_DRIVE_FOLDER_ID = "1c8SEo8UrQVe6qgzPFGLXJFiMyLeI-r8D"
+MAX_DOWNLOAD_WORKERS = 25  # Numărul de thread-uri pentru citirea paralelă a fișierelor dummy
 
-# Numărul de thread-uri paralele (3-4 este optim pentru a nu fi blocați de Just.ro)
-MAX_WORKERS = 5 
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0"
+]
 
-# Lock pentru thread-safety la nivel de rețea/Drive
-SESSION_LOCK = threading.Lock()
-DRIVE_LOCK = threading.Lock()
+def extrage_contor_bis(status_string):
+    """
+    Extrage în siguranță numărul contorului din stări precum 'dummy_1', 'dummy_2' sau 'dummy_verificabil'.
+    Dacă nu găsește cifre sau starea nu e validă, returnează 0 (începe contorizarea de la zero).
+    """
+    if not status_string:
+        return 0
+    cifre = "".join([c for c in status_string if c.isdigit()])
+    if cifre:
+        return int(cifre)
+    return 0
 
-# Variabile globale pentru persistența token-ului
-_GLOBAL_SOAP_CLIENT = None
-_GLOBAL_SOAP_HISTORY = None
-_GLOBAL_TOKEN_KEY = None
+def obtine_creds():
+    if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
+        raise EnvironmentError("❌ Lipseste secretul GOOGLE_SERVICE_ACCOUNT_JSON!")
+    info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+    return Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
 
-_TOKEN_STATS = {
-    "current_key": None,
-    "created_at": None,
-    "pages_processed": 0,
-    "history_log": []
-}
+def instantiaza_drive(creds=None):
+    if not creds:
+        creds = obtine_creds()
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
 
-
-def get_drive_service():
-    scopes = ["https://www.googleapis.com/auth/drive.file"]
-    github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    httplib2.Http(timeout=20)
-    
-    if github_secret:
-        print("🤖 [Cloud Mode] Se încarcă cheia din GitHub Secrets...")
-        try:
-            service_account_info = json.loads(github_secret)
-            creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=scopes)
-            custom_request = Request(google.auth.transport.requests.AuthorizedSession(creds))
-            custom_request.timeout = 20
-            print("🔑 [Cloud Mode] Conexiune stabilită cu succes la Google Drive API.")
-            return build("drive", "v3", credentials=creds)
-        except Exception as json_err:
-            print(f"❌ Eroare critică la citirea cheii din GitHub Secrets: {json_err}")
-            raise json_err
-    else:
-        print("💻 [Local Mode] Autentificare locală service_account.json...")
-        credentials_path = "service_account.json"
-        creds = service_account.Credentials.from_service_account_file(credentials_path, scopes=scopes)
-        return build("drive", "v3", credentials=creds)
-
-
-def pre_scan_entire_drive(service):
-    print("📂 [Magistrală] Se inițiază scanarea globală a folderului Google Drive...")
-    database = {}
-    page_token = None
-    query = f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and name contains 'brut_legislatie_' and trashed = false"
-
+def decodific_si_proceseaza_dummy(creds, f_id, nume):
+    """Rulează în interiorul unui thread pentru a citi conținutul unui singur fișier dummy."""
     try:
-        while True:
-            response = service.files().list(
-                q=query,
-                spaces='drive',
-                fields='nextPageToken, files(name)',
-                pageToken=page_token,
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True
-            ).execute()
+        service = instantiaza_drive(creds)
+        request = service.files().get_media(fileId=f_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while done is False:
+            _, done = downloader.next_chunk()
+        
+        continut = fh.getvalue().decode('utf-8', errors='ignore').strip()
+        
+        if continut.isdigit() and 1 <= int(continut) <= 5:
+            return nume, f"dummy_{continut}"
+        else:
+            return nume, "dummy_final"
+    except Exception:
+        return nume, "dummy_final"
 
-            for file in response.get('files', []):
-                name = file.get('name', '')
-                match = re.search(r"brut_legislatie_(\d+)_pag(\d+)\.xml", name)
-                if match:
-                    an = int(match.group(1))
-                    pagina = int(match.group(2))
-                    if an not in database:
-                        database[an] = set()
-                    database[an].add(pagina)
+def adu_fisiere_existente_in_drive(drive_service, folder_id):
+    existente = {}
+    page_token = None
+    query = f"'{folder_id}' in parents and trashed = false"
+    
+    print("   ↳ Scanăm metadatele din Drive...", flush=True)
+    while True:
+        response = drive_service.files().list(
+            q=query, 
+            fields="nextPageToken, files(id, name, size)", 
+            pageToken=page_token, 
+            pageSize=1000,
+            supportsAllDrives=True, 
+            includeItemsFromAllDrives=True
+        ).execute()
+        
+        for f in response.get("files", []):
+            nume = f["name"]
+            f_id = f["id"]
+            size = int(f.get("size", 0))
+            status = "ok"
+            
+            if size == 1:
+                status = "dummy_verificabil"
+                
+            existente[nume] = {"id": f_id, "size": size, "status": status}
+            
+        page_token = response.get("nextPageToken", None)
+        if not page_token:
+            break
+            
+    fisiere_de_verificat = [n for n, v in existente.items() if v["status"] == "dummy_verificabil"]
+    if fisiere_de_verificat:
+        total_verificabile = len(fisiere_de_verificat)
+        print(f"   ↳ Am detectat {total_verificabile} fișiere dummy de 1 byte. Pornim citirea paralelă cu {MAX_DOWNLOAD_WORKERS} thread-uri...", flush=True)
+        
+        creds = obtine_creds()
+        progres = 0
+        
+        with ThreadPoolExecutor(max_workers=MAX_DOWNLOAD_WORKERS) as executor:
+            futures = {
+                executor.submit(decodific_si_proceseaza_dummy, creds, existente[nume]["id"], nume): nume
+                for nume in fisiere_de_verificat
+            }
+            
+            for future in as_completed(futures):
+                nume, status_rezultat = future.result()
+                existente[nume]["status"] = status_rezultat
+                
+                progres += 1
+                if progres % 500 == 0 or progres == total_verificabile:
+                    print(f"      [Progres] Citit contor pentru {progres}/{total_verificabile} fișiere dummy...", flush=True)
+                    
+    return existente
 
-            page_token = response.get('nextPageToken', None)
-            if not page_token:
-                break
-        print(f"✅ Scanare completă! Am mapat istoricul pentru {len(database)} ani diferiți.")
-        return database
-    except Exception as e:
-        print(f"⚠️ Eroare la scanarea globală ({e}). Robotul va lucra pe curat.")
-        return {}
-
-
-def upload_to_drive(service, filename, content_bytes):
-    # Protejăm upload-ul simultan din multiple thread-uri
-    with DRIVE_LOCK:
-        try:
-            file_metadata = {"name": filename, "parents": [GOOGLE_DRIVE_FOLDER_ID]}
-            media = MediaInMemoryUpload(content_bytes, mimetype="application/xml", resumable=True)
-            file = service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields="id",
-                supportsAllDrives=True,
-            ).execute()
-            print(f"✅ Salvat în Drive: {filename} (ID: {file.get('id')})")
+def incarca_sau_actualizeaza_in_drive(drive_service, cale_locala, folder_id, file_id_existent=None):
+    nume_fisier = cale_locala.name
+    media = MediaFileUpload(str(cale_locala), mimetype='application/pdf', chunksize=1024*1024*5, resumable=True)
+    try:
+        if file_id_existent:
+            request = drive_service.files().update(fileId=file_id_existent, media_body=media, supportsAllDrives=True)
+        else:
+            metadata = {'name': nume_fisier, 'parents': [folder_id]}
+            request = drive_service.files().create(body=metadata, media_body=media, fields='id', supportsAllDrives=True)
+            
+        response = None
+        while response is None:
+            status, response = request.next_chunk()
+            if status:
+                print(f"   ↳ [Drive Upload] {int(status.progress() * 100)}% din {nume_fisier} trimis...", flush=True)
+                
+        if response.get('id'):
+            cale_locala.unlink()
             return True
-        except Exception as e:
-            print(f"❌ Eroare la upload în Drive pentru {filename}: {e}")
-            return False
+    except Exception as e:
+        print(f"❌ [Drive Err] Eroare scriere/update {nume_fisier}: {e}", flush=True)
+    return False
 
+# ======================================================================
+# CORE CRAWLER
+# ======================================================================
+def descarca_monitoare_precalculat(an_start, am_stop):
+    url_template = "https://monitoruloficial.ro/Monitorul-Oficial--PI--{numar}--{an}.html"
+    
+    print(f"🔄 Pasul 1: Conectare la Google Drive (Interval vizat: {an_start} - {am_stop})...", flush=True)
+    try:
+        drive_service = instantiaza_drive()
+        inventar_drive = adu_fisiere_existente_in_drive(drive_service, GOOGLE_DRIVE_FOLDER_ID)
+        print(f"📊 Scanare finalizată. Detectate {len(inventar_drive)} înregistrări în cloud.", flush=True)
+    except Exception as e:
+        print(f"🛑 Eroare critică la inițializarea Google Drive: {e}", flush=True)
+        return
 
-def print_token_health_card():
-    global _TOKEN_STATS
-    if not _TOKEN_STATS["current_key"]:
+    MAX_NUMERE_AN = 1350 
+    
+    print("🧠 Pasul 2: Calculare diferențe și identificare fișiere lipsă...", flush=True)
+    coada_descarcare = []
+    
+    variante_sufixe = [
+        {"sufix": "", "tip": "simplu"},
+        {"sufix": "Bis", "tip": "bis"},
+        {"sufix": "Tris", "tip": "tris"},
+        {"sufix": "Quatro", "tip": "quatro"},
+        {"sufix": "S", "tip": "s"}
+    ]
+    
+    AN_CURENT_SISTEM = 2026
+    
+    for an in range(an_start, am_stop + 1):
+        numere_existente_an = []
+        for f in inventar_drive.keys():
+            if f.startswith(f"MO_PI_{an}_"):
+                try:
+                    num_str = f.split('_')[3].split('.')[0]
+                    for suf in ['Bis', 'Tris', 'Quatro', 'S']:
+                        num_str = num_str.replace(suf, '')
+                    numere_existente_an.append(int(num_str))
+                except (IndexError, ValueError):
+                    continue
+                    
+        max_numar_existent = max(numere_existente_an) if numere_existente_an else 0
+        
+        if an < AN_CURENT_SISTEM:
+            limata_scanare = MAX_NUMERE_AN
+        else:
+            limata_scanare = min(max_numar_existent + 50, MAX_NUMERE_AN)
+            if limata_scanare < 100:
+                limata_scanare = 100
+        
+        for n in range(1, limata_scanare + 1):
+            for var in variante_sufixe:
+                numar_complet = f"{n}{var['sufix']}" if var["sufix"] else str(n)
+                nume_pdf = f"MO_PI_{an}_{numar_complet}.pdf"
+                
+                trebuie_descarcat = False
+                status_actual = None
+                file_id_existent = None
+                
+                if nume_pdf not in inventar_drive:
+                    trebuie_descarcat = True
+                else:
+                    meta = inventar_drive[nume_pdf]
+                    file_id_existent = meta["id"]
+                    if var["tip"] == "bis" and meta["status"].startswith("dummy_") and meta["status"] != "dummy_final":
+                        trebuie_descarcat = True
+                        status_actual = meta["status"]
+                    else:
+                        if var["tip"] == "simplu" or meta["status"] == "ok":
+                            pass
+                
+                if trebuie_descarcat:
+                    coada_descarcare.append({
+                        "an": an, 
+                        "numar": numar_complet, 
+                        "nume_pdf": nume_pdf, 
+                        "tip": var["tip"],
+                        "file_id_existent": file_id_existent,
+                        "status_actual": status_actual
+                    })
+
+    total_lipsa = len(coada_descarcare)
+    if total_lipsa == 0:
+        print("\n🎉 Toate fișierele sunt la zi! Nimic de descărcat.", flush=True)
         return
         
-    death_time = datetime.datetime.now()
-    lifespan = death_time - _TOKEN_STATS["created_at"]
+    print(f"\n🚀 Pasul 3: Începem descărcarea a {total_lipsa} fișiere în coadă...", flush=True)
     
-    print("\n📊" + "═"*60)
-    print(f"📋 FIȘA MEDICALĂ A TOKEN-ULUI INTERN: {_TOKEN_STATS['current_key']}")
-    print(f"⏱️ Creat la: {_TOKEN_STATS['created_at'].strftime('%H:%M:%S')}")
-    print(f"⏳ Durată viață activă: {lifespan.seconds // 60}m {lifespan.seconds % 60}s")
-    print(f"📦 Pagini procesate/salvate cu succes: {_TOKEN_STATS['pages_processed']}")
-    print("═"*60 + "\n")
+    director_temp = Path("./temp_pdf_download")
+    director_temp.mkdir(exist_ok=True)
     
-    _TOKEN_STATS["pages_processed"] = 0
-
-
-def get_or_refresh_soap_session(force_refresh=False):
-    global _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY, _TOKEN_STATS
+    timeout_resilient = httpx.Timeout(timeout=360.0, connect=30.0, read=360.0)
     
-    # Folosim Lock pentru ca thread-urile să nu ceară token-uri noi simultan
-    with SESSION_LOCK:
-        if _GLOBAL_SOAP_CLIENT and _GLOBAL_TOKEN_KEY and not force_refresh:
-            return _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY
-
-        if force_refresh:
-            print_token_health_card()
-            print("🔄 [TOKEN] ⚠️ Sesizare expirare sau refresh forțat! Se cere token nou...")
+    erori_consecutive_an = {}
+    succese_in_an = {}
+    ani_finalizati = set() 
+    fisiere_esuate_protejate = []
+    
+    for idx, item in enumerate(coada_descarcare, 1):
+        an = item["an"]
+        numar_cerut = item["numar"]
+        nume_pdf = item["nume_pdf"]
+        
+        este_simplu = item["tip"] == "simplu"
+        este_bis = item["tip"] == "bis"
+        este_special = item["tip"] not in ["simplu", "bis"]
+        
+        if an in ani_finalizati:
+            continue
+            
+        print(f"⏳ [{idx}/{total_lipsa}] Se caută pe server: {nume_pdf}...", flush=True)
+        
+        url = url_template.format(numar=numar_cerut, an=an)
+        descarcat_ok = False
+        creeaza_fantomă = False
+        valoare_fantomă = " "
+        
+        limită_reincercări = 1 if (este_special or este_bis) else 4
+        incercari = 0
+        
+        cale_locala = director_temp / nume_pdf
+        cale_temp = director_temp / f"{nume_pdf}.part"
+        
+        while incercari < limită_reincercări:
+            try:
+                sleep_time = random.uniform(1.5, 3.0) if incercari == 0 else random.uniform(10.0, 20.0) * incercari
+                time.sleep(sleep_time)
+                
+                headers = {
+                    "User-Agent": random.choice(USER_AGENTS), 
+                    "Referer": "https://monitoruloficial.ro/e-monitor/"
+                }
+                
+                if cale_temp.exists():
+                    cale_temp.unlink()
+                
+                with httpx.Client(headers=headers, timeout=timeout_resilient, follow_redirects=True) as client:
+                    with client.stream("GET", url) as response:
+                        
+                        if response.status_code == 404:
+                            creeaza_fantomă = True
+                            valoare_fantomă = " "
+                            if este_simplu:
+                                erori_consecutive_an[an] = erori_consecutive_an.get(an, 0) + 1
+                                if erori_consecutive_an[an] >= 60 and succese_in_an.get(an, 0) > 10:
+                                    print(f"🏁 [Anulat inteligent] Anul {an} pare finalizat pe server (60 eșecuri consecutive). Sărim restul.", flush=True)
+                                    ani_finalizati.add(an)
+                            break
+                        
+                        response.raise_for_status()
+                        
+                        content_type = response.headers.get("Content-Type", "").lower()
+                        if "application/pdf" not in content_type:
+                            if este_special:
+                                creeaza_fantomă = True
+                                valoare_fantomă = " "
+                            elif este_bis:
+                                creeaza_fantomă = True
+                                contor_vechi = extrage_contor_bis(item["status_actual"])
+                                urmatorul_contor = contor_vechi + 1
+                                valoare_fantomă = str(urmatorul_contor) if urmatorul_contor < 6 else " "
+                                
+                                text_afisat = valoare_fantomă if valoare_fantomă != " " else "[Abandonat (spațiu)]"
+                                print(f"💡 Serverul a trimis HTML. Incrementăm contorul Bis la: {text_afisat}", flush=True)
+                            else:
+                                print(f"⚠️ Eroare: HTML primit la un fișier SIMPLU. Îl ocolim fără dummy.", flush=True)
+                            break
+                        
+                        total_bytes = 0
+                        with open(cale_temp, "wb") as f:
+                            for chunk in response.iter_bytes(chunk_size=131072):
+                                f.write(chunk)
+                                total_bytes += len(chunk)
+                                
+                        if total_bytes > 0:
+                            if este_simplu:
+                                erori_consecutive_an[an] = 0
+                                succese_in_an[an] = succese_in_an.get(an, 0) + 1
+                            
+                            cale_temp.replace(cale_locala)
+                            descarcat_ok = True
+                            break
+                        else:
+                            raise IOError("Fișierul descărcat are dimensiune zero.")
+                                
+            except (httpx.ConnectError, httpx.ReadError, httpx.HTTPStatusError, Exception) as e:
+                incercari += 1
+                descriere_eroare = str(e) if len(str(e)) < 120 else str(e)[:120] + "..."
+                print(f"⚠️ Problemă la descărcare {nume_pdf} (Încercarea {incercari}/{limită_reincercări}): {descriere_eroare}", flush=True)
+                
+                if este_special:
+                    print(f"💡 Eroare la fișier special -> Presupunem neexistent.", flush=True)
+                    creeaza_fantomă = True
+                    valoare_fantomă = " "
+                    break
+                elif este_bis:
+                    creeaza_fantomă = True
+                    contor_vechi = extrage_contor_bis(item["status_actual"])
+                    urmatorul_contor = contor_vechi + 1
+                    valoare_fantomă = str(urmatorul_contor) if urmatorul_contor < 6 else " "
+                    
+                    text_afisat = valoare_fantomă if valoare_fantomă != " " else "[Abandonat (spațiu)]"
+                    print(f"💡 Eroare conexiune pentru Bis. Incrementăm contorul la: {text_afisat}", flush=True)
+                    break
+                
+                time.sleep(random.uniform(15.0, 30.0))
+                
+        if descarcat_ok:
+            marime_mb = os.path.getsize(cale_locala) / 1024 / 1024
+            print(f"📥 Descărcat complet: {nume_pdf} (~{marime_mb:.2f} MB)", flush=True)
+            if incarca_sau_actualizeaza_in_drive(drive_service, cale_locala, GOOGLE_DRIVE_FOLDER_ID, item["file_id_existent"]):
+                print(f"✅ Sincronizat cu succes în Google Drive.", flush=True)
+            time.sleep(random.uniform(2.0, 4.0))
+            
+        elif creeaza_fantomă:
+            if an not in ani_finalizati:
+                if cale_temp.exists():
+                    cale_temp.unlink()
+                
+                with open(cale_locala, "w") as f:
+                    f.write(valoare_fantomă) 
+                
+                text_stare = f"contor '{valoare_fantomă}'" if valoare_fantomă != " " else "spațiu final (abandonat)"
+                print(f"ℹ️ Actualizăm dummy în Drive ({text_stare}) pentru: {nume_pdf}...", flush=True)
+                
+                if incarca_sau_actualizeaza_in_drive(drive_service, cale_locala, GOOGLE_DRIVE_FOLDER_ID, item["file_id_existent"]):
+                    print(f"📝 Placeholder salvat.", flush=True)
+                time.sleep(random.uniform(1.0, 2.0))
         else:
-            print("🔌 [TOKEN] Inițializare sesiune la pornire robot...")
+            if an not in ani_finalizati:
+                if cale_temp.exists():
+                    cale_temp.unlink()
+                print(f"⏭️ [Ocolit protejat] Fișierul SIMPLU {nume_pdf} a fost ocolit pentru siguranță.", flush=True)
+                fisiere_esuate_protejate.append({"nume": nume_pdf, "url": url})
 
-        history = HistoryPlugin()
-        transport = Transport(timeout=90, operation_timeout=120)
-        
-        for attempt in range(1, 6):
-            try:
-                client = Client(WSDL_URL, transport=transport, plugins=[history])
-                token = client.service.GetToken()
-                if token:
-                    _GLOBAL_SOAP_CLIENT = client
-                    _GLOBAL_SOAP_HISTORY = history
-                    _GLOBAL_TOKEN_KEY = token
-                    
-                    _TOKEN_STATS["current_key"] = token
-                    _TOKEN_STATS["created_at"] = datetime.datetime.now()
-                    
-                    print(f"🔑 [TOKEN] Token NOU alocat de Just.ro: {token}")
-                    return _GLOBAL_SOAP_CLIENT, _GLOBAL_SOAP_HISTORY, _GLOBAL_TOKEN_KEY
-            except Exception as e:
-                wait_time = 20 * attempt
-                print(f"🚨 [GetToken Err] Eroare generare token (Tentativa {attempt}/5). Reîncercăm în {wait_time}s... Eroare: {e}")
-                time.sleep(wait_time)
-                
-        raise ConnectionError("💥 Serverul Just.ro refuză complet generarea de tokenuri noi.")
-
-
-def download_single_page_worker(drive_service, composite_type_name, target_year, page, is_gap_repair):
-    """
-    Funcție executată în paralel de thread-uri. 
-    Descarcă o pagină specifică și o încarcă în Drive dacă conține date.
-    """
-    prefix_log = "[REPARARE]" if is_gap_repair else "[AVANS]"
-    max_retries = 5
-    
-    for attempt in range(0, max_retries + 1):
+    if fisiere_esuate_protejate:
+        print("\n⚠️ Rularea s-a încheiat. Următoarele fișiere SIMPLU au eșuat temporar și vor fi reîncercate la rularea următoare:", flush=True)
+        for f in fisiere_esuate_protejate:
+            print(f"  - {f['nume']}", flush=True)
+            
+        cale_fisier_manual = Path("liste_descarcare_manuala.txt")
         try:
-            client, history, token_key = get_or_refresh_soap_session(force_refresh=False)
-
-            # Mică deviație de timp între thread-uri ca să nu lovească serverul la aceeași milisecundă
-            time.sleep(random.uniform(0.1, 0.8))
-
-            composite_type = client.get_type(composite_type_name)
-            search_model = composite_type(
-                NumarPagina=page,
-                RezultatePagina=50,
-                SearchAn=str(target_year),
-            )
-
-            client.service.Search(SearchModel=search_model, tokenKey=token_key)
-            
-            # Preluare date primite
-            last_response_envelope = history.last_received["envelope"]
-            raw_xml_bytes = etree.tostring(last_response_envelope, pretty_print=True, encoding="utf-8")
-            raw_xml_string = raw_xml_bytes.decode("utf-8")
-            
-            # Verificăm dacă pagina este goală
-            if "<a:Legi>" not in raw_xml_string and "<Legi>" not in raw_xml_string:
-                return {"page": page, "status": "empty", "bytes": None}
-                
-            # Salvare în Drive
-            filename = f"brut_legislatie_{target_year}_pag{page}.xml"
-            success = upload_to_drive(service=drive_service, filename=filename, content_bytes=raw_xml_bytes)
-            
-            if success:
-                with SESSION_LOCK:
-                    _TOKEN_STATS["pages_processed"] += 1
-                return {"page": page, "status": "success", "bytes": raw_xml_bytes}
-            else:
-                return {"page": page, "status": "upload_failed", "bytes": None}
-
-        except Exception as soap_error:
-            error_str = str(soap_error).lower()
-            print(f"⚠️ [Thread Err] Pagina {page} (An {target_year}): {soap_error}")
-            
-            if "token" in error_str or "session" in error_str or "expired" in error_str:
-                get_or_refresh_soap_session(force_refresh=True)
-            
-            # Backoff exponențial la eroare
-            if attempt < max_retries:
-                time.sleep(min(60.0, 5.0 * (2 ** attempt)) + random.uniform(1.0, 3.0))
-                
-    return {"page": page, "status": "failed", "bytes": None}
-
-
-def download_year(drive_service, composite_type_name, target_year, downloaded_pages):
-    print(f"\n{'='*70}\n📅 AN INDUSTRIAL: {target_year} | MULTITHREADING ACTIV (Workers: {MAX_WORKERS})\n{'='*70}")
-    
-    gaps = []
-    if downloaded_pages:
-        max_page = max(downloaded_pages)
-        print(f"📦 {len(downloaded_pages)} pagini deja în Drive pentru {target_year}. (Ultima pagină: {max_page})")
-        all_expected_pages = set(range(1, max_page + 1))
-        gaps = sorted(list(all_expected_pages - downloaded_pages))
-        next_new_page = max_page + 1
+            with open(cale_fisier_manual, "w", encoding="utf-8") as f_manual:
+                f_manual.write("# FIȘIERE DE DESCĂRCAT MANUAL ÎN BROWSER\n")
+                f_manual.write("# Copiază linkul în browser, descarcă PDF-ul și denumește-l exact ca în stânga\n\n")
+                for f in fisiere_esuate_protejate:
+                    f_manual.write(f"{f['nume']} -> {f['url']}\n")
+            print(f"\n📝 Am generat fișierul '{cale_fisier_manual}' cu toate link-urile directe pentru descărcare manuală rapidă!", flush=True)
+        except Exception as e:
+            print(f"⚠️ Nu am putut genera fișierul de descărcare manuală: {e}", flush=True)
     else:
-        print(f"🆕 An gol detectat. Pornim de la pagina 1.")
-        next_new_page = 1
-
-    files_saved = 0
-
-    # Pornim executorul de thread-uri
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        
-        # ----------------- FAZA 1: REPARARE GAPS (PARALELIZATĂ COMPLET) -----------------
-        if gaps:
-            print(f"🛠️ Reparăm {len(gaps)} lacune în paralel...")
-            futures = {
-                executor.submit(download_single_page_worker, drive_service, composite_type_name, target_year, gap, True): gap 
-                for gap in gaps
-            }
-            for future in as_completed(futures):
-                res = future.result()
-                if res["status"] == "success":
-                    files_saved += 1
-            print("✅ Faza de reparare a lacunelor s-a finalizat.")
-
-        # ----------------- FAZA 2: AVANS (PARALELIZARE ÎN PACHETE) -----------------
-        consecutive_empty_pages = 0
-        
-        while True:
-            # Planificăm un pachet de pagini de dimensiunea MAX_WORKERS (ex: [101, 102, 103])
-            pachet_pagini = []
-            for i in range(MAX_WORKERS):
-                pag = next_new_page
-                # Verificăm instant din DB dacă cumva o avem deja (foarte rar în faza de avans, dar util ca siguranță)
-                while pag in downloaded_pages:
-                    print(f"☁️ [Există în Drive] brut_legislatie_{target_year}_pag{pag}.xml", flush=True)
-                    pag += 1
-                pachet_pagini.append(pag)
-                next_new_page = pag + 1
-
-            # Trimitem pachetul în execuție paralelă
-            print(f"🚀 Se descarcă pachetul de pagini: {pachet_pagini}...", flush=True)
-            futures = {
-                executor.submit(download_single_page_worker, drive_service, composite_type_name, target_year, pag, False): pag
-                for pag in pachet_pagini
-            }
-            
-            # Colectăm rezultatele ordonate după numărul paginii
-            rezultate_pachet = {}
-            for future in as_completed(futures):
-                res = future.result()
-                rezultate_pachet[res["page"]] = res
-
-            # Procesăm rezultatele în ordine crescătoare a paginilor pentru a detecta corect finalul anului
-            an_terminat = False
-            for pag in sorted(pachet_pagini):
-                res = rezultate_pachet[pag]
-                
-                if res["status"] == "success":
-                    files_saved += 1
-                    consecutive_empty_pages = 0
-                elif res["status"] == "empty":
-                    consecutive_empty_pages += 1
-                    print(f"ℹ️ Pagina {pag} este goală. (Contor goluri: {consecutive_empty_pages}/2)")
-                    if consecutive_empty_pages >= 2:
-                        print(f"🏁 [Sfârșit de An] Am detectat limitele anului {target_year} la pagina {pag}.")
-                        an_terminat = True
-                        break
-                else:
-                    # Dacă a eșuat din alte motive, nu resetăm neapărat contorul, dar logăm
-                    print(f"⚠️ Pagina {pag} a finalizat cu status: {res['status']}")
-
-            # Pauză de protecție la finalul fiecărui pachet descărcat
-            time.sleep(random.uniform(2.5, 4.0))
-
-            if an_terminat:
-                break
-
-    return files_saved
-
-
-def download_laws_local():
-    try:
-        print(f"🚀 Pornire motor industrial optimizat de producție (MULTITHREADED)...")
-        drive_service = get_drive_service()
-        global_drive_db = pre_scan_entire_drive(drive_service)
-        
-        get_or_refresh_soap_session(force_refresh=False)
-        
-        composite_type_name = "{http://schemas.datacontract.org/2004/07/FreeWebService}CompositeType"
-        total_files_all_years = 0
-        
-        for year in range(START_YEAR, END_YEAR + 1):
-            try:
-                downloaded_pages = global_drive_db.get(year, set())
-                files_saved = download_year(drive_service, composite_type_name, year, downloaded_pages)
-                total_files_all_years += files_saved
-            except Exception as year_error:
-                print(f"💥 Problemă izolată pe anul {year}: {year_error}.")
-                time.sleep(30)
-
-        print_token_health_card()
-        print(f"\n🎉🎉 MOTOARE OPRITE SUCCESIV. Total fișiere noi adăugate: {total_files_all_years}")
-
-    except Exception as e:
-        print(f"💥 Eroare critică de magistrală: {str(e)}")
-
+        print("\n🎉 Rularea completă s-a terminat cu succes!", flush=True)
 
 if __name__ == "__main__":
-    download_laws_local()
+    # Prioritate au argumentele primite prin consolă (dacă există),
+    # iar dacă nu există, se folosesc valorile setate la începutul scriptului.
+    an_s = int(sys.argv[1]) if len(sys.argv) >= 3 else AN_START_DEFAULT
+    an_f = int(sys.argv[2]) if len(sys.argv) >= 3 else AN_STOP_DEFAULT
+    
+    descarca_monitoare_precalculat(an_start=an_s, am_stop=an_f)
