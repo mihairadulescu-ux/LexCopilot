@@ -22,10 +22,10 @@ GOOGLE_DRIVE_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
 START_YEAR = 2020
-END_YEAR = 2023
+END_YEAR = 2026
 
 # Numărul de thread-uri paralele (3-4 este optim pentru a nu fi blocați de Just.ro)
-MAX_WORKERS = 3 
+MAX_WORKERS = 5 
 
 # Lock pentru thread-safety la nivel de rețea/Drive
 SESSION_LOCK = threading.Lock()
