@@ -3,16 +3,29 @@ import io
 import json
 import time
 import threading
+import subprocess
+import sys
+
+# --- AUTO-INSTALARE SUDS DACĂ LIPSEȘTE (SIGURANȚĂ DUBLĂ) ---
+try:
+    from suds.client import Client
+except ImportError:
+    print("[📦 System] Biblioteca 'suds-py3' nu a fost găsită. O instalăm acum...", flush=True)
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "suds-py3"])
+        from suds.client import Client
+        print("[📦 System] 'suds-py3' a fost instalată cu succes!", flush=True)
+    except Exception as e:
+        print(f"❌ Nu s-a putut instala automat 'suds-py3': {e}", flush=True)
+        sys.exit(1)
+# ------------------------------------------------------------
+
 from concurrent.futures import ThreadPoolExecutor
 
 # Bibliotecile Google Client API
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
-
-# Biblioteca SOAP salvatoare
-from suds.client import Client
-from suds.sax.element import Element
 
 # ==================== CONFIGURĂRI PARAMETRI ====================
 URL_API = 'http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl'
@@ -75,50 +88,61 @@ def incarca_in_google_drive(continut_xml, nume_fisier):
         safe_print(f"❌ Eroare Google Drive la încărcarea {nume_fisier}: {e}")
         return None
 
-class LegislatieJustClient:
-    def __init__(self):
-        safe_print("[🔑 Just] Inițializăm clientul SOAP și solicităm token nou...")
-        self.url = URL_API
-        # Dezactivăm cache-ul suds pentru a evita conflictele la rulările repetate
-        self.client = Client(self.url, cache=None)
-        # Obținerea token-ului în mod nativ
-        self.token = self.client.service.GetToken()
-        safe_print(f"[🔑 Just] Token primit cu succes: {self.token[:15]}...")
-
-    def obtine_pagina_xml_brut(self, an, pagina, rezultate_per_pagina=50):
-        """
-        Aici facem un mic truc de magie:
-        Pentru că vrem să salvăm XML-ul brut (exact așa cum vine de la server) în Drive,
-        interceptăm ultimul răspuns XML binar trimis de server, în loc să folosim obiectul Python parsat.
-        """
-        search_model = self.client.factory.create('SearchModel')
-        search_model.NumarPagina = pagina
-        search_model.RezultatePagina = rezultate_per_pagina
-        search_model.SearchAn = an
-        
-        # Apelăm serviciul (asta va popula client.last_received())
-        self.client.service.Search(search_model, self.token)
-        
-        # Extragem XML-ul brut primit la ultimul request
-        xml_brut = self.client.last_received()
-        if xml_brut:
-            # Îl decodăm în string UTF-8 curat
-            return str(xml_brut)
+def obtine_token_sesiune():
+    """Obține un singur token valid pe care îl vom partaja între toate thread-urile."""
+    try:
+        safe_print("[🔑 Just] Inițializăm un client SOAP temporar pentru a cere token-ul general...")
+        client_temp = Client(URL_API, cache=None)
+        token = client_temp.service.GetToken()
+        safe_print(f"[🔑 Just] Token generat cu succes pentru sesiune: {token[:15]}...")
+        return token
+    except Exception as e:
+        safe_print(f"❌ Nu s-a putut obține token-ul legislativ: {e}")
         return None
 
-def crawleaza_an_complet(client, an):
-    """Descarcă pagină cu pagină pentru anul dat folosind suds și le trimite în Shared Drive."""
+def descarca_si_incarca_pagina(client_soap, token, an, pagina):
+    """
+    Descarcă pagina prin SOAP folosind clientul dedicat al thread-ului actual,
+    apoi urcă rezultatul direct în Google Drive.
+    """
+    search_model = client_soap.factory.create('SearchModel')
+    search_model.NumarPagina = pagina
+    search_model.RezultatePagina = 50
+    search_model.SearchAn = an
+    
+    # Executăm căutarea prin SOAP
+    client_soap.service.Search(search_model, token)
+    
+    # Interceptăm XML-ul brut sosit special pe această instanță de client (complet Thread-Safe!)
+    xml_brut = client_soap.last_received()
+    if not xml_brut:
+        return None
+    
+    return str(xml_brut)
+
+def crawleaza_an_complet(token, an):
+    """
+    Fiecare thread își creează propriul său client SOAP ne-partajat (Thread-Safe)
+    pentru a evita ca răspunsurile XML să se amestece între ani.
+    """
+    safe_print(f"🔄 [An {an}] Pornire descărcare. Se inițializează clientul SOAP dedicat...")
+    try:
+        client_soap_dedicat = Client(URL_API, cache=None)
+    except Exception as e:
+        safe_print(f"❌ [An {an}] Nu s-a putut crea clientul SOAP dedicat: {e}")
+        return
+
     pagina = 0
     while True:
         safe_print(f"📥 [An {an}][Pagina {pagina}] Se descarcă de pe Just...")
         
         try:
-            xml_brut = client.obtine_pagina_xml_brut(an, pagina)
+            xml_brut = descarca_si_incarca_pagina(client_soap_dedicat, token, an, pagina)
         except Exception as e:
-            safe_print(f"⚠️ [An {an}][Pagina {pagina}] Eroare la descărcare de pe Just: {e}. Reîncercăm peste 3 secunde...")
-            time.sleep(3)
+            safe_print(f"⚠️ [An {an}][Pagina {pagina}] Eroare temporară: {e}. Reîncercăm peste 4 secunde...")
+            time.sleep(4)
             try:
-                xml_brut = client.obtine_pagina_xml_brut(an, pagina)
+                xml_brut = descarca_si_incarca_pagina(client_soap_dedicat, token, an, pagina)
             except Exception:
                 safe_print(f"❌ [An {an}][Pagina {pagina}] Eșec definitiv la descărcare.")
                 break
@@ -126,7 +150,7 @@ def crawleaza_an_complet(client, an):
         if not xml_brut:
             break
             
-        # Verificăm în XML-ul brut dacă am ajuns la capătul listei de legi
+        # Verificăm dacă am terminat paginile cu legi
         if "<Legi />" in xml_brut or "<Legi" not in xml_brut or "<Id>" not in xml_brut:
             safe_print(f"🛑 [An {an}] S-au terminat paginile la indexul {pagina}.")
             break
@@ -140,10 +164,10 @@ def crawleaza_an_complet(client, an):
             safe_print(f"❌ [An {an}][Pagina {pagina}] Eșec la salvarea în Shared Drive.")
             
         pagina += 1
-        time.sleep(0.2)  # Delay fin de curtoazie pentru API
+        time.sleep(0.2)  # Pauză fină pentru a menține conexiunea curată
 
 def porneste_crawler():
-    # 1. Verificăm mai întâi Google Drive
+    # 1. Test conexiune Google Drive
     try:
         safe_print("[☁️] Se inițializează conexiunea cu Google Drive...")
         obtine_serviciu_drive()
@@ -152,22 +176,19 @@ def porneste_crawler():
         safe_print(f"❌ Conexiunea la Google Drive a eșuat: {e}")
         return
 
-    # 2. Inițializăm clientul SOAP Just (fiecare thread va folosi acest client în siguranță)
-    try:
-        client_just = LegislatieJustClient()
-    except Exception as e:
-        safe_print(f"❌ Nu s-a putut inițializa clientul LegislatieJust: {e}")
+    # 2. Obținem un token de sesiune
+    token = obtine_token_sesiune()
+    if not token:
         return
         
     ani_de_procesat = list(range(AN_START, AN_STOP + 1))
-    max_paralel = 4  # Număr ideal de conexiuni SOAP simultane
+    max_paralel = 4  # Conexiuni paralele optime pentru a nu bloca IP-ul
     
     safe_print(f"📅 Interval ani selectat: {AN_START} - {AN_STOP}")
     safe_print(f"🚀 Pornim cele {max_paralel} descărcări paralele direct către Shared Drive...")
     
     with ThreadPoolExecutor(max_workers=max_paralel) as executor:
-        # Trimitem clientul suds gata autentificat către fiecare thread
-        executor.map(lambda an: crawleaza_an_complet(client_just, an), ani_de_procesat)
+        executor.map(lambda an: crawleaza_an_complet(token, an), ani_de_procesat)
 
 if __name__ == "__main__":
     porneste_crawler()
