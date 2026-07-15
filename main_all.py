@@ -4,6 +4,7 @@ import time
 import random
 import sys
 import json
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 
@@ -13,6 +14,12 @@ from zeep.exceptions import Fault
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+
+# ======================================================================
+# 🐛 ACTIVARE LOGGING BRUT SOAP (Pentru a vedea XML-ul exact în consolă)
+# ======================================================================
+logging.basicConfig(level=logging.INFO)
+logging.getLogger('zeep.transports').setLevel(logging.DEBUG)  # Afișează XML-ul trimis/primit
 
 # ======================================================================
 # ⚙️ CONFIGURARE
@@ -26,7 +33,7 @@ MAX_THREADS = 4
 GDRIVE_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
 
 # ======================================================================
-# 🔑 CLIENT GOOGLE DRIVE (Autentificare strict prin GitHub Secrets)
+# 🔑 CLIENT GOOGLE DRIVE (Autentificare)
 # ======================================================================
 def obtine_serviciu_gdrive():
     """Inițializează clientul Google Drive folosind secretul din mediul GitHub Actions."""
@@ -80,26 +87,26 @@ class TokenManager:
 # ======================================================================
 def incarca_in_gdrive(service, nume_fisier, continut_text):
     """Încarcă un fișier text direct în folderul shared corporate Google Drive."""
-    file_metadata = {
-        'name': nume_fisier,
-        'parents': [GDRIVE_FOLDER_ID]
-    }
-    
-    # Pregătim textul în memorie ca stream de octeți
-    fh = io.BytesIO(continut_text.encode('utf-8'))
-    media = MediaIoBaseUpload(fh, mimetype='text/plain', resumable=True)
-    
-    # Parametri specifici pentru Shared Drive corporate
-    service.files().create(
-        body=file_metadata,
-        media_body=media,
-        fields='id',
-        supportsAllDrives=True,              # Permite crearea în Shared Drive corporate
-        keepRevisionForever=False
-    ).execute()
+    try:
+        file_metadata = {
+            'name': nume_fisier,
+            'parents': [GDRIVE_FOLDER_ID]
+        }
+        fh = io.BytesIO(continut_text.encode('utf-8'))
+        media = MediaIoBaseUpload(fh, mimetype='text/plain', resumable=True)
+        
+        service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id',
+            supportsAllDrives=True,
+            keepRevisionForever=False
+        ).execute()
+    except Exception as e:
+        print(f"❌ [GDrive Error] Nu s-a putut salva fișierul {nume_fisier}: {e}")
 
 # ======================================================================
-# 🚀 PROCESATOR AN (Rulat în paralel)
+# 🚀 PROCESATOR AN
 # ======================================================================
 def proceseaza_an(an, token_manager, client, gdrive_service):
     """Descarcă legislația unui an și o trimite direct în Google Drive."""
@@ -108,37 +115,61 @@ def proceseaza_an(an, token_manager, client, gdrive_service):
     token = token_manager.get_valid_token()
     
     while True:
-        # Respectăm structura XML din specificația oficială.
-        # Lăsăm Zeep să se ocupe de serializarea corectă a valorilor None (i:nil="true")
+        # Trimitem structura respectând numele din WSDL
         search_model = {
             'NumarPagina': pagina,
             'RezultatePagina': rezultate_pe_pagina,
             'SearchAn': an,
+            'SearchDomeniu': None,
+            'SearchEmitent': None,
+            'SearchModificata': None,
             'SearchNumar': None,
+            'SearchRepublicata': None,
             'SearchText': None,
+            'SearchTip': None,
             'SearchTitlu': None
         }
         
+        print(f"\n🔍 [An {an}][Pagina {pagina}] Trimitem cerere cu parametrii: {search_model}")
+        
         try:
-            # Apelăm metoda Search folosind denumirile exacte de parametri din specificație
+            # Apel SOAP direct
             response = client.service.Search(SearchModel=search_model, tokenKey=token)
             
+            # --- BLOC DE INSPECTARE INTERMEDIARĂ ---
+            print(f"📊 [An {an}][Pagina {pagina}] Răspuns primit primit! Tip obiect răspuns: {type(response)}")
+            if response is not None:
+                # Afișăm atributele disponibile ale obiectului returnat ca să înțelegem ce structură are
+                atribute = [attr for attr in dir(response) if not attr.startswith('_')]
+                print(f"🔧 [An {an}][Pagina {pagina}] Atribute răspuns: {atribute}")
+                
+                # Verificăm direct ce conține proprietatea principală 'Legi'
+                if hasattr(response, 'Legi'):
+                    valoare_legi = getattr(response, 'Legi')
+                    print(f"📦 [An {an}][Pagina {pagina}] Tipul câmpului response.Legi: {type(valoare_legi)}")
+                    if valoare_legi is not None:
+                        atribute_legi = [attr for attr in dir(valoare_legi) if not attr.startswith('_')]
+                        print(f"📦 [An {an}][Pagina {pagina}] Atribute în response.Legi: {atribute_legi}")
+            else:
+                print(f"⚠️ [An {an}][Pagina {pagina}] Răspunsul primit este complet NULL (None)!")
+            # ----------------------------------------
+
             lista_legi = None
             if response:
-                # Parsare dinamică și ultra-robustă a structurii de răspuns
+                # Încercăm să extragem datele pe baza structurii dinamice a Zeep
                 if hasattr(response, 'Legi') and response.Legi is not None:
                     if isinstance(response.Legi, list):
                         lista_legi = response.Legi
                     elif hasattr(response.Legi, 'Legi') and isinstance(response.Legi.Legi, list):
                         lista_legi = response.Legi.Legi
                     else:
-                        lista_legi = [response.Legi]  # În caz că întoarce un singur obiect în loc de listă
+                        # Dacă e un singur element care nu e listă
+                        lista_legi = [response.Legi]
 
-                # Dacă am găsit legi în această pagină
-                if lista_legi:
+                # Evaluăm rezultatul extragerii
+                if lista_legi and len(lista_legi) > 0 and getattr(lista_legi[0], 'Titlu', None) is not None:
                     buffer_text = []
                     for lege in lista_legi:
-                        # Extragem metadatele istorice complete (cu fallback-uri sigure în caz de valori lipsă)
                         id_val = getattr(lege, 'IdValoare', 'N/A')
                         tip_val = getattr(lege, 'TipAct', 'N/A')
                         numar_val = getattr(lege, 'Numar', 'N/A')
@@ -147,34 +178,26 @@ def proceseaza_an(an, token_manager, client, gdrive_service):
                         pub_val = getattr(lege, 'Publicatie', 'N/A')
                         titlu_val = getattr(lege, 'Titlu', 'Fără Titlu')
                         
-                        # Salvăm un format curat, perfect lizibil
                         buffer_text.append(
-                            f"ID: {id_val} | "
-                            f"Tip: {tip_val} | "
-                            f"Nr: {numar_val} | "
-                            f"Emitent: {emitent_val} | "
-                            f"Data: {data_val} | "
-                            f"Publicație: {pub_val} | "
-                            f"Titlu: {titlu_val}"
+                            f"ID: {id_val} | Tip: {tip_val} | Nr: {numar_val} | "
+                            f"Emitent: {emitent_val} | Data: {data_val} | "
+                            f"Publicație: {pub_val} | Titlu: {titlu_val}"
                         )
                     
                     continut_final = "\n".join(buffer_text)
                     nume_fisier_gdrive = f"legi_{an}_pag_{pagina}.txt"
                     
-                    # Încărcăm fișierul direct în Shared Drive-ul companiei
+                    # Salvare directă
                     incarca_in_gdrive(gdrive_service, nume_fisier_gdrive, continut_final)
                     
-                    print(f"☁️ [An {an}] Pagina {pagina} salvată direct în GDrive ({len(lista_legi)} acte).")
+                    print(f"☁️ [An {an}] Pagina {pagina} salvată cu succes în Google Drive! ({len(lista_legi)} acte găsite)")
                     pagina += 1
-                    
-                    # Un mic delay protectiv împotriva blocărilor temporare de IP
-                    time.sleep(random.uniform(0.6, 1.2))
-                    
+                    time.sleep(random.uniform(0.8, 1.5))
                 else:
-                    print(f"✅ [An {an}] Finalizat complet la pagina {pagina} (fără alte rezultate).")
+                    print(f"✅ [An {an}] Finalizat complet la pagina {pagina}. `lista_legi` este goală sau invalidă.")
                     break
             else:
-                print(f"ℹ️ [An {an}] Nu s-au întors date la pagina {pagina} (Răspuns gol).")
+                print(f"ℹ️ [An {an}] Răspunsul de la server a fost gol la pagina {pagina}.")
                 break
                 
         except Fault as soap_fault:
@@ -182,24 +205,24 @@ def proceseaza_an(an, token_manager, client, gdrive_service):
             if "token" in fault_string or "expired" in fault_string or "invalid" in fault_string:
                 token = token_manager.get_valid_token(forta_reproaspatare=True)
             else:
-                print(f"❌ [An {an}] Eroare SOAP (Pagina {pagina}): {soap_fault}")
+                print(f"❌ [An {an}] Eroare SOAP la Pagina {pagina}: {soap_fault}")
                 time.sleep(5)
                 
         except Exception as e:
-            print(f"⚠️ [An {an}] Reîncercare din cauza unei erori la pagina {pagina}: {e}")
+            print(f"⚠️ [An {an}] Excepție neașteptată la pagina {pagina}: {e}")
             time.sleep(5)
 
 # ======================================================================
 # 🏁 FLUX PRINCIPAL
 # ======================================================================
 def main():
-    print("🚀 Pornire Crawler Just.ro + integrare Google Drive API (Shared Drive Corporate)...")
+    print("🚀 Pornire Crawler Just.ro + Debugging SOAP activat...")
     
     # 1. Inițializăm serviciul Google Drive
     gdrive_service = obtine_serviciu_gdrive()
     print("🔓 Conexiune securizată la Google Drive realizată.")
 
-    # 2. Inițializăm clientul SOAP Zeep
+    # 2. Inițializăm clientul SOAP Zeep cu logging
     settings = Settings(strict=False, xml_huge_tree=True)
     client = Client(WSDL_URL, settings=settings)
     
@@ -218,7 +241,7 @@ def main():
         for future in futures:
             future.result()
 
-    print("\n🏁 Succes! Toate datele au fost colectate și urcate în Shared Drive-ul companiei.")
+    print("\n🏁 Rulare încheiată. Verifică logurile de mai sus pentru diagnosticare completă!")
 
 if __name__ == '__main__':
     main()
