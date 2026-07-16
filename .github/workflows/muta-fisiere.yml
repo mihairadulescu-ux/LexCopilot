@@ -1,7 +1,7 @@
 name: "One-Off: Mutare PDF-uri in Shared Drive Nou"
 
 on:
-  workflow_dispatch: # Ne permite să-l pornim manual printr-un buton
+  workflow_dispatch: # Permite pornirea manuală din interfața Actions
 
 jobs:
   move_files:
