@@ -45,7 +45,7 @@ def obtine_drive():
     creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
-def verifica_existenta_pe_server(nr, session, ssl_context, timeout_resilient):
+def verifica_existenta_pe_server(nr, ssl_context, timeout_resilient):
     """Verifică rapid dacă un număr returnează PDF valid (True) sau 404/altceva (False)."""
     url = URL_TEMPLATE.format(numar=nr, an=AN_CURENT)
     headers = {
@@ -53,17 +53,17 @@ def verifica_existenta_pe_server(nr, session, ssl_context, timeout_resilient):
         "Referer": "https://monitoruloficial.ro/e-monitor/"
     }
     try:
-        # Folosim o cerere de tip HEAD sau un GET rapid cu stream limitat pentru viteză
-        with session.stream("GET", url, headers=headers, timeout=timeout_resilient, verify=ssl_context, follow_redirects=True) as response:
-            if response.status_code == 200:
-                content_type = response.headers.get("Content-Type", "").lower()
-                if "application/pdf" in content_type:
-                    return True
+        with httpx.Client(headers=headers, timeout=timeout_resilient, verify=ssl_context, follow_redirects=True) as client:
+            with client.stream("GET", url) as response:
+                if response.status_code == 200:
+                    content_type = response.headers.get("Content-Type", "").lower()
+                    if "application/pdf" in content_type:
+                        return True
     except Exception:
         pass
     return False
 
-def incearca_descarcare_numar(nr, service, session, ssl_context, timeout_resilient, randuri_registru):
+def incearca_descarcare_numar(nr, service, ssl_context, timeout_resilient, randuri_registru):
     """Descarcă efectiv numărul și îl urcă în Google Drive."""
     nume_pdf = f"MO_PI_{AN_CURENT}_{nr}.pdf"
     url = URL_TEMPLATE.format(numar=nr, an=AN_CURENT)
@@ -76,14 +76,15 @@ def incearca_descarcare_numar(nr, service, session, ssl_context, timeout_resilie
     }
     
     try:
-        with session.stream("GET", url, headers=headers, timeout=timeout_resilient, verify=ssl_context, follow_redirects=True) as response:
-            if response.status_code == 200:
-                content_type = response.headers.get("Content-Type", "").lower()
-                if "application/pdf" in content_type:
-                    with open(cale_pdf_temp, "wb") as f_pdf:
-                        for chunk in response.iter_bytes(chunk_size=131072):
-                            f_pdf.write(chunk)
-                    descarcat_ok = True
+        with httpx.Client(headers=headers, timeout=timeout_resilient, verify=ssl_context, follow_redirects=True) as client:
+            with client.stream("GET", url) as response:
+                if response.status_code == 200:
+                    content_type = response.headers.get("Content-Type", "").lower()
+                    if "application/pdf" in content_type:
+                        with open(cale_pdf_temp, "wb") as f_pdf:
+                            for chunk in response.iter_bytes(chunk_size=131072):
+                                f_pdf.write(chunk)
+                        descarcat_ok = True
                 
         if descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) > 2000:
             marime_bytes = os.path.getsize(cale_pdf_temp)
@@ -96,7 +97,6 @@ def incearca_descarcare_numar(nr, service, session, ssl_context, timeout_resilie
             ).execute()
             os.remove(cale_pdf_temp)
             
-            # Adăugăm sau actualizăm starea în listă
             existente_in_lista = [r for r in randuri_registru if r["numar_baza"] == str(nr)]
             if existente_in_lista:
                 existente_in_lista[0].update({
@@ -161,8 +161,6 @@ def descarca_si_salveaza_simple():
     ssl_context = creeaza_context_ssl_compatibil()
     download_counter = 0
     
-    session = httpx.Client()
-    
     # ======================================================================
     # 🔍 RUTINA DE STABILIRE A CAPĂTULUI (PEAK DISCOVERY)
     # ======================================================================
@@ -171,30 +169,25 @@ def descarca_si_salveaza_simple():
     
     print(f"🕵️ Pornește rutina de stabilire a capătului pentru anul {AN_CURENT}...")
     
-    # 1. Testăm reperul principal de la 1500
-    exista_la_start = verifica_existenta_pe_server(punct_start, session, ssl_context, timeout_resilient)
+    exista_la_start = verifica_existenta_pe_server(punct_start, ssl_context, timeout_resilient)
     
     if exista_la_start:
-        # Caz A: Există fișiere chiar și la 1500! Începem să urcăm din 10 în 10.
-        print(f"⚠️ {YELLOW}Caz extrem: S-a detectat PDF activ la {punct_start}! Căutăm limita în sus...{RESET}")
+        print(f"⚠️ {YELLOW}Caz extrem: S-a detectat PDF active la {punct_start}! Căutăm limita în sus...{RESET}")
         urmatorul = punct_start
         while True:
             urmatorul += 10
             time.sleep(random.uniform(0.5, 1.0))
             print(f"   -> Verificăm la salt superior: {urmatorul}...")
-            if not verifica_existenta_pe_server(urmatorul, session, ssl_context, timeout_resilient):
-                # Am găsit primul 404! Coborâm acum secvențial înapoi din acel punct ca să prindem vârful exact.
+            if not verifica_existenta_pe_server(urmatorul, ssl_context, timeout_resilient):
                 for peak_candidate in range(urmatorul, urmatorul - 10, -1):
                     time.sleep(random.uniform(0.5, 1.0))
-                    if verifica_existenta_pe_server(peak_candidate, session, ssl_context, timeout_resilient):
+                    if verifica_existenta_pe_server(peak_candidate, ssl_context, timeout_resilient):
                         vârf_detectat = peak_candidate
                         break
                 break
     else:
-        # Caz B: Nu există la 1500 (Cazul normal). Coborâm din 10 în 10.
         print(f"🔍 Căutăm limita în jos de la {punct_start}...")
         for nr in range(punct_start - 10, 0, -10):
-            # Dacă dăm de un număr pe care îl avem deja salvat în registru, ăla e capătul cunoscut
             if nr in fisiere_descarcate:
                 vârf_detectat = nr
                 print(f"🎯 Am intersectat registrul existent la numărul {nr}.")
@@ -202,16 +195,14 @@ def descarca_si_salveaza_simple():
                 
             time.sleep(random.uniform(0.5, 1.0))
             print(f"   -> Verificăm la salt inferior: {nr}...")
-            if verifica_existenta_pe_server(nr, session, ssl_context, timeout_resilient):
-                # Am găsit prima zonă populată! Urcăm acum secvențial din acel punct ca să găsim vârful exact.
+            if verifica_existenta_pe_server(nr, ssl_context, timeout_resilient):
                 for peak_candidate in range(nr, nr + 10):
                     time.sleep(random.uniform(0.5, 1.0))
-                    if not verifica_existenta_pe_server(peak_candidate, session, ssl_context, timeout_resilient):
+                    if not verifica_existenta_pe_server(peak_candidate, ssl_context, timeout_resilient):
                         vârf_detectat = peak_candidate - 1
                         break
                 break
 
-    # Siguranță: dacă dintr-un motiv de rețea nu detectează nimic, punem o limită minimă
     if vârf_detectat is None:
         vârf_detectat = 600
         print(f"⚠️ Nu s-a putut detecta vârful. Folosim valoarea de rezervă: {vârf_detectat}")
@@ -230,14 +221,13 @@ def descarca_si_salveaza_simple():
         time.sleep(random.uniform(1.0, 2.0))
         print(f"⏳ Descarcă {nr}...")
         
-        exista = incearca_descarcare_numar(nr, service, session, ssl_context, timeout_resilient, randuri_registru)
+        exista = incearca_descarcare_numar(nr, service, ssl_context, timeout_resilient, randuri_registru)
         if exista:
             download_counter += 1
             if download_counter % 40 == 0:
                 print(f"\n{YELLOW}☕ [Pauză inteligentă] Am descărcat {download_counter} fișiere. Pauză de 5 minute (300s)...{RESET}\n")
                 time.sleep(300)
         else:
-            # Dacă nu există, marcăm în registru
             randuri_registru.append({
                 "numar_baza": str(nr),
                 "sufix": "",
@@ -245,8 +235,6 @@ def descarca_si_salveaza_simple():
                 "dimensiune_kb": "0",
                 "drive_file_id": ""
             })
-
-    session.close()
 
     # Sortare și salvare registru în Drive
     randuri_registru.sort(key=lambda x: (int(x["numar_baza"]), x.get("sufix", "")))
