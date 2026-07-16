@@ -45,6 +45,87 @@ def obtine_drive():
     creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
+def verifica_existenta_pe_server(nr, session, ssl_context, timeout_resilient):
+    """Verifică rapid dacă un număr returnează PDF valid (True) sau 404/altceva (False)."""
+    url = URL_TEMPLATE.format(numar=nr, an=AN_CURENT)
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS), 
+        "Referer": "https://monitoruloficial.ro/e-monitor/"
+    }
+    try:
+        # Folosim o cerere de tip HEAD sau un GET rapid cu stream limitat pentru viteză
+        with session.stream("GET", url, headers=headers, timeout=timeout_resilient, verify=ssl_context, follow_redirects=True) as response:
+            if response.status_code == 200:
+                content_type = response.headers.get("Content-Type", "").lower()
+                if "application/pdf" in content_type:
+                    return True
+    except Exception:
+        pass
+    return False
+
+def incearca_descarcare_numar(nr, service, session, ssl_context, timeout_resilient, randuri_registru):
+    """Descarcă efectiv numărul și îl urcă în Google Drive."""
+    nume_pdf = f"MO_PI_{AN_CURENT}_{nr}.pdf"
+    url = URL_TEMPLATE.format(numar=nr, an=AN_CURENT)
+    cale_pdf_temp = f"temp_{nume_pdf}"
+    descarcat_ok = False
+    
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS), 
+        "Referer": "https://monitoruloficial.ro/e-monitor/"
+    }
+    
+    try:
+        with session.stream("GET", url, headers=headers, timeout=timeout_resilient, verify=ssl_context, follow_redirects=True) as response:
+            if response.status_code == 200:
+                content_type = response.headers.get("Content-Type", "").lower()
+                if "application/pdf" in content_type:
+                    with open(cale_pdf_temp, "wb") as f_pdf:
+                        for chunk in response.iter_bytes(chunk_size=131072):
+                            f_pdf.write(chunk)
+                    descarcat_ok = True
+                
+        if descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) > 2000:
+            marime_bytes = os.path.getsize(cale_pdf_temp)
+            size_kb = round(marime_bytes / 1024, 1)
+            
+            metadata = {'name': nume_pdf, 'parents': [TARGET_FOLDER_ID]}
+            media = MediaFileUpload(cale_pdf_temp, mimetype="application/pdf")
+            nou_pdf = service.files().create(
+                body=metadata, media_body=media, fields="id", supportsAllDrives=True
+            ).execute()
+            os.remove(cale_pdf_temp)
+            
+            # Adăugăm sau actualizăm starea în listă
+            existente_in_lista = [r for r in randuri_registru if r["numar_baza"] == str(nr)]
+            if existente_in_lista:
+                existente_in_lista[0].update({
+                    "status": "descarcat",
+                    "dimensiune_kb": str(size_kb),
+                    "drive_file_id": nou_pdf["id"]
+                })
+            else:
+                randuri_registru.append({
+                    "numar_baza": str(nr),
+                    "sufix": "",
+                    "status": "descarcat",
+                    "dimensiune_kb": str(size_kb),
+                    "drive_file_id": nou_pdf["id"]
+                })
+            
+            print(f"   {GREEN}✓ Succes ({size_kb} KB) -> ID: {nou_pdf['id']}{RESET}")
+            if marime_bytes > 52428800:
+                marime_mb = round(marime_bytes / 1024 / 1024, 2)
+                print(f"   {YELLOW}⚠️ ATENȚIE: Fișier de dimensiune mare detectat ({marime_mb} MB)!{RESET}")
+                
+            return True
+    except Exception as e:
+        print(f"   {RED}⚠️ Eroare rețea la descărcarea numărului {nr}: {e}{RESET}")
+        if os.path.exists(cale_pdf_temp):
+            os.remove(cale_pdf_temp)
+            
+    return False
+
 def descarca_si_salveaza_simple():
     service = obtine_drive()
     nume_registru = f"status_{AN_CURENT}.csv"
@@ -74,94 +155,100 @@ def descarca_si_salveaza_simple():
                 if randuri_registru_nr:
                     fisiere_descarcate.add(int(randuri_registru_nr))
     
-    print(f"📊 Anul {AN_CURENT}: {len(fisiere_descarcate)} numere simple mapate deja (descărcate/inexistente).")
+    print(f"📊 Anul {AN_CURENT}: {len(fisiere_descarcate)} numere simple mapate deja în registru.")
 
     timeout_resilient = httpx.Timeout(timeout=120.0, connect=20.0, read=120.0)
     ssl_context = creeaza_context_ssl_compatibil()
-    
-    # Contor pentru descărcările fizice efectuate cu succes în această rulare
     download_counter = 0
     
-    for nr in range(1, 1201):
+    session = httpx.Client()
+    
+    # ======================================================================
+    # 🔍 RUTINA DE STABILIRE A CAPĂTULUI (PEAK DISCOVERY)
+    # ======================================================================
+    vârf_detectat = None
+    punct_start = 1500
+    
+    print(f"🕵️ Pornește rutina de stabilire a capătului pentru anul {AN_CURENT}...")
+    
+    # 1. Testăm reperul principal de la 1500
+    exista_la_start = verifica_existenta_pe_server(punct_start, session, ssl_context, timeout_resilient)
+    
+    if exista_la_start:
+        # Caz A: Există fișiere chiar și la 1500! Începem să urcăm din 10 în 10.
+        print(f"⚠️ {YELLOW}Caz extrem: S-a detectat PDF activ la {punct_start}! Căutăm limita în sus...{RESET}")
+        urmatorul = punct_start
+        while True:
+            urmatorul += 10
+            time.sleep(random.uniform(0.5, 1.0))
+            print(f"   -> Verificăm la salt superior: {urmatorul}...")
+            if not verifica_existenta_pe_server(urmatorul, session, ssl_context, timeout_resilient):
+                # Am găsit primul 404! Coborâm acum secvențial înapoi din acel punct ca să prindem vârful exact.
+                for peak_candidate in range(urmatorul, urmatorul - 10, -1):
+                    time.sleep(random.uniform(0.5, 1.0))
+                    if verifica_existenta_pe_server(peak_candidate, session, ssl_context, timeout_resilient):
+                        vârf_detectat = peak_candidate
+                        break
+                break
+    else:
+        # Caz B: Nu există la 1500 (Cazul normal). Coborâm din 10 în 10.
+        print(f"🔍 Căutăm limita în jos de la {punct_start}...")
+        for nr in range(punct_start - 10, 0, -10):
+            # Dacă dăm de un număr pe care îl avem deja salvat în registru, ăla e capătul cunoscut
+            if nr in fisiere_descarcate:
+                vârf_detectat = nr
+                print(f"🎯 Am intersectat registrul existent la numărul {nr}.")
+                break
+                
+            time.sleep(random.uniform(0.5, 1.0))
+            print(f"   -> Verificăm la salt inferior: {nr}...")
+            if verifica_existenta_pe_server(nr, session, ssl_context, timeout_resilient):
+                # Am găsit prima zonă populată! Urcăm acum secvențial din acel punct ca să găsim vârful exact.
+                for peak_candidate in range(nr, nr + 10):
+                    time.sleep(random.uniform(0.5, 1.0))
+                    if not verifica_existenta_pe_server(peak_candidate, session, ssl_context, timeout_resilient):
+                        vârf_detectat = peak_candidate - 1
+                        break
+                break
+
+    # Siguranță: dacă dintr-un motiv de rețea nu detectează nimic, punem o limită minimă
+    if vârf_detectat is None:
+        vârf_detectat = 600
+        print(f"⚠️ Nu s-a putut detecta vârful. Folosim valoarea de rezervă: {vârf_detectat}")
+    else:
+        print(f"🎯 {GREEN}Vârf final stabilit cu succes pentru anul {AN_CURENT} la numărul: {vârf_detectat}{RESET}")
+
+    # ======================================================================
+    # 🚀 PROCEDURA PRINCIPALĂ (NUMAI ÎN JOS)
+    # ======================================================================
+    print(f"⏬ Începem descărcarea completă exclusiv în jos, de la {vârf_detectat} până la 1...")
+    
+    for nr in range(vârf_detectat, 0, -1):
         if nr in fisiere_descarcate:
             continue
             
-        nume_pdf = f"MO_PI_{AN_CURENT}_{nr}.pdf"
-        url = URL_TEMPLATE.format(numar=nr, an=AN_CURENT)
-        
         time.sleep(random.uniform(1.0, 2.0))
-        print(f"⏳ Descarcă {nume_pdf} via endpoint public...")
+        print(f"⏳ Descarcă {nr}...")
         
-        headers = {
-            "User-Agent": random.choice(USER_AGENTS), 
-            "Referer": "https://monitoruloficial.ro/e-monitor/"
-        }
-        
-        try:
-            cale_pdf_temp = f"temp_{nume_pdf}"
-            descarcat_ok = False
-            
-            with httpx.Client(headers=headers, timeout=timeout_resilient, verify=ssl_context, follow_redirects=True) as client:
-                with client.stream("GET", url) as response:
-                    if response.status_code == 404:
-                        print(f"   ✗ Numărul {nr} returnează 404 (Inexistent).")
-                    else:
-                        response.raise_for_status()
-                        content_type = response.headers.get("Content-Type", "").lower()
-                        
-                        if "application/pdf" in content_type:
-                            with open(cale_pdf_temp, "wb") as f_pdf:
-                                for chunk in response.iter_bytes(chunk_size=131072):
-                                    f_pdf.write(chunk)
-                            descarcat_ok = True
-                        else:
-                            print(f"   ✗ Endpoint-ul a întors HTML în loc de PDF la numărul {nr}.")
-            
-            if descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) > 2000:
-                marime_bytes = os.path.getsize(cale_pdf_temp)
-                size_kb = round(marime_bytes / 1024, 1)
-                
-                metadata = {'name': nume_pdf, 'parents': [TARGET_FOLDER_ID]}
-                media = MediaFileUpload(cale_pdf_temp, mimetype="application/pdf")
-                nou_pdf = service.files().create(
-                    body=metadata, media_body=media, fields="id", supportsAllDrives=True
-                ).execute()
-                os.remove(cale_pdf_temp)
-                
-                randuri_registru.append({
-                    "numar_baza": str(nr),
-                    "sufix": "",
-                    "status": "descarcat",
-                    "dimensiune_kb": str(size_kb),
-                    "drive_file_id": nou_pdf["id"]
-                })
-                
-                print(f"   {GREEN}✓ Succes ({size_kb} KB) -> ID: {nou_pdf['id']}{RESET}")
-                
-                if marime_bytes > 52428800:
-                    marime_mb = round(marime_bytes / 1024 / 1024, 2)
-                    print(f"   {YELLOW}⚠️ ATENȚIE: Fișier de dimensiune mare detectat ({marime_mb} MB)! Sincronizarea poate dura mai mult.{RESET}")
-                
-                # Incrementăm contorul de descărcări și aplicăm pauza la 40
-                download_counter += 1
-                if download_counter % 40 == 0:
-                    print(f"\n{YELLOW}☕ [Pauză inteligentă] Am descărcat {download_counter} fișiere. Așteptăm 5 minute (300s) ca serverul să își reseteze IP-ul...{RESET}\n")
-                    time.sleep(300)
-            else:
-                if os.path.exists(cale_pdf_temp):
-                    os.remove(cale_pdf_temp)
-                randuri_registru.append({
-                    "numar_baza": str(nr),
-                    "sufix": "",
-                    "status": "inexistent",
-                    "dimensiune_kb": "0",
-                    "drive_file_id": ""
-                })
-                
-        except Exception as e:
-            print(f"   {RED}⚠️ Eroare rețea la descărcarea numărului {nr}: {e}{RESET}")
-            time.sleep(5)
+        exista = incearca_descarcare_numar(nr, service, session, ssl_context, timeout_resilient, randuri_registru)
+        if exista:
+            download_counter += 1
+            if download_counter % 40 == 0:
+                print(f"\n{YELLOW}☕ [Pauză inteligentă] Am descărcat {download_counter} fișiere. Pauză de 5 minute (300s)...{RESET}\n")
+                time.sleep(300)
+        else:
+            # Dacă nu există, marcăm în registru
+            randuri_registru.append({
+                "numar_baza": str(nr),
+                "sufix": "",
+                "status": "inexistent",
+                "dimensiune_kb": "0",
+                "drive_file_id": ""
+            })
 
+    session.close()
+
+    # Sortare și salvare registru în Drive
     randuri_registru.sort(key=lambda x: (int(x["numar_baza"]), x.get("sufix", "")))
     cale_reg_scrie = f"temp_scrie_{nume_registru}"
     
