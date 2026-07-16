@@ -1,24 +1,22 @@
 import os
 import sys
 import json
-import time
-import random
 import csv
 import io
-import httpx
+import requests
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaFileUpload
 
 TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_PDF")
 AN_CURENT = os.getenv("AN_PROCESAT")
+
 if not AN_CURENT:
     print("❌ EROARE CRITICĂ: Variabila de mediu 'AN_PROCESAT' nu este setată!")
     sys.exit(1)
 
-YEARS_TO_PROCESS = [int(y) for y in os.getenv("YEARS", "2026").split(",")]
-
-URL_TEMPLATE = "https://www.monitoruloficial.ro/emonitor/PDF_baza.php?an={an}&numar={numar}{sufix}"
+URL_TEMPLATE = "https://www.monitoruloficial.ro/emonitor/PDF_baza.php?an={an}&numar={numar}"
+SUFIXE_TEST = ["S", "Bis", "Supliment", "A", "B"]
 
 def obtine_drive():
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
@@ -27,118 +25,100 @@ def obtine_drive():
     creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
-def obtine_csv(service, an):
-    nume_csv = f"status_{an}.csv"
-    query = f"'{TARGET_FOLDER_ID}' in parents and name = '{nume_csv}' and trashed = false"
-    existente = service.files().list(
-        q=query, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True, corpora="user"
-    ).execute().get("files", [])
-    if existente:
-        file_id = existente[0]["id"]
-        request = service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-        linii = fh.getvalue().decode("utf-8").splitlines()
-        reader = list(csv.DictReader(linii))
-        return file_id, reader
-    return None, None
-
-def salveaza_csv_in_drive(service, file_id, nume_csv, date_rows):
-    cale_temp = f"temp_save_suf_{nume_csv}"
-    with open(cale_temp, mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["numar", "simplu", "bis", "tris", "quatro", "s"])
-        writer.writeheader()
-        writer.writerows(date_rows)
-    media = MediaFileUpload(cale_temp, mimetype="text/csv", resumable=True)
-    service.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
-    os.remove(cale_temp)
-    print(f"💾 [Sufixe] Registru actualizat: {nume_csv}")
-
-def descarca_sufixe():
+def descarca_si_salveaza_sufixe():
     if not TARGET_FOLDER_ID:
         print("❌ EROARE: DRIVE_FOLDER_PDF nu este setat!")
         sys.exit(1)
+
     service = obtine_drive()
+    nume_registru = f"status_{AN_CURENT}.csv"
     
-    config_sufixe = [
-        {"col": "bis", "url": "Bis"},
-        {"col": "tris", "url": "Tris"},
-        {"col": "quatro", "url": "Quatro"},
-        {"col": "s", "url": "S"}
-    ]
+    # 1. Căutăm registrul existent în Drive
+    query = f"'{TARGET_FOLDER_ID}' in parents and name = '{nume_registru}' and trashed = false"
+    existente = service.files().list(
+        q=query, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True
+    ).execute().get("files", [])
     
-    with httpx.Client(timeout=15.0, follow_redirects=True) as client:
-        for an in YEARS_TO_PROCESS:
-            print(f"\n--- 📅 Sincronizare sufixe Anul {an} ---")
-            nume_csv = f"status_{an}.csv"
-            file_id, rows = obtine_csv(service, an)
-            if not rows:
+    randuri_registru = []
+    combinatii_descarcate = set()
+    file_id_registru = None
+
+    if existente:
+        file_id_registru = existente[0]["id"]
+        
+        # Descarcă registrul direct în memorie
+        request = service.files().get_media(fileId=file_id_registru)
+        continut_bytes = request.execute()
+        
+        fh = io.BytesIO(continut_bytes)
+        wrapper = io.TextIOWrapper(fh, encoding='utf-8')
+        reader = csv.DictReader(wrapper)
+        
+        for row in reader:
+            randuri_registru.append(row)
+            if row.get("status") == "descarcat":
+                nr_baza = row.get("numar_baza")
+                sfx = row.get("sufix", "")
+                if nr_baza:
+                    combinatii_descarcate.add((int(nr_baza), sfx))
+    
+    print(f"📊 Anul {AN_CURENT}: {len(combinatii_descarcate)} combinații totale identificate în registru.")
+
+    # 2. Scanăm plaja de numere pentru sufixe speciale
+    for nr in range(1, 1201):
+        for sfx in SUFIXE_TEST:
+            if (nr, sfx) in combinatii_descarcate:
                 continue
-            modificari = False
-            rows_dict = {int(r["numar"]): r for r in rows}
-            
-            for numar in range(1, 1501):
-                row = rows_dict[numar]
                 
-                # Dacă numărul simplu este eșuat complet (15), sufixele sunt deja forțate la 10
-                if row["simplu"] == "15":
-                    continue
+            numar_url = f"{nr}{sfx}"
+            nume_pdf = f"MO_PI_{AN_CURENT}_{nr}{sfx}.pdf"
+            url = URL_TEMPLATE.format(an=AN_CURENT, numar=numar_url)
+            
+            try:
+                res = requests.get(url, timeout=20)
+                if res.status_code == 200 and len(res.content) > 2000:
+                    size_kb = round(len(res.content) / 1024, 1)
                     
-                # Procesăm doar dacă numărul de bază există în siguranță (20)
-                if row["simplu"] == "20":
-                    for idx, cfg in enumerate(config_sufixe):
-                        col = cfg["col"]
-                        sufix_url = cfg["url"]
-                        stare_curenta = int(row[col])
+                    cale_pdf_temp = f"temp_{nume_pdf}"
+                    with open(cale_pdf_temp, "wb") as f_pdf:
+                        f_pdf.write(res.content)
                         
-                        if stare_curenta in [10, 20]:
-                            if stare_curenta == 10:
-                                break # Dacă Bis e inexistent, ne oprim complet pe sufixele superioare
-                            continue
-                            
-                        # Încercăm descărcarea doar pentru stările intermediare (maximum 2 încercări: 0 și 1)
-                        if 0 <= stare_curenta <= 1:
-                            url = URL_TEMPLATE.format(an=an, numar=numar, sufix=sufix_url)
-                            nume_pdf = f"MO_PI_{an}_{numar}{sufix_url}.pdf"
-                            try:
-                                print(f"🔍 [Încercare {stare_curenta}] Descărcare sufix {nume_pdf}...")
-                                r = client.get(url)
-                                if r.status_code == 200 and len(r.content) > 1000:
-                                    cale_pdf = f"temp_{nume_pdf}"
-                                    with open(cale_pdf, "wb") as f_pdf:
-                                        f_pdf.write(r.content)
-                                    media = MediaFileUpload(cale_pdf, mimetype="application/pdf")
-                                    metadata = {'name': nume_pdf, 'parents': [TARGET_FOLDER_ID]}
-                                    service.files().create(body=metadata, media_body=media, supportsAllDrives=True).execute()
-                                    os.remove(cale_pdf)
-                                    row[col] = "20"
-                                    modificari = True
-                                    print(f"   ✅ Salvat sufix: {nume_pdf}")
-                                    continue
-                                else:
-                                    stare_noua = stare_curenta + 1
-                                    row[col] = str(stare_noua)
-                                    modificari = True
-                                    print(f"   ❌ Sufix inexistent pe server. Stare nouă pentru {col.upper()}: {stare_noua}")
-                                    
-                                    # La a doua ratare (starea devine 2), declarăm inexistent și propagăm în cascadă la 10
-                                    if stare_noua == 2:
-                                        print(f"   ⚠️ Propagare inexistență pentru restul sufixelor de la {sufix_url} în sus...")
-                                        for i_rest in range(idx, len(config_sufixe)):
-                                            row[config_sufixe[i_rest]["col"]] = "10"
-                                        break
-                                time.sleep(random.uniform(0.1, 0.2))
-                            except Exception as e:
-                                print(f"   ❌ Eroare rețea la sufix {nume_pdf}: {e}")
-                                time.sleep(1.0)
-                                break
-            if modificari:
-                salveaza_csv_in_drive(service, file_id, nume_csv, list(rows_dict.values()))
-            else:
-                print(f"ℹ️ Fără modificări pe sufixe pentru anul {an}.")
+                    metadata = {'name': nume_pdf, 'parents': [TARGET_FOLDER_ID]}
+                    media = MediaFileUpload(cale_pdf_temp, mimetype="application/pdf")
+                    nou_pdf = service.files().create(
+                        body=metadata, media_body=media, fields="id", supportsAllDrives=True
+                    ).execute()
+                    os.remove(cale_pdf_temp)
+                    
+                    randuri_registru.append({
+                        "numar_baza": str(nr),
+                        "sufix": sfx,
+                        "status": "descarcat",
+                        "dimensiune_kb": str(size_kb),
+                        "drive_file_id": nou_pdf["id"]
+                    })
+                    print(f"🔥 [SUFIX] Găsit și descărcat: {nume_pdf} ({size_kb} KB)!")
+            except Exception as e:
+                print(f"   ⚠️ Eroare la verificarea numărului {nr}{sfx}: {e}")
+
+    # 3. Salvăm înapoi registrul ordonat impecabil
+    randuri_registru.sort(key=lambda x: (int(x["numar_baza"]), x.get("sufix", "")))
+    cale_reg_scrie = f"temp_scrie_{nume_registru}"
+    
+    with open(cale_reg_scrie, mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["numar_baza", "sufix", "status", "dimensiune_kb", "drive_file_id"])
+        writer.writeheader()
+        writer.writerows(randuri_registru)
+        
+    media_reg = MediaFileUpload(cale_reg_scrie, mimetype="text/csv")
+    if file_id_registru:
+        service.files().update(fileId=file_id_registru, media_body=media_reg, supportsAllDrives=True).execute()
+    else:
+        metadata = {'name': nume_registru, 'parents': [TARGET_FOLDER_ID]}
+        service.files().create(body=metadata, media_body=media_reg, supportsAllDrives=True).execute()
+        
+    os.remove(cale_reg_scrie)
+    print(f"🚀 Registru {nume_registru} actualizat cu noile sufixe în Drive!")
 
 if __name__ == "__main__":
-    descarca_sufixe()
+    descarca_si_salveaza_sufixe()
