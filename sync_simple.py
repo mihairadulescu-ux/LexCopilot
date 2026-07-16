@@ -4,6 +4,7 @@ import json
 import csv
 import io
 import time
+import random
 import subprocess
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -40,7 +41,7 @@ def obtine_drive():
 def verifica_existenta_pe_server(nr):
     """Verifică existența unui număr descărcând doar header-ele prin curl (imun la SSL)."""
     url = URL_TEMPLATE.format(numar=nr, an=AN_CURENT)
-    ua = random.choice(USER_AGENTS) if 'random' in sys.modules else USER_AGENTS[0]
+    ua = random.choice(USER_AGENTS)
     
     comanda = [
         "curl", "-sI", "-L", 
@@ -66,7 +67,7 @@ def incearca_descarcare_numar(nr, service, randuri_registru):
     nume_pdf = f"MO_PI_{AN_CURENT}_{nr}.pdf"
     url = URL_TEMPLATE.format(numar=nr, an=AN_CURENT)
     cale_pdf_temp = f"temp_{nume_pdf}"
-    ua = USER_AGENTS[nr % len(USER_AGENTS)]
+    ua = random.choice(USER_AGENTS)
     
     comanda = [
         "curl", "-sS", "-L",
