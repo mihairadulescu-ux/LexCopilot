@@ -3,13 +3,13 @@ import sys
 import json
 import csv
 import io
+import re
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
+# Pilonul de siguranță - ID-ul folderului tău de PDF-uri
 TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_PDF", "1gRh-rWe32RNJU2PmN67XoFvkaCSotTA1")
-# Resetăm toți anii din intervalul de producție
-YEARS_TO_RESET = list(range(2000, 2027)) 
 
 def obtine_drive():
     print("🔑 [Reset] Conectare Google Drive...")
@@ -19,103 +19,110 @@ def obtine_drive():
     creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
-def listeaza_fisiere_fizice_an(service, an):
-    print(f"📂 Scanare fișiere existente în Drive pentru anul {an}...")
-    fisiere_fizice = set()
+def listeaza_toate_pdf_urile_fizice(service):
+    """Scanează folderul o singură dată și aduce ABSOLUT toate fișierele PDF."""
+    print(f"📂 Scanare generală folder PDF (ID: {TARGET_FOLDER_ID})...")
+    pdf_uri = []
     page_token = None
-    query = f"'{TARGET_FOLDER_ID}' in parents and name contains 'MO_PI_{an}_' and name contains '.pdf' and trashed = false"
+    
+    query = f"'{TARGET_FOLDER_ID}' in parents and mimeType = 'application/pdf' and trashed = false"
     
     while True:
         response = service.files().list(
-            q=query, fields="nextPageToken, files(name)", pageToken=page_token, pageSize=1000,
-            supportsAllDrives=True, includeItemsFromAllDrives=True, corpora="user"
+            q=query, 
+            fields="nextPageToken, files(id, name)", 
+            pageToken=page_token, 
+            pageSize=1000,
+            supportsAllDrives=True, 
+            includeItemsFromAllDrives=True, 
+            corpora="user"
         ).execute()
-        for f in response.get("files", []):
-            # Eliminăm extensia .pdf pentru o mapare ușoară în memorie (ex: MO_PI_2024_12Bis)
-            fisiere_fizice.add(f["name"].replace(".pdf", ""))
+        
+        pdf_uri.extend(response.get("files", []))
         page_token = response.get("nextPageToken", None)
         if not page_token:
             break
-    print(f"📊 S-au găsit {len(fisiere_fizice)} PDF-uri reale în Drive pentru anul {an}.")
-    return fisiere_fizice
+            
+    print(f"📊 S-au găsit în total {len(pdf_uri)} fișiere PDF fizice în Drive.")
+    return pdf_uri
 
-def obtine_sau_creaza_csv(service, an):
-    nume_csv = f"status_{an}.csv"
-    query = f"'{TARGET_FOLDER_ID}' in parents and name = '{nume_csv}' and trashed = false"
-    existente = service.files().list(
-        q=query, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True, corpora="user"
-    ).execute().get("files", [])
-    
-    if existente:
-        file_id = existente[0]["id"]
-        request = service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-        linii = fh.getvalue().decode("utf-8").splitlines()
-        return file_id, list(csv.DictReader(linii))
-    else:
-        matrice = []
-        for n in range(1, 1501):
-            matrice.append({"numar": str(n), "simplu": "0", "bis": "0", "tris": "0", "quatro": "0", "s": "0"})
-        cale_temp = f"temp_{nume_csv}"
-        with open(cale_temp, mode="w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=["numar", "simplu", "bis", "tris", "quatro", "s"])
-            writer.writeheader()
-            writer.writerows(matrice)
-        media = MediaFileUpload(cale_temp, mimetype="text/csv")
-        metadata = {'name': nume_csv, 'parents': [TARGET_FOLDER_ID]}
-        nou_fisier = service.files().create(body=metadata, media_body=media, fields="id", supportsAllDrives=True).execute()
-        os.remove(cale_temp)
-        return nou_fisier["id"], matrice
+def extrage_an_si_numar_din_nume(nume_fisier):
+    """
+    Extrage anul și numărul alfanumeric din denumirea standardizată.
+    Exemple potrivite: 
+      - MO_PI_2020_1S.pdf   -> an='2020', numar='1S'
+      - MO_PI_2004_123.pdf  -> an='2004', numar='123'
+      - MO_PI_2015_45Bis.pdf -> an='2015', numar='45Bis'
+    """
+    # Regex-ul caută prefixul fix MO_PI_, urmat de 4 cifre (anul), un underscore și numărul complet de dinainte de .pdf
+    m = re.search(r"MO_PI_(\d{4})_([A-Za-z0-9]+)\.pdf", nume_fisier)
+    if m:
+        return m.group(1), m.group(2)
+    return None, None
 
-def salveaza_csv_in_drive(service, file_id, nume_csv, date_rows):
-    cale_temp = f"temp_reset_{nume_csv}"
-    with open(cale_temp, mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["numar", "simplu", "bis", "tris", "quatro", "s"])
-        writer.writeheader()
-        writer.writerows(date_rows)
-    media = MediaFileUpload(cale_temp, mimetype="text/csv")
-    service.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
-    os.remove(cale_temp)
+def sorteaza_numere_inteligent(item):
+    """Functie helper pentru a sorta numerele alfanumerice cat mai natural."""
+    numar_str = item[0]
+    # Extragem doar cifrele de la inceput pentru sortare numerica primara
+    cifre = re.match(r"^\d+", numar_str)
+    return int(cifre.group(0)) if cifre else 999999
 
 def reseteaza_tot():
-    if not TARGET_FOLDER_ID:
-        print("❌ EROARE: DRIVE_FOLDER_PDF nu este setat!")
-        sys.exit(1)
     service = obtine_drive()
     
-    for an in YEARS_TO_RESET:
-        print(f"\n⚙️ Re-aliniere registre pentru anul {an}...")
-        fisiere_existente = listeaza_fisiere_fizice_an(service, an)
-        file_id, rows = obtine_sau_creaza_csv(service, an)
-        
-        for r in rows:
-            numar = r["numar"]
+    # 1. Luăm lista completă de pe Drive o singură dată
+    toate_pdf_urile = listeaza_toate_pdf_urile_fizice(service)
+    
+    if not toate_pdf_urile:
+        print("⚠️ ATENȚIE: Nu s-a găsit niciun PDF potrivit în folder! Nimic de resetat.")
+        return
+
+    # 2. Mapăm fișierele pe ani în memorie
+    pdf_pe_ani = {} 
+    
+    for pdf in toate_pdf_urile:
+        nume = pdf["name"]
+        an, numar = extrage_an_si_numar_din_nume(nume)
+        if an and numar:
+            if an not in pdf_pe_ani:
+                pdf_pe_ani[an] = {}
+            pdf_pe_ani[an][numar] = pdf["id"]
             
-            # 1. Aliniere număr simplu
-            nume_simplu = f"MO_PI_{an}_{numar}"
-            if nume_simplu in fisiere_existente:
-                r["simplu"] = "20"
-            else:
-                r["simplu"] = "0" # Resetăm contorul pentru reîncercare curată
+    print(f"🗂️ Fișierele au fost catalogate în memorie pentru {len(pdf_pe_ani)} ani diferiți.")
+
+    # 3. Actualizăm registrele de status doar pentru anii identificați în Drive
+    for an, pdf_dict in sorted(pdf_pe_ani.items()):
+        nume_registru = f"status_{an}.csv"
+        print(f"⚙️ Sincronizare registru: {nume_registru} ({len(pdf_dict)} PDF-uri)...")
+        
+        # Căutăm dacă există deja registrul de status în Drive
+        query_reg = f"'{TARGET_FOLDER_ID}' in parents and name = '{nume_registru}' and trashed = false"
+        existente = service.files().list(
+            q=query_reg, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True, corpora="user"
+        ).execute().get("files", [])
+        
+        cale_temp = f"temp_{nume_registru}"
+        with open(cale_temp, mode="w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["numar", "status", "drive_file_id"])
+            
+            # Sortăm alfanumeric listele (ex: 1, 1S, 2, 3)
+            for numar, file_id in sorted(pdf_dict.items(), key=sorteaza_numere_inteligent):
+                writer.writerow([numar, "descarcat", file_id])
                 
-            # 2. Aliniere sufixe
-            for col, sufix_url in [("bis", "Bis"), ("tris", "Tris"), ("quatro", "Quatro"), ("s", "S")]:
-                nume_sufix = f"MO_PI_{an}_{numar}{sufix_url}"
-                if nume_sufix in fisiere_existente:
-                    r[col] = "20"
-                else:
-                    # Dacă simplu nu există, sufixele sunt marcate automat ca inexistente (10)
-                    if r["simplu"] == "0":
-                        r[col] = "10"
-                    else:
-                        r[col] = "0" # Resetăm pentru reîncercare
-                        
-        salveaza_csv_in_drive(service, file_id, f"status_{an}.csv", rows)
-        print(f"✅ Registru resetat și curățat conform realității din Drive pentru anul {an}!")
+        media = MediaFileUpload(cale_temp, mimetype="text/csv")
+        if existente:
+            file_id = existente[0]["id"]
+            service.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
+            print(f"   💾 Actualizat registru existent: {nume_registru} (ID: {file_id})")
+        else:
+            metadata = {'name': nume_registru, 'parents': [TARGET_FOLDER_ID]}
+            nou = service.files().create(body=metadata, media_body=media, fields="id", supportsAllDrives=True).execute()
+            print(f"   🆕 Creat registru nou: {nume_registru} (ID: {nou['id']})")
+            
+        os.remove(cale_temp)
+        
+    print("🚀 Sincronizarea registrelor de status s-a terminat cu succes!")
 
 if __name__ == "__main__":
     reseteaza_tot()
