@@ -33,9 +33,7 @@ USER_AGENTS = [
 ]
 
 def creeaza_context_ssl_compatibil():
-    """Creează un context SSL tolerant pentru servere cu protocoale vechi sau defecte."""
     context = ssl.create_default_context()
-    # Permitem protocoale mai vechi și cifre mai slabe pentru a evita UNEXPECTED_EOF
     context.options |= ssl.OP_LEGACY_SERVER_CONNECT
     context.set_ciphers('DEFAULT@SECLEVEL=1')
     return context
@@ -81,6 +79,9 @@ def descarca_si_salveaza_simple():
     timeout_resilient = httpx.Timeout(timeout=120.0, connect=20.0, read=120.0)
     ssl_context = creeaza_context_ssl_compatibil()
     
+    # Contor pentru descărcările fizice efectuate cu succes în această rulare
+    download_counter = 0
+    
     for nr in range(1, 1201):
         if nr in fisiere_descarcate:
             continue
@@ -100,7 +101,6 @@ def descarca_si_salveaza_simple():
             cale_pdf_temp = f"temp_{nume_pdf}"
             descarcat_ok = False
             
-            # Îi pasăm contextul SSL customizat direct în clientul httpx
             with httpx.Client(headers=headers, timeout=timeout_resilient, verify=ssl_context, follow_redirects=True) as client:
                 with client.stream("GET", url) as response:
                     if response.status_code == 404:
@@ -136,13 +136,17 @@ def descarca_si_salveaza_simple():
                     "drive_file_id": nou_pdf["id"]
                 })
                 
-                # Afișăm succesul cu VERDE strălucitor
                 print(f"   {GREEN}✓ Succes ({size_kb} KB) -> ID: {nou_pdf['id']}{RESET}")
                 
-                # Dacă fișierul depășește 50 MB (52.428.800 bytes), afișăm mesaj PORTOCALIU/GALBEN dedesubt
                 if marime_bytes > 52428800:
                     marime_mb = round(marime_bytes / 1024 / 1024, 2)
                     print(f"   {YELLOW}⚠️ ATENȚIE: Fișier de dimensiune mare detectat ({marime_mb} MB)! Sincronizarea poate dura mai mult.{RESET}")
+                
+                # Incrementăm contorul de descărcări și aplicăm pauza la 40
+                download_counter += 1
+                if download_counter % 40 == 0:
+                    print(f"\n{YELLOW}☕ [Pauză inteligentă] Am descărcat {download_counter} fișiere. Așteptăm 5 minute (300s) ca serverul să își reseteze IP-ul...{RESET}\n")
+                    time.sleep(300)
             else:
                 if os.path.exists(cale_pdf_temp):
                     os.remove(cale_pdf_temp)
@@ -155,7 +159,6 @@ def descarca_si_salveaza_simple():
                 })
                 
         except Exception as e:
-            # Afișăm erorile cu ROȘU strălucitor
             print(f"   {RED}⚠️ Eroare rețea la descărcarea numărului {nr}: {e}{RESET}")
             time.sleep(5)
 
