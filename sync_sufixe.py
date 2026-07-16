@@ -11,6 +11,11 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_PDF")
+AN_CURENT = os.getenv("AN_PROCESAT")
+if not AN_CURENT:
+    print("❌ EROARE CRITICĂ: Variabila de mediu 'AN_PROCESAT' nu este setată!")
+    sys.exit(1)
+
 YEARS_TO_PROCESS = [int(y) for y in os.getenv("YEARS", "2026").split(",")]
 
 URL_TEMPLATE = "https://www.monitoruloficial.ro/emonitor/PDF_baza.php?an={an}&numar={numar}{sufix}"
