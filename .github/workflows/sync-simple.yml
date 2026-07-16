@@ -1,5 +1,5 @@
-name: "Prod: Sincronizare Simple (Slicing)"
-
+name: "Descarcare Monitoare simple"
+e
 on:
   workflow_dispatch: # Pornire manuală din interfață
   schedule:
