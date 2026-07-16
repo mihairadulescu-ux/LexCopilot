@@ -1,4 +1,4 @@
-name: Reset Google Drive Processed Status
+name: Reset XML Google Drive Processed Status
 
 on:
   workflow_dispatch: # Permite pornirea manuală din tab-ul "Actions" din GitHub
