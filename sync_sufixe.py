@@ -5,17 +5,24 @@ import csv
 import io
 import time
 import random
+import ssl
 import httpx
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+
+# Culori ANSI pentru terminal
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+RESET = "\033[0m"
 
 # ID-ul fix al folderului tău Google Drive
 TARGET_FOLDER_ID = "1gRh-rWe32RNJU2PmN67XoFvkaCSotTA1"
 
 AN_CURENT = os.getenv("AN_PROCESAT")
 if not AN_CURENT:
-    print("❌ EROARE CRITICĂ: Variabila de mediu 'AN_PROCESAT' nu este setată!")
+    print(f"{RED}❌ EROARE CRITICĂ: Variabila de mediu 'AN_PROCESAT' nu este setată!{RESET}")
     sys.exit(1)
 
 URL_TEMPLATE = "https://monitoruloficial.ro/Monitorul-Oficial--PI--{numar}--{an}.html"
@@ -29,9 +36,17 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0"
 ]
 
+def creeaza_context_ssl_compatibil():
+    """Creează un context SSL tolerant pentru servere cu protocoale vechi sau defecte."""
+    context = ssl.create_default_context()
+    # Permitem protocoale mai vechi și cifre mai slabe pentru a evita UNEXPECTED_EOF
+    context.options |= ssl.OP_LEGACY_SERVER_CONNECT
+    context.set_ciphers('DEFAULT@SECLEVEL=1')
+    return context
+
 def obtine_drive():
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
-        raise EnvironmentError("❌ Lipseste secretul GOOGLE_SERVICE_ACCOUNT_JSON!")
+        raise EnvironmentError(f"{RED}❌ Lipseste secretul GOOGLE_SERVICE_ACCOUNT_JSON!{RESET}")
     info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
     creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
     return build("drive", "v3", credentials=creds, cache_discovery=False)
@@ -69,6 +84,7 @@ def descarca_si_salveaza_sufixe():
     print(f"📊 Anul {AN_CURENT}: {len(combinatii_descarcate)} combinații totale mapate în registru.")
 
     timeout_resilient = httpx.Timeout(timeout=120.0, connect=20.0, read=120.0)
+    ssl_context = creeaza_context_ssl_compatibil()
 
     for nr in range(1, 1201):
         for sfx in SUFIXE_TEST:
@@ -91,7 +107,7 @@ def descarca_si_salveaza_sufixe():
                 cale_pdf_temp = f"temp_{nume_pdf}"
                 descarcat_ok = False
                 
-                with httpx.Client(headers=headers, timeout=timeout_resilient, follow_redirects=True) as client:
+                with httpx.Client(headers=headers, timeout=timeout_resilient, verify=ssl_context, follow_redirects=True) as client:
                     with client.stream("GET", url) as response:
                         if response.status_code != 404:
                             response.raise_for_status()
@@ -104,7 +120,8 @@ def descarca_si_salveaza_sufixe():
                                 descarcat_ok = True
                 
                 if descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) > 2000:
-                    size_kb = round(os.path.getsize(cale_pdf_temp) / 1024, 1)
+                    marime_bytes = os.path.getsize(cale_pdf_temp)
+                    size_kb = round(marime_bytes / 1024, 1)
                     
                     metadata = {'name': nume_pdf, 'parents': [TARGET_FOLDER_ID]}
                     media = MediaFileUpload(cale_pdf_temp, mimetype="application/pdf")
@@ -120,7 +137,14 @@ def descarca_si_salveaza_sufixe():
                         "dimensiune_kb": str(size_kb),
                         "drive_file_id": nou_pdf["id"]
                     })
-                    print(f"🔥 [SUFIX] Găsit și descărcat: {nume_pdf} ({size_kb} KB)!")
+                    
+                    # Afișăm succesul cu VERDE strălucitor
+                    print(f"   {GREEN}🔥 [SUFIX] Găsit și descărcat: {nume_pdf} ({size_kb} KB)!{RESET}")
+                    
+                    # Dacă sufixul depășește 50 MB, punem mesajul GALBEN/PORTOCALIU dedesubt
+                    if marime_bytes > 52428800:
+                        marime_mb = round(marime_bytes / 1024 / 1024, 2)
+                        print(f"   {YELLOW}⚠️ ATENȚIE: Fișier de dimensiune mare detectat ({marime_mb} MB)! Sincronizarea poate dura mai mult.{RESET}")
                 else:
                     if os.path.exists(cale_pdf_temp):
                         os.remove(cale_pdf_temp)
@@ -132,7 +156,8 @@ def descarca_si_salveaza_sufixe():
                         "drive_file_id": ""
                     })
             except Exception as e:
-                print(f"   ⚠️ Eroare la verificarea numărului {nr}{sfx}: {e}")
+                # Afișăm erorile de rețea cu ROȘU strălucitor
+                print(f"   {RED}⚠️ Eroare la verificarea numărului {nr}{sfx}: {e}{RESET}")
                 time.sleep(5)
 
     randuri_registru.sort(key=lambda x: (int(x["numar_baza"]), x.get("sufix", "")))
