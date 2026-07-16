@@ -1,14 +1,14 @@
 name: "1. Descărcare PDF-uri Simple (Matrice)"
 
 on:
-  workflow_dispatch: # Pornire manuală la buton
+  workflow_dispatch: # Permite pornirea manuală din interfața GitHub
 
 jobs:
   download_simple:
     name: "Descarcă Simple - Anul ${{ matrix.an }}"
     runs-on: ubuntu-latest
     strategy:
-      max-parallel: 5 # Rulăm maximum 5 mașini simultan ca să nu blocăm API-ul Google
+      max-parallel: 5 # Rulăm maximum 5 ani simultan ca să nu fim blocați de Google API
       matrix:
         an: [
           "2000", "2001", "2002", "2003", "2004", 
@@ -36,7 +36,6 @@ jobs:
       - name: Rulare Descărcare Simple
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_PDF: ${{ secrets.DRIVE_FOLDER_PDF }}
           AN_PROCESAT: ${{ matrix.an }}
           PYTHONUNBUFFERED: "1"
         run: |
