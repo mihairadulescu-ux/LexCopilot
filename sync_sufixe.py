@@ -8,9 +8,10 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_PDF", "1gRh-rWe32RNJU2PmN67XoFvkaCSotTA1")
-AN_CURENT = os.getenv("AN_PROCESAT")
+# ID-ul fix al folderului tău Google Drive
+TARGET_FOLDER_ID = "1gRh-rWe32RNJU2PmN67XoFvkaCSotTA1"
 
+AN_CURENT = os.getenv("AN_PROCESAT")
 if not AN_CURENT:
     print("❌ EROARE CRITICĂ: Variabila de mediu 'AN_PROCESAT' nu este setată!")
     sys.exit(1)
@@ -26,10 +27,6 @@ def obtine_drive():
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 def descarca_si_salveaza_sufixe():
-    if not TARGET_FOLDER_ID:
-        print("❌ EROARE: DRIVE_FOLDER_PDF nu este setat!")
-        sys.exit(1)
-
     service = obtine_drive()
     nume_registru = f"status_{AN_CURENT}.csv"
     
@@ -45,8 +42,6 @@ def descarca_si_salveaza_sufixe():
 
     if existente:
         file_id_registru = existente[0]["id"]
-        
-        # Descarcă registrul direct în memorie
         request = service.files().get_media(fileId=file_id_registru)
         continut_bytes = request.execute()
         
