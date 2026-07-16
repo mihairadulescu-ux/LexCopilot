@@ -14,23 +14,23 @@ jobs:
       fail-fast: false # Dacă un segment dă eroare, celelalte continuă să ruleze!
       matrix:
         include:
-          - nume: "Vechi I (1900 - 1950)"
-            start: 1900
-            end: 1950
-          - nume: "Vechi II (1951 - 1980)"
-            start: 1951
-            end: 1980
-          - nume: "Mediu I (1981 - 2000)"
-            start: 1981
-            end: 2000
-          - nume: "Mediu II (2001 - 2010)"
-            start: 2001
-            end: 2010
-          - nume: "Recent I (2011 - 2018)"
-            start: 2011
-            end: 2018
-          - nume: "Recent II (2019 - 2026)"
-            start: 2019
+          - nume: "2000-2004"
+            start: 2000
+            end: 2004
+          - nume: "2005 - 2006"
+            start: 2005
+            end: 2009
+          - nume: "2010 - 2014"
+            start: 2010
+            end: 2014
+          - nume: "2015 - 20019"
+            start: 2015
+            end: 2019
+          - nume: "2020 - 2023"
+            start: 2020
+            end: 2023
+          - nume: "2024 - 2026"
+            start: 2024
             end: 2026
 
     steps:
