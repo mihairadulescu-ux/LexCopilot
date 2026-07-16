@@ -6,7 +6,7 @@ import io
 import time
 import random
 import ssl
-import httpx
+import urllib3
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -35,11 +35,13 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0"
 ]
 
-def creeaza_context_ssl_compatibil():
+def creeaza_pool_manager_compatibil():
+    """Creează un PoolManager urllib3 tolerant pentru servere cu SSL defect/vechi."""
     context = ssl.create_default_context()
     context.options |= ssl.OP_LEGACY_SERVER_CONNECT
     context.set_ciphers('DEFAULT@SECLEVEL=1')
-    return context
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    return urllib3.PoolManager(ssl_context=context, timeout=120.0, retries=False)
 
 def obtine_drive():
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
@@ -48,9 +50,9 @@ def obtine_drive():
     creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
-def incearca_descarcare_sufix(nr, sfx, service, ssl_context, timeout_resilient, randuri_registru):
+def incearca_descarcare_sufix(nr, sfx, service, http_pool, randuri_registru):
     """
-    Încearcă descarcarea.
+    Încearcă descarcarea folosind urllib3.
     Returnează: "OK", "404" sau "ERROR"
     """
     numar_url = f"{nr}{sfx}"
@@ -66,17 +68,19 @@ def incearca_descarcare_sufix(nr, sfx, service, ssl_context, timeout_resilient, 
     }
     
     try:
-        with httpx.Client(headers=headers, timeout=timeout_resilient, verify=ssl_context, follow_redirects=True) as client:
-            with client.stream("GET", url) as response:
-                if response.status_code == 200:
-                    content_type = response.headers.get("Content-Type", "").lower()
-                    if "application/pdf" in content_type:
-                        with open(cale_pdf_temp, "wb") as f_pdf:
-                            for chunk in response.iter_bytes(chunk_size=131072):
-                                f_pdf.write(chunk)
-                        descarcat_ok = True
-                elif response.status_code == 404:
-                    status_serviciu = "404"
+        response = http_pool.request("GET", url, headers=headers, preload_content=False)
+        
+        if response.status == 200:
+            content_type = response.headers.get("Content-Type", "").lower()
+            if "application/pdf" in content_type:
+                with open(cale_pdf_temp, "wb") as f_pdf:
+                    for chunk in response.stream(131072):
+                        f_pdf.write(chunk)
+                descarcat_ok = True
+        elif response.status == 404:
+            status_serviciu = "404"
+            
+        response.release_conn()
                 
         if descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) > 2000:
             marime_bytes = os.path.getsize(cale_pdf_temp)
@@ -193,8 +197,7 @@ def descarca_si_salveaza_sufixe():
     print(f"📊 Anul {AN_CURENT}: {len(statusuri_existente)} combinații totale mapate în registru.")
     print(f"🎯 Vârf preluat direct din registrul simplu: {vârf_sufixe}. Rulăm ierarhic în jos.")
 
-    timeout_resilient = httpx.Timeout(timeout=120.0, connect=20.0, read=120.0)
-    ssl_context = creeaza_context_ssl_compatibil()
+    http_pool = creeaza_pool_manager_compatibil()
     download_counter = 0
     
     for nr in range(vârf_sufixe, 0, -1):
@@ -204,9 +207,9 @@ def descarca_si_salveaza_sufixe():
         # ------------------------------------------------------------------
         status_s = statusuri_existente.get((nr, "S"), "")
         if status_s not in ["descarcat", "inexistent"]:
-            time.sleep(random.uniform(0.8, 1.5))
+            time.sleep(1.0)  # Pauza fixă solicitată de 1 secundă
             print(f"⏳ Verifică sufix independent {nr}S...")
-            rezultat_s = incearca_descarcare_sufix(nr, "S", service, ssl_context, timeout_resilient, randuri_registru)
+            rezultat_s = incearca_descarcare_sufix(nr, "S", service, http_pool, randuri_registru)
             
             if rezultat_s == "OK":
                 download_counter += 1
@@ -234,9 +237,9 @@ def descarca_si_salveaza_sufixe():
         elif status_bis == "inexistent":
             bis_exists = False
         else:
-            time.sleep(random.uniform(1.0, 2.0))
+            time.sleep(1.0)  # Pauza fixă solicitată de 1 secundă
             print(f"⏳ Verifică sufix {nr}Bis...")
-            rezultat_bis = incearca_descarcare_sufix(nr, "Bis", service, ssl_context, timeout_resilient, randuri_registru)
+            rezultat_bis = incearca_descarcare_sufix(nr, "Bis", service, http_pool, randuri_registru)
             
             if rezultat_bis == "OK":
                 bis_exists = True
@@ -265,9 +268,9 @@ def descarca_si_salveaza_sufixe():
             elif status_tris == "inexistent":
                 tris_exists = False
             else:
-                time.sleep(random.uniform(1.0, 2.0))
+                time.sleep(1.0)  # Pauza fixă solicitată de 1 secundă
                 print(f"⏳ Verifică sufix {nr}Tris...")
-                rezultat_tris = incearca_descarcare_sufix(nr, "Tris", service, ssl_context, timeout_resilient, randuri_registru)
+                rezultat_tris = incearca_descarcare_sufix(nr, "Tris", service, http_pool, randuri_registru)
                 
                 if rezultat_tris == "OK":
                     tris_exists = True
@@ -294,9 +297,9 @@ def descarca_si_salveaza_sufixe():
         if tris_exists:
             status_quatro = statusuri_existente.get((nr, "Quatro"), "")
             if status_quatro not in ["descarcat", "inexistent"]:
-                time.sleep(random.uniform(1.0, 2.0))
+                time.sleep(1.0)  # Pauza fixă solicitată de 1 secundă
                 print(f"⏳ Verifică sufix {nr}Quatro...")
-                rezultat_quatro = incearca_descarcare_sufix(nr, "Quatro", service, ssl_context, timeout_resilient, randuri_registru)
+                rezultat_quatro = incearca_descarcare_sufix(nr, "Quatro", service, http_pool, randuri_registru)
                 
                 if rezultat_quatro == "OK":
                     download_counter += 1
@@ -315,6 +318,8 @@ def descarca_si_salveaza_sufixe():
             if not bis_has_network_error and not tris_has_network_error:
                 if (nr, "Quatro") not in statusuri_existente:
                     randuri_registru.append({"numar_baza": str(nr), "sufix": "Quatro", "status": "inexistent", "dimensiune_kb": "0", "drive_file_id": ""})
+
+    http_pool.clear()
 
     # Sortare și salvare registru
     randuri_registru.sort(key=lambda x: (int(x["numar_baza"]), x.get("sufix", "")))
