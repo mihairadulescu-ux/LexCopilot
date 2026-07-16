@@ -1,4 +1,4 @@
-ame: "1. Descărcare PDF-uri Simple (Matrice)"
+name: "1. Descărcare PDF-uri Simple (Matrice)"
 
 on:
   workflow_dispatch: # Pornire manuală la buton
