@@ -8,9 +8,10 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_PDF", "1gRh-rWe32RNJU2PmN67XoFvkaCSotTA1")
-AN_CURENT = os.getenv("AN_PROCESAT")
+# ID-ul fix al folderului tău Google Drive
+TARGET_FOLDER_ID = "1gRh-rWe32RNJU2PmN67XoFvkaCSotTA1"
 
+AN_CURENT = os.getenv("AN_PROCESAT")
 if not AN_CURENT:
     print("❌ EROARE CRITICĂ: Variabila de mediu 'AN_PROCESAT' nu este setată!")
     sys.exit(1)
@@ -25,10 +26,6 @@ def obtine_drive():
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 def descarca_si_salveaza_simple():
-    if not TARGET_FOLDER_ID:
-        print("❌ EROARE: DRIVE_FOLDER_PDF nu este setat!")
-        sys.exit(1)
-
     service = obtine_drive()
     nume_registru = f"status_{AN_CURENT}.csv"
     
@@ -44,19 +41,15 @@ def descarca_si_salveaza_simple():
 
     if existente:
         file_id_registru = existente[0]["id"]
-        
-        # Descarcă conținutul CSV direct ca flux de bytes în memorie
         request = service.files().get_media(fileId=file_id_registru)
         continut_bytes = request.execute()
         
-        # Citire directă din memorie cu TextIOWrapper fără scriere pe disk
         fh = io.BytesIO(continut_bytes)
         wrapper = io.TextIOWrapper(fh, encoding='utf-8')
         reader = csv.DictReader(wrapper)
         
         for row in reader:
             randuri_registru.append(row)
-            # Dacă are status descarcat și NU are sufix, îl marcăm ca procesat
             if row.get("status") == "descarcat" and not row.get("sufix"):
                 randuri_registru_nr = row.get("numar_baza")
                 if randuri_registru_nr:
@@ -75,10 +68,9 @@ def descarca_si_salveaza_simple():
         print(f"⏳ Descarcă {nume_pdf}...")
         try:
             res = requests.get(url, timeout=30)
-            if res.status_code == 200 and len(res.content) > 2000: # Ignorăm paginile de eroare mici
+            if res.status_code == 200 and len(res.content) > 2000:
                 size_kb = round(len(res.content) / 1024, 1)
                 
-                # Încărcare directă prin fișier temporar
                 cale_pdf_temp = f"temp_{nume_pdf}"
                 with open(cale_pdf_temp, "wb") as f_pdf:
                     f_pdf.write(res.content)
@@ -90,7 +82,6 @@ def descarca_si_salveaza_simple():
                 ).execute()
                 os.remove(cale_pdf_temp)
                 
-                # Adăugăm în structura de registru noua linie
                 randuri_registru.append({
                     "numar_baza": str(nr),
                     "sufix": "",
