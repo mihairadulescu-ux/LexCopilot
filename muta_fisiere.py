@@ -1,11 +1,13 @@
 import os
+import sys
 import json
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
-# Citim ID-urile direct din variabilele GitHub și din secrets
-ORIGIN_FOLDER_ID = "1c8SEo8UrQVe6qgzPFGLXJFiMyLeI-r8D"  # Folderul vechi (surse PDF brute)
-TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_PDF")        # Noul tău Shared Drive definit în GitHub Variables
+# Folderul vechi (Personal Drive / Folder sursă)
+ORIGIN_FOLDER_ID = "1c8SEo8UrQVe6qgzPFGLXJFiMyLeI-r8D"  
+# Noul tău Shared Drive (preluat din GitHub Variables)
+TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_PDF")        
 
 def obtine_drive():
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
@@ -16,55 +18,67 @@ def obtine_drive():
 
 def muta_tot():
     if not TARGET_FOLDER_ID:
-        print("❌ Eroare: Nu s-a găsit variabila DRIVE_FOLDER_PDF în setările GitHub!")
-        return
+        print("❌ EROARE CRITICĂ: DRIVE_FOLDER_PDF nu este setat în GitHub Variables!")
+        sys.exit(1)
 
-    print(f"🔄 Se pregătește mutarea fișierelor...")
-    print(f"📂 Din folderul vechi: {ORIGIN_FOLDER_ID}")
-    print(f"📂 În noul Shared Drive: {TARGET_FOLDER_ID}")
+    print(f"🔄 Se pregătește mutarea fișierelor direct pe serverele Google...")
+    print(f"📂 Din folderul sursă: {ORIGIN_FOLDER_ID}")
+    print(f"📂 În noul Shared Drive de destinație: {TARGET_FOLDER_ID}")
 
     service = obtine_drive()
     page_token = None
     mutat_count = 0
     
+    # Query compatibil Shared Drive: căutăm fișierele din folderul vechi
+    query = f"'{ORIGIN_FOLDER_ID}' in parents and trashed = false"
+    
     while True:
-        # Căutăm fișierele din folderul vechi
-        query = f"'{ORIGIN_FOLDER_ID}' in parents and trashed = false"
+        # Folosim toți parametrii obligatorii pentru Google Shared Drives
         response = service.files().list(
             q=query, 
             fields="nextPageToken, files(id, name)", 
             pageToken=page_token, 
             pageSize=100,
             supportsAllDrives=True, 
-            includeItemsFromAllDrives=True
+            includeItemsFromAllDrives=True,
+            corpora="drive",
+            driveId=TARGET_FOLDER_ID
         ).execute()
         
         files = response.get("files", [])
         if not files:
+            print("ℹ️ Nu s-au mai găsit fișiere de mutat în acest segment.")
             break
             
         for f in files:
             file_id = f["id"]
             name = f["name"]
             try:
-                # Mutarea se face instantaneu pe serverele Google prin API update
+                # Mutarea se face instataneu pe serverele Google (metadate)
                 service.files().update(
                     fileId=file_id,
                     addParents=TARGET_FOLDER_ID,
                     removeParents=ORIGIN_FOLDER_ID,
                     fields="id, parents",
-                    supportsAllDrives=True
+                    supportsAllDrives=True  # OBLIGATORIU pentru Shared Drive
                 ).execute()
-                print(f"✅ Mutat cu succes: {name}", flush=True)
+                
                 mutat_count += 1
+                if mutat_count % 100 == 0:
+                    print(f"✅ [Progres] Am mutat {mutat_count} fișiere... (Ultimul: {name})", flush=True)
+                else:
+                    # Log simplu ca să nu umplem consola GitHub Actions inutil
+                    print(f"✅ Mutat: {name}", flush=True)
+                    
             except Exception as e:
-                print(f"❌ Eroare la mutarea {name}: {e}", flush=True)
+                print(f"❌ Eroare la mutarea fișierului {name}: {e}", flush=True)
                 
         page_token = response.get("nextPageToken", None)
         if not page_token:
             break
 
-    print(f"\n🎉 Operațiune finalizată! Total fișiere mutate pe serverele Google: {mutat_count}")
+    print(f"\n🎉 OPERAȚIUNE FINALIZATĂ CU SUCCES!")
+    print(f"📊 Total fișiere mutate nativ între unitățile de stocare: {mutat_count}")
 
 if __name__ == "__main__":
     muta_tot()
