@@ -9,7 +9,10 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_PDF")
-AN_CURENT = os.getenv("AN_PROCESAT", "2026")
+AN_CURENT = os.getenv("AN_PROCESAT")
+if not AN_CURENT:
+    print("❌ EROARE CRITICĂ: Variabila de mediu 'AN_PROCESAT' nu este setată!")
+    sys.exit(1)
 URL_TEMPLATE = "https://www.monitoruloficial.ro/emonitor/PDF_baza.php?an={an}&numar={numar}"
 
 def obtine_drive():
