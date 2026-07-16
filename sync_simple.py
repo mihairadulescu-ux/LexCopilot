@@ -6,7 +6,7 @@ import io
 import time
 import random
 import ssl
-import httpx
+import urllib3
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -32,11 +32,13 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0"
 ]
 
-def creeaza_context_ssl_compatibil():
+def creeaza_pool_manager_compatibil():
+    """Creează un PoolManager urllib3 tolerant pentru servere cu SSL defect/vechi."""
     context = ssl.create_default_context()
     context.options |= ssl.OP_LEGACY_SERVER_CONNECT
     context.set_ciphers('DEFAULT@SECLEVEL=1')
-    return context
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    return urllib3.PoolManager(ssl_context=context, timeout=120.0, retries=False)
 
 def obtine_drive():
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
@@ -45,7 +47,7 @@ def obtine_drive():
     creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
-def verifica_existenta_pe_server(nr, ssl_context, timeout_resilient):
+def verifica_existenta_pe_server(nr, http_pool):
     """Verifică rapid dacă un număr returnează PDF valid (True) sau 404/altceva (False)."""
     url = URL_TEMPLATE.format(numar=nr, an=AN_CURENT)
     headers = {
@@ -53,18 +55,19 @@ def verifica_existenta_pe_server(nr, ssl_context, timeout_resilient):
         "Referer": "https://monitoruloficial.ro/e-monitor/"
     }
     try:
-        with httpx.Client(headers=headers, timeout=timeout_resilient, verify=ssl_context, follow_redirects=True) as client:
-            with client.stream("GET", url) as response:
-                if response.status_code == 200:
-                    content_type = response.headers.get("Content-Type", "").lower()
-                    if "application/pdf" in content_type:
-                        return True
+        response = http_pool.request("GET", url, headers=headers, preload_content=False)
+        status = response.status
+        content_type = response.headers.get("Content-Type", "").lower()
+        response.release_conn()
+        
+        if status == 200 and "application/pdf" in content_type:
+            return True
     except Exception:
         pass
     return False
 
-def incearca_descarcare_numar(nr, service, ssl_context, timeout_resilient, randuri_registru):
-    """Descarcă efectiv numărul și îl urcă în Google Drive."""
+def incearca_descarcare_numar(nr, service, http_pool, randuri_registru):
+    """Descarcă efectiv numărul folosind urllib3 și îl urcă în Google Drive."""
     nume_pdf = f"MO_PI_{AN_CURENT}_{nr}.pdf"
     url = URL_TEMPLATE.format(numar=nr, an=AN_CURENT)
     cale_pdf_temp = f"temp_{nume_pdf}"
@@ -76,15 +79,17 @@ def incearca_descarcare_numar(nr, service, ssl_context, timeout_resilient, randu
     }
     
     try:
-        with httpx.Client(headers=headers, timeout=timeout_resilient, verify=ssl_context, follow_redirects=True) as client:
-            with client.stream("GET", url) as response:
-                if response.status_code == 200:
-                    content_type = response.headers.get("Content-Type", "").lower()
-                    if "application/pdf" in content_type:
-                        with open(cale_pdf_temp, "wb") as f_pdf:
-                            for chunk in response.iter_bytes(chunk_size=131072):
-                                f_pdf.write(chunk)
-                        descarcat_ok = True
+        response = http_pool.request("GET", url, headers=headers, preload_content=False)
+        
+        if response.status == 200:
+            content_type = response.headers.get("Content-Type", "").lower()
+            if "application/pdf" in content_type:
+                with open(cale_pdf_temp, "wb") as f_pdf:
+                    for chunk in response.stream(131072):
+                        f_pdf.write(chunk)
+                descarcat_ok = True
+                
+        response.release_conn()
                 
         if descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) > 2000:
             marime_bytes = os.path.getsize(cale_pdf_temp)
@@ -157,8 +162,7 @@ def descarca_si_salveaza_simple():
     
     print(f"📊 Anul {AN_CURENT}: {len(fisiere_descarcate)} numere simple mapate deja în registru.")
 
-    timeout_resilient = httpx.Timeout(timeout=120.0, connect=20.0, read=120.0)
-    ssl_context = creeaza_context_ssl_compatibil()
+    http_pool = creeaza_pool_manager_compatibil()
     download_counter = 0
     
     # ======================================================================
@@ -169,19 +173,19 @@ def descarca_si_salveaza_simple():
     
     print(f"🕵️ Pornește rutina de stabilire a capătului pentru anul {AN_CURENT}...")
     
-    exista_la_start = verifica_existenta_pe_server(punct_start, ssl_context, timeout_resilient)
+    exista_la_start = verifica_existenta_pe_server(punct_start, http_pool)
     
     if exista_la_start:
-        print(f"⚠️ {YELLOW}Caz extrem: S-a detectat PDF active la {punct_start}! Căutăm limita în sus...{RESET}")
+        print(f"⚠️ {YELLOW}Caz extrem: S-a detectat PDF activ la {punct_start}! Căutăm limita în sus...{RESET}")
         urmatorul = punct_start
         while True:
             urmatorul += 10
-            time.sleep(random.uniform(0.5, 1.0))
+            time.sleep(1.0)  # Pauza fixă solicitată de 1 secundă
             print(f"   -> Verificăm la salt superior: {urmatorul}...")
-            if not verifica_existenta_pe_server(urmatorul, ssl_context, timeout_resilient):
+            if not verifica_existenta_pe_server(urmatorul, http_pool):
                 for peak_candidate in range(urmatorul, urmatorul - 10, -1):
-                    time.sleep(random.uniform(0.5, 1.0))
-                    if verifica_existenta_pe_server(peak_candidate, ssl_context, timeout_resilient):
+                    time.sleep(1.0)  # Pauza fixă solicitată de 1 secundă
+                    if verifica_existenta_pe_server(peak_candidate, http_pool):
                         vârf_detectat = peak_candidate
                         break
                 break
@@ -193,12 +197,12 @@ def descarca_si_salveaza_simple():
                 print(f"🎯 Am intersectat registrul existent la numărul {nr}.")
                 break
                 
-            time.sleep(random.uniform(0.5, 1.0))
+            time.sleep(1.0)  # Pauza fixă solicitată de 1 secundă
             print(f"   -> Verificăm la salt inferior: {nr}...")
-            if verifica_existenta_pe_server(nr, ssl_context, timeout_resilient):
+            if verifica_existenta_pe_server(nr, http_pool):
                 for peak_candidate in range(nr, nr + 10):
-                    time.sleep(random.uniform(0.5, 1.0))
-                    if not verifica_existenta_pe_server(peak_candidate, ssl_context, timeout_resilient):
+                    time.sleep(1.0)  # Pauza fixă solicitată de 1 secundă
+                    if not verifica_existenta_pe_server(peak_candidate, http_pool):
                         vârf_detectat = peak_candidate - 1
                         break
                 break
@@ -218,10 +222,10 @@ def descarca_si_salveaza_simple():
         if nr in fisiere_descarcate:
             continue
             
-        time.sleep(random.uniform(1.0, 2.0))
+        time.sleep(1.0)  # Pauza fixă solicitată de 1 secundă între numere
         print(f"⏳ Descarcă {nr}...")
         
-        exista = incearca_descarcare_numar(nr, service, ssl_context, timeout_resilient, randuri_registru)
+        exista = incearca_descarcare_numar(nr, service, http_pool, randuri_registru)
         if exista:
             download_counter += 1
             if download_counter % 40 == 0:
@@ -235,6 +239,8 @@ def descarca_si_salveaza_simple():
                 "dimensiune_kb": "0",
                 "drive_file_id": ""
             })
+
+    http_pool.clear()
 
     # Sortare și salvare registru în Drive
     randuri_registru.sort(key=lambda x: (int(x["numar_baza"]), x.get("sufix", "")))
