@@ -27,7 +27,6 @@ if not AN_CURENT:
 URL_TEMPLATE = "https://monitoruloficial.ro/Monitorul-Oficial--PI--{numar}--{an}.html"
 SUFIXE_TEST = ["Bis", "Tris", "Quatro", "S"]
 
-# Numărul maxim de rulări separate în care mai încercăm să descărcăm un fișier care a dat eroare de rețea
 MAX_RETRIES_DISTRIBUTED = 3
 
 USER_AGENTS = [
@@ -49,13 +48,10 @@ def obtine_drive():
     creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
-def incearca_descarcare_sufix(nr, sfx, service, session, ssl_context, timeout_resilient, randuri_registru):
+def incearca_descarcare_sufix(nr, sfx, service, ssl_context, timeout_resilient, randuri_registru):
     """
     Încearcă descarcarea.
-    Returnează:
-      - "OK" dacă s-a descărcat cu succes.
-      - "404" dacă serverul a răspuns explicit cu 404 (inexistent).
-      - "ERROR" dacă a apărut o eroare de rețea/SSL (pentru retry distribuit).
+    Returnează: "OK", "404" sau "ERROR"
     """
     numar_url = f"{nr}{sfx}"
     nume_pdf = f"MO_PI_{AN_CURENT}_{nr}{sfx}.pdf"
@@ -70,16 +66,17 @@ def incearca_descarcare_sufix(nr, sfx, service, session, ssl_context, timeout_re
     }
     
     try:
-        with session.stream("GET", url, headers=headers, timeout=timeout_resilient, verify=ssl_context, follow_redirects=True) as response:
-            if response.status_code == 200:
-                content_type = response.headers.get("Content-Type", "").lower()
-                if "application/pdf" in content_type:
-                    with open(cale_pdf_temp, "wb") as f_pdf:
-                        for chunk in response.iter_bytes(chunk_size=131072):
-                            f_pdf.write(chunk)
-                    descarcat_ok = True
-            elif response.status_code == 404:
-                status_serviciu = "404"
+        with httpx.Client(headers=headers, timeout=timeout_resilient, verify=ssl_context, follow_redirects=True) as client:
+            with client.stream("GET", url) as response:
+                if response.status_code == 200:
+                    content_type = response.headers.get("Content-Type", "").lower()
+                    if "application/pdf" in content_type:
+                        with open(cale_pdf_temp, "wb") as f_pdf:
+                            for chunk in response.iter_bytes(chunk_size=131072):
+                                f_pdf.write(chunk)
+                        descarcat_ok = True
+                elif response.status_code == 404:
+                    status_serviciu = "404"
                 
         if descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) > 2000:
             marime_bytes = os.path.getsize(cale_pdf_temp)
@@ -92,7 +89,6 @@ def incearca_descarcare_sufix(nr, sfx, service, session, ssl_context, timeout_re
             ).execute()
             os.remove(cale_pdf_temp)
             
-            # Actualizăm în registru
             existente_in_lista = [r for r in randuri_registru if r["numar_baza"] == str(nr) and r["sufix"] == sfx]
             if existente_in_lista:
                 existente_in_lista[0].update({
@@ -117,7 +113,7 @@ def incearca_descarcare_sufix(nr, sfx, service, session, ssl_context, timeout_re
             return "OK"
             
     except Exception as e:
-        print(f"   {RED}⚠️ Eroare rețea/SSL la verificarea numărului {nr}{sfx}: {e}{RESET}")
+        print(f"   {RED}⚠️ Eroare la verificarea numărului {nr}{sfx}: {e}{RESET}")
         if os.path.exists(cale_pdf_temp):
             os.remove(cale_pdf_temp)
         return "ERROR"
@@ -125,10 +121,6 @@ def incearca_descarcare_sufix(nr, sfx, service, session, ssl_context, timeout_re
     return status_serviciu
 
 def gestioneaza_status_esec(nr, sfx, status_curent, randuri_registru):
-    """
-    Calculează și actualizează în registru noul status de eșec.
-    Dacă se depășește numărul maxim de încercări, marchează fișierul ca 'inexistent'.
-    """
     incercare_noua = 1
     if status_curent and status_curent.startswith("esec_"):
         try:
@@ -142,7 +134,7 @@ def gestioneaza_status_esec(nr, sfx, status_curent, randuri_registru):
         print(f"   ❌ [SUFIX] S-au atins cele {MAX_RETRIES_DISTRIBUTED} încercări consecutive de rețea pentru {nr}{sfx}. Marcat definitiv ca inexistent.")
         nou_status = "inexistent"
     else:
-        print(f"   🕒 [SUFIX] Înregistrat eșec temporar de rețea pentru {nr}{sfx} (Încercarea {incercare_noua}/{MAX_RETRIES_DISTRIBUTED}). Va fi reîncercat la rularea următoare.")
+        print(f"   🕒 [SUFIX] Înregistrat eșec temporar de rețea pentru {nr}{sfx} (Încercarea {incercare_noua}/{MAX_RETRIES_DISTRIBUTED}).")
         nou_status = f"esec_{incercare_noua}"
 
     if existente_in_lista:
@@ -170,7 +162,7 @@ def descarca_si_salveaza_sufixe():
     ).execute().get("files", [])
     
     randuri_registru = []
-    statusuri_existente = {} # Harta combinatiilor (nr, sfx) -> status
+    statusuri_existente = {}
     numere_baza_existente = []
     file_id_registru = None
 
@@ -205,20 +197,16 @@ def descarca_si_salveaza_sufixe():
     ssl_context = creeaza_context_ssl_compatibil()
     download_counter = 0
     
-    session = httpx.Client()
-    
     for nr in range(vârf_sufixe, 0, -1):
         
         # ------------------------------------------------------------------
-        # 1. Verificare SUPLIMENT (S) - complet independent
+        # 1. Verificare SUPLIMENT (S) - independent
         # ------------------------------------------------------------------
         status_s = statusuri_existente.get((nr, "S"), "")
-        
-        # Încercăm descărcarea doar dacă nu a fost descărcat deja sau dacă nu a fost declarat definitiv inexistent
         if status_s not in ["descarcat", "inexistent"]:
             time.sleep(random.uniform(0.8, 1.5))
             print(f"⏳ Verifică sufix independent {nr}S...")
-            rezultat_s = incearca_descarcare_sufix(nr, "S", service, session, ssl_context, timeout_resilient, randuri_registru)
+            rezultat_s = incearca_descarcare_sufix(nr, "S", service, ssl_context, timeout_resilient, randuri_registru)
             
             if rezultat_s == "OK":
                 download_counter += 1
@@ -226,21 +214,17 @@ def descarca_si_salveaza_sufixe():
                     print(f"\n{YELLOW}☕ [Pauză inteligentă] Am descărcat {download_counter} sufixe. Pauză de 5 minute (300s)...{RESET}\n")
                     time.sleep(300)
             elif rezultat_s == "404":
-                # Dacă a întors clar 404, îl marcăm direct ca inexistent
                 existente_in_lista = [r for r in randuri_registru if r["numar_baza"] == str(nr) and r["sufix"] == "S"]
                 if existente_in_lista:
                     existente_in_lista[0].update({"status": "inexistent", "dimensiune_kb": "0", "drive_file_id": ""})
                 else:
                     randuri_registru.append({"numar_baza": str(nr), "sufix": "S", "status": "inexistent", "dimensiune_kb": "0", "drive_file_id": ""})
             elif rezultat_s == "ERROR":
-                # Eroare de rețea: aplicăm mecanismul de retry distribuit
                 gestioneaza_status_esec(nr, "S", status_s, randuri_registru)
 
         # ------------------------------------------------------------------
         # 2. Lanțul Ierarhic: Bis -> Tris -> Quatro
         # ------------------------------------------------------------------
-        
-        # --- PASUL A: Verificăm sau determinăm starea lui 'Bis' ---
         status_bis = statusuri_existente.get((nr, "Bis"), "")
         bis_exists = False
         bis_has_network_error = False
@@ -250,10 +234,9 @@ def descarca_si_salveaza_sufixe():
         elif status_bis == "inexistent":
             bis_exists = False
         else:
-            # Dacă nu este nici descărcat, nici declarat inexistent (fie e nou, fie e în starea 'esec_X')
             time.sleep(random.uniform(1.0, 2.0))
             print(f"⏳ Verifică sufix {nr}Bis...")
-            rezultat_bis = incearca_descarcare_sufix(nr, "Bis", service, session, ssl_context, timeout_resilient, randuri_registru)
+            rezultat_bis = incearca_descarcare_sufix(nr, "Bis", service, ssl_context, timeout_resilient, randuri_registru)
             
             if rezultat_bis == "OK":
                 bis_exists = True
@@ -272,7 +255,6 @@ def descarca_si_salveaza_sufixe():
                 bis_has_network_error = True
                 gestioneaza_status_esec(nr, "Bis", status_bis, randuri_registru)
 
-        # --- PASUL B: Verificăm sau determinăm starea lui 'Tris' (doar dacă Bis există) ---
         tris_exists = False
         tris_has_network_error = False
         
@@ -285,7 +267,7 @@ def descarca_si_salveaza_sufixe():
             else:
                 time.sleep(random.uniform(1.0, 2.0))
                 print(f"⏳ Verifică sufix {nr}Tris...")
-                rezultat_tris = incearca_descarcare_sufix(nr, "Tris", service, session, ssl_context, timeout_resilient, randuri_registru)
+                rezultat_tris = incearca_descarcare_sufix(nr, "Tris", service, ssl_context, timeout_resilient, randuri_registru)
                 
                 if rezultat_tris == "OK":
                     tris_exists = True
@@ -304,22 +286,19 @@ def descarca_si_salveaza_sufixe():
                     tris_has_network_error = True
                     gestioneaza_status_esec(nr, "Tris", status_tris, randuri_registru)
         else:
-            # Dacă Bis nu există definitiv, marcam Tris și Quatro ca inexistente (scutind cereri)
-            # EXCEPȚIE: Dacă Bis a dat eroare de rețea, NU le marcăm încă ca inexistente, le lăsăm în așteptare pentru rularea următoare.
             if not bis_has_network_error:
                 for sfx in ["Tris", "Quatro"]:
                     if (nr, sfx) not in statusuri_existente:
                         randuri_registru.append({"numar_baza": str(nr), "sufix": sfx, "status": "inexistent", "dimensiune_kb": "0", "drive_file_id": ""})
 
-        # --- PASUL C: Verificăm sau determinăm starea lui 'Quatro' (doar dacă Tris există) ---
         if tris_exists:
             status_quatro = statusuri_existente.get((nr, "Quatro"), "")
             if status_quatro not in ["descarcat", "inexistent"]:
                 time.sleep(random.uniform(1.0, 2.0))
                 print(f"⏳ Verifică sufix {nr}Quatro...")
-                rezultat_quatro = incearca_descarcare_sufix(nr, "Quatro", service, session, ssl_context, timeout_resilient, randuri_registru)
+                rezultat_quatro = incearca_descarcare_sufix(nr, "Quatro", service, ssl_context, timeout_resilient, randuri_registru)
                 
-                if resultado_quatro == "OK":
+                if rezultat_quatro == "OK":
                     download_counter += 1
                     if download_counter % 40 == 0:
                         print(f"\n{YELLOW}☕ [Pauză inteligentă] Am descărcat {download_counter} sufixe. Pauză de 5 minute (300s)...{RESET}\n")
@@ -333,14 +312,11 @@ def descarca_si_salveaza_sufixe():
                 elif rezultat_quatro == "ERROR":
                     gestioneaza_status_esec(nr, "Quatro", status_quatro, randuri_registru)
         else:
-            # Dacă Tris nu există definitiv și nu a fost eroare de rețea la Tris sau Bis, marcăm Quatro ca inexistent
             if not bis_has_network_error and not tris_has_network_error:
                 if (nr, "Quatro") not in statusuri_existente:
                     randuri_registru.append({"numar_baza": str(nr), "sufix": "Quatro", "status": "inexistent", "dimensiune_kb": "0", "drive_file_id": ""})
 
-    session.close()
-
-    # Sortare și salvare registru în Google Drive
+    # Sortare și salvare registru
     randuri_registru.sort(key=lambda x: (int(x["numar_baza"]), x.get("sufix", "")))
     cale_reg_scrie = f"temp_scrie_{nume_registru}"
     
