@@ -8,7 +8,7 @@ jobs:
     name: "Descarcă Sufixe - Anul ${{ matrix.an }}"
     runs-on: ubuntu-latest
     strategy:
-      max-parallel: 2 # Rulăm maximum 2 ani simultan
+      max-parallel: 5 # Rulăm maximum 5 ani simultan
       matrix:
         an: [
           "2000", "2001", "2002", "2003", "2004", 
