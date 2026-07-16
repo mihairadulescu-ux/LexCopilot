@@ -81,14 +81,22 @@ def descarca_monitoare():
             modificari = False
             rows_dict = {int(r["numar"]): r for r in rows}
             
+            # Găsim ultimul număr cu adevărat procesat din istoric
             ultimul_numar_procesat = 0
             for n in range(1500, 0, -1):
-                if int(rows_dict[n]["simplu"]) in [15, 20]:
+                if int(rows_dict[n]["simplu"]) in [10, 15, 20]:
                     ultimul_numar_procesat = n
                     break
             
-            limita_maxima_interogare = 1500 if an == AN_CURENT else ultimul_numar_procesat
-            print(f"📊 Limită scanare stabilită pentru {an}: 1 ➔ {limita_maxima_interogare}")
+            # Pentru anul curent, limităm interogarea la cel mult 10 numere peste ultimul monitor valid cunoscut.
+            # Pentru anii trecuți, limita este strict ultimul număr din registru.
+            if an == AN_CURENT:
+                limita_maxima_interogare = min(1500, max(1, ultimul_numar_procesat) + 10)
+                print(f"📊 [An curent] Ultimul cunoscut: {ultimul_numar_procesat}. Căutăm monitoare noi în zona: 1 ➔ {limita_maxima_interogare}")
+            else:
+                limita_maxima_interogare = ultimul_numar_procesat
+                print(f"📊 [An istoric] Scanare fixă pe zona existentă: 1 ➔ {limita_maxima_interogare}")
+            
             eroare_consecutiva_404 = 0
             
             for numar in range(1, limita_maxima_interogare + 1):
@@ -103,6 +111,7 @@ def descarca_monitoare():
                     eroare_consecutiva_404 = 0
                     continue
                 if stare_simpla == 10:
+                    # Propagăm automat starea inexistentă
                     for col in ["bis", "tris", "quatro", "s"]:
                         if row[col] != "10":
                             row[col] = "10"
@@ -131,9 +140,10 @@ def descarca_monitoare():
                             stare_noua = stare_simpla + 1
                             row["simplu"] = str(stare_noua)
                             modificari = True
-                            if r.status_code == 404 or len(r.content) <= 1000:
-                                eroare_consecutiva_404 += 1
-                            print(f"   ⚠️ Eșec. Stare nouă pentru {nume_pdf}: {stare_noua}")
+                            
+                            # Incrementare contor erori consecutive garantată pentru orice tip de eșec sau redirecționare
+                            eroare_consecutiva_404 += 1
+                            print(f"   ⚠️ Eșec (HTTP {r.status_code}). Stare nouă pentru {nume_pdf}: {stare_noua}")
                             
                             if stare_noua == 5:
                                 row["simplu"] = "15"
@@ -150,9 +160,10 @@ def descarca_monitoare():
                                 print(f"   🛑 Promovat la 15 (FAILED): {nume_failed}")
                         time.sleep(random.uniform(0.1, 0.3))
                     except Exception as e:
-                        print(f"   ❌ Eroare rețea la {nume_pdf}: {e}")
+                        print(f"   ❌ Eroare rețea/conexiune la {nume_pdf}: {e}")
                         row["simplu"] = str(stare_simpla + 1)
                         modificari = True
+                        eroare_consecutiva_404 += 1  # Incrementăm și pe problemele de conexiune fizică
                         time.sleep(2.0)
             if modificari:
                 salveaza_csv_in_drive(service, file_id, nume_csv, list(rows_dict.values()))
