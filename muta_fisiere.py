@@ -25,60 +25,63 @@ def muta_tot():
     print(f"📂 Din folderul sursă: {ORIGIN_FOLDER_ID}")
     print(f"📂 În noul Shared Drive de destinație: {TARGET_FOLDER_ID}")
 
-    service = obtine_drive()
-    page_token = None
-    mutat_count = 0
-    
-    # Query compatibil Shared Drive: căutăm fișierele din folderul vechi
-    query = f"'{ORIGIN_FOLDER_ID}' in parents and trashed = false"
-    
-    while True:
-        # Folosim toți parametrii obligatorii pentru Google Shared Drives
-        response = service.files().list(
-            q=query, 
-            fields="nextPageToken, files(id, name)", 
-            pageToken=page_token, 
-            pageSize=100,
-            supportsAllDrives=True, 
-            includeItemsFromAllDrives=True,
-            corpora="drive",
-            driveId=TARGET_FOLDER_ID
-        ).execute()
+    try:
+        service = obtine_drive()
+        page_token = None
+        mutat_count = 0
         
-        files = response.get("files", [])
-        if not files:
-            print("ℹ️ Nu s-au mai găsit fișiere de mutat în acest segment.")
-            break
+        # Query: căutăm fișierele din folderul vechi
+        query = f"'{ORIGIN_FOLDER_ID}' in parents and trashed = false"
+        
+        while True:
+            # Schimbat corpora="user" pentru a putea scana folderul sursă aflat în afara noului Shared Drive
+            response = service.files().list(
+                q=query, 
+                fields="nextPageToken, files(id, name)", 
+                pageToken=page_token, 
+                pageSize=100,
+                supportsAllDrives=True, 
+                includeItemsFromAllDrives=True,
+                corpora="user"
+            ).execute()
             
-        for f in files:
-            file_id = f["id"]
-            name = f["name"]
-            try:
-                # Mutarea se face instataneu pe serverele Google (metadate)
-                service.files().update(
-                    fileId=file_id,
-                    addParents=TARGET_FOLDER_ID,
-                    removeParents=ORIGIN_FOLDER_ID,
-                    fields="id, parents",
-                    supportsAllDrives=True  # OBLIGATORIU pentru Shared Drive
-                ).execute()
+            files = response.get("files", [])
+            if not files:
+                print("ℹ️ Nu s-au mai găsit fișiere de mutat în folderul sursă.")
+                break
                 
-                mutat_count += 1
-                if mutat_count % 100 == 0:
-                    print(f"✅ [Progres] Am mutat {mutat_count} fișiere... (Ultimul: {name})", flush=True)
-                else:
-                    # Log simplu ca să nu umplem consola GitHub Actions inutil
-                    print(f"✅ Mutat: {name}", flush=True)
+            for f in files:
+                file_id = f["id"]
+                name = f["name"]
+                try:
+                    # Mutarea se face instataneu pe serverele Google (metadate)
+                    service.files().update(
+                        fileId=file_id,
+                        addParents=TARGET_FOLDER_ID,
+                        removeParents=ORIGIN_FOLDER_ID,
+                        fields="id, parents",
+                        supportsAllDrives=True  # OBLIGATORIU pentru Shared Drive
+                    ).execute()
                     
-            except Exception as e:
-                print(f"❌ Eroare la mutarea fișierului {name}: {e}", flush=True)
-                
-        page_token = response.get("nextPageToken", None)
-        if not page_token:
-            break
+                    mutat_count += 1
+                    if mutat_count % 100 == 0:
+                        print(f"✅ [Progres] Am mutat {mutat_count} fișiere... (Ultimul: {name})", flush=True)
+                    else:
+                        print(f"✅ Mutat: {name}", flush=True)
+                        
+                except Exception as e:
+                    print(f"❌ Eroare la mutarea fișierului {name}: {e}", flush=True)
+                    
+            page_token = response.get("nextPageToken", None)
+            if not page_token:
+                break
 
-    print(f"\n🎉 OPERAȚIUNE FINALIZATĂ CU SUCCES!")
-    print(f"📊 Total fișiere mutate nativ între unitățile de stocare: {mutat_count}")
+        print(f"\n🎉 OPERAȚIUNE FINALIZATĂ!")
+        print(f"📊 Total fișiere mutate: {mutat_count}")
+
+    except Exception as e:
+        print(f"🛑 Eroare generală la execuție API: {e}", flush=True)
+        sys.exit(1)
 
 if __name__ == "__main__":
     muta_tot()
