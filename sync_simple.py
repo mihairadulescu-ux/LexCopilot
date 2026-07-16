@@ -56,7 +56,6 @@ def curata_si_sorteaza_randuri(randuri):
         if nr_str is not None and str(nr_str).strip() != "":
             randuri_valide.append(r)
             
-    # Sortare sigură: dacă conversia la int eșuează dintr-un motiv bizar, folosim 0
     def cheie_sortare(x):
         try:
             return (int(x.get("numar_baza", 0)), x.get("sufix", ""))
@@ -124,7 +123,6 @@ def descarca_si_salveaza_simple():
                     if randuri_registru_nr:
                         fisiere_descarcate.add(int(randuri_registru_nr))
     else:
-        # Inițializăm un fișier gol și obținem ID-ul lui
         print(f"📝 Registrul {nume_registru} nu există în Drive. Îl inițializăm acum...")
         file_id_registru = salveaza_registru_in_drive(service, None, nume_registru, [])
     
@@ -141,7 +139,6 @@ def descarca_si_salveaza_simple():
             continue
             
         nume_pdf = f"MO_PI_{AN_CURENT}_{nr}.pdf"
-        url = URL_TEMPLATE.format(numar=nr,安=AN_CURENT) # Corectat placeholder-ul url
         url = URL_TEMPLATE.format(numar=nr, an=AN_CURENT)
         
         # 1 secundă pauză de siguranță
@@ -171,7 +168,7 @@ def descarca_si_salveaza_simple():
                                     f_pdf.write(chunk)
                             descarcat_ok = True
                         else:
-                            print(f"   ✗ Endpoint-ul a întors HTML în loc de PDF la numărul {nr}.")
+                            print(f"   ✗ Endpoint-ul a întors HTML în loc de PDF la numărul {nr.")
             
             if descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) > 2000:
                 marime_bytes = os.path.getsize(cale_pdf_temp)
