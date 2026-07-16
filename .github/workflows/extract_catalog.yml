@@ -22,14 +22,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install lxml google-api-python-client google-auth
 
-      - name: Rulează Resetare Registre (One-Time)
-        env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_PDF: ${{ secrets.DRIVE_FOLDER_PDF }}
-          PYTHONUNBUFFERED: "1"
-        run: |
-          python -u reset_registre.py
-
       - name: Rulează Extracția Catalogului
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
