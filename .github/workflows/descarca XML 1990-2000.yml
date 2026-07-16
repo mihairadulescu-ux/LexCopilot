@@ -1,4 +1,4 @@
-name: "Descărcare Legislație Paralelă XML"
+name: "Descărcare Legislație Paralelă XML 1990-1999"
 
 on:
   workflow_dispatch: # Pornire manuală din GitHub Actions
