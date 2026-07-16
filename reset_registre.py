@@ -7,7 +7,7 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
-TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_PDF")
+TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_PDF", "1gRh-rWe32RNJU2PmN67XoFvkaCSotTA1")
 # Resetăm toți anii din intervalul de producție
 YEARS_TO_RESET = list(range(2000, 2027)) 
 
