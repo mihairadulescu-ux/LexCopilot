@@ -1,7 +1,7 @@
 name: "Actualizare Registre și Curățare PDF"
 
 on:
-  workflow_dispatch: # Pornire manuală la buton din interfața Actions
+  workflow_dispatch:
 
 jobs:
   reset_pdf:
@@ -25,7 +25,6 @@ jobs:
       - name: Executare Script Curățare și Resetare
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_PDF: ${{ secrets.DRIVE_FOLDER_PDF }}
           PYTHONUNBUFFERED: "1"
         run: |
           python -u reset_registre.py
