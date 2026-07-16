@@ -1,0 +1,26 @@
+name: "One-Off: Generare Registre Stare CSV"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build_registry:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configurare Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Instalare dependente
+        run: |
+          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
+
+      - name: Rulare generator registre din sursa veche
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DRIVE_FOLDER_PDF: ${{ vars.DRIVE_FOLDER_PDF }}
+        run: python genereaza_registre_din_sursa.py
