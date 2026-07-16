@@ -125,14 +125,12 @@ def parcurge_si_extrage():
                         
                     if tag_simplu in ["emitent", "autor", "institutie"]:
                         act_data["emitent"] = text.upper()
-                    elif tag_simplu in ["tip", "tip_act", "categorie_act", "categorie"]:
-                        act_data["tip_act"] = text.upper()
-                    elif tag_simplu in ["titlu", "nume", "nume_act", "subiect"]:
-                        act_data["titlu_act"] = text
-                    elif tag_simplu in ["numar", "numar_act", "nr"]:
-                        act_data["numar_act"] = text
                     elif tag_simplu in ["an", "an_act", "data", "data_act", "data_emitere"]:
                         an_m = re.search(r"\b(19\d{2}|20[0-2]\d)\b", text)
+                        if an_m:
+                            act_data["an_act"] = an_m.group(1)
+                        else:
+                            act_data["an_act"] = text
                         if_an_m = an_m.group(1) if_an_m := an_m else None
                         if if_an_m:
                             act_data["an_act"] = if_an_m.group(1)
