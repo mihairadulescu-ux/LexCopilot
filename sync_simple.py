@@ -6,13 +6,15 @@ import io
 import requests
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaFileUpload
 
 TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_PDF")
 AN_CURENT = os.getenv("AN_PROCESAT")
+
 if not AN_CURENT:
     print("❌ EROARE CRITICĂ: Variabila de mediu 'AN_PROCESAT' nu este setată!")
     sys.exit(1)
+
 URL_TEMPLATE = "https://www.monitoruloficial.ro/emonitor/PDF_baza.php?an={an}&numar={numar}"
 
 def obtine_drive():
@@ -32,7 +34,9 @@ def descarca_si_salveaza_simple():
     
     # 1. Căutăm registrul existent în Drive
     query = f"'{TARGET_FOLDER_ID}' in parents and name = '{nume_registru}' and trashed = false"
-    existente = service.files().list(q=query, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute().get("files", [])
+    existente = service.files().list(
+        q=query, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True
+    ).execute().get("files", [])
     
     randuri_registru = []
     fisiere_descarcate = set()
@@ -40,22 +44,23 @@ def descarca_si_salveaza_simple():
 
     if existente:
         file_id_registru = existente[0]["id"]
-        request = service.files().get_media(fileId=file_id_registru)
-        fh = io.BytesIO()
-        downloader = io.FileIO(cale_temp := f"temp_citire_{nume_registru}", "wb")
         
-        # Descarcă registrul pentru citire
+        # Descarcă conținutul CSV direct ca flux de bytes în memorie
         request = service.files().get_media(fileId=file_id_registru)
-        request.execute() # Pentru simplitate în GitHub Actions descarcă direct fluxul bytes
+        continut_bytes = request.execute()
         
-        with open(cale_temp, mode="r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                randuri_registru.append(row)
-                # Dacă are status descarcat și NU are sufix, îl marcăm ca procesat
-                if row["status"] == "descarcat" and not row["sufix"]:
-                    fisiere_descarcate.add(int(row["numar_baza"]))
-        os.remove(cale_temp)
+        # Citire directă din memorie cu TextIOWrapper fără scriere pe disk
+        fh = io.BytesIO(continut_bytes)
+        wrapper = io.TextIOWrapper(fh, encoding='utf-8')
+        reader = csv.DictReader(wrapper)
+        
+        for row in reader:
+            randuri_registru.append(row)
+            # Dacă are status descarcat și NU are sufix, îl marcăm ca procesat
+            if row.get("status") == "descarcat" and not row.get("sufix"):
+                randuri_registru_nr = row.get("numar_baza")
+                if randuri_registru_nr:
+                    fisiere_descarcate.add(int(randuri_registru_nr))
     
     print(f"📊 Anul {AN_CURENT}: {len(fisiere_descarcate)} numere simple detectate deja ca descărcate.")
 
@@ -68,35 +73,39 @@ def descarca_si_salveaza_simple():
         url = URL_TEMPLATE.format(an=AN_CURENT, numar=nr)
         
         print(f"⏳ Descarcă {nume_pdf}...")
-        res = requests.get(url, timeout=30)
-        
-        if res.status_code == 200 and len(res.content) > 2000: # Ignorăm paginile de eroare mici (sub 2KB)
-            size_kb = round(len(res.content) / 1024, 1)
-            
-            # Încărcare directă în Google Drive
-            cale_pdf_temp = f"temp_{nume_pdf}"
-            with open(cale_pdf_temp, "wb") as f_pdf:
-                f_pdf.write(res.content)
+        try:
+            res = requests.get(url, timeout=30)
+            if res.status_code == 200 and len(res.content) > 2000: # Ignorăm paginile de eroare mici
+                size_kb = round(len(res.content) / 1024, 1)
                 
-            metadata = {'name': nume_pdf, 'parents': [TARGET_FOLDER_ID]}
-            media = MediaFileUpload(cale_pdf_temp, mimetype="application/pdf")
-            nou_pdf = service.files().create(body=metadata, media_body=media, fields="id", supportsAllDrives=True).execute()
-            os.remove(cale_pdf_temp)
-            
-            # Adăugăm în structura de registru noua linie
-            randuri_registru.append({
-                "numar_baza": str(nr),
-                "sufix": "",
-                "status": "descarcat",
-                "dimensiune_kb": str(size_kb),
-                "drive_file_id": nou_pdf["id"]
-            })
-            print(f"   ✓ Succes ({size_kb} KB) -> ID: {nou_pdf['id']}")
-        else:
-            print(f"   ✗ Numărul {nr} nu e disponibil sau e invalid.")
+                # Încărcare directă prin fișier temporar
+                cale_pdf_temp = f"temp_{nume_pdf}"
+                with open(cale_pdf_temp, "wb") as f_pdf:
+                    f_pdf.write(res.content)
+                    
+                metadata = {'name': nume_pdf, 'parents': [TARGET_FOLDER_ID]}
+                media = MediaFileUpload(cale_pdf_temp, mimetype="application/pdf")
+                nou_pdf = service.files().create(
+                    body=metadata, media_body=media, fields="id", supportsAllDrives=True
+                ).execute()
+                os.remove(cale_pdf_temp)
+                
+                # Adăugăm în structura de registru noua linie
+                randuri_registru.append({
+                    "numar_baza": str(nr),
+                    "sufix": "",
+                    "status": "descarcat",
+                    "dimensiune_kb": str(size_kb),
+                    "drive_file_id": nou_pdf["id"]
+                })
+                print(f"   ✓ Succes ({size_kb} KB) -> ID: {nou_pdf['id']}")
+            else:
+                print(f"   ✗ Numărul {nr} nu e disponibil sau e invalid.")
+        except Exception as e:
+            print(f"   ⚠️ Eroare la descărcarea numărului {nr}: {e}")
 
     # 3. Rescriem și urcăm înapoi registrul actualizat și sortat natural
-    randuri_registru.sort(key=lambda x: (int(x["numar_baza"]), x["sufix"]))
+    randuri_registru.sort(key=lambda x: (int(x["numar_baza"]), x.get("sufix", "")))
     cale_reg_scrie = f"temp_scrie_{nume_registru}"
     
     with open(cale_reg_scrie, mode="w", newline="", encoding="utf-8") as f:
