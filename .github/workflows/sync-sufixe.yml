@@ -1,14 +1,14 @@
 name: "2. Descărcare PDF-uri Sufixe (Matrice)"
 
 on:
-  workflow_dispatch: # Pornire manuală la buton
+  workflow_dispatch: # Permite pornirea manuală din interfața GitHub
 
 jobs:
   download_sufixe:
     name: "Descarcă Sufixe - Anul ${{ matrix.an }}"
     runs-on: ubuntu-latest
     strategy:
-      max-parallel: 5
+      max-parallel: 5 # Rulăm maximum 5 ani simultan
       matrix:
         an: [
           "2000", "2001", "2002", "2003", "2004", 
@@ -36,7 +36,6 @@ jobs:
       - name: Rulare Descărcare Sufixe
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_PDF: ${{ secrets.DRIVE_FOLDER_PDF }}
           AN_PROCESAT: ${{ matrix.an }}
           PYTHONUNBUFFERED: "1"
         run: |
