@@ -46,10 +46,40 @@ def obtine_drive():
     creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
+def salveaza_registru_in_drive(service, file_id, nume_registru, randuri):
+    """Salvează imediat starea curentă a registrului în Google Drive."""
+    # Ordonăm natural după numărul de bază înainte de scriere
+    randuri.sort(key=lambda x: (int(x["numar_baza"]), x.get("sufix", "")))
+    
+    cale_reg_scrie = f"temp_scrie_{nume_registru}"
+    with open(cale_reg_scrie, mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["numar_baza", "sufix", "status", "dimensiune_kb", "drive_file_id"])
+        writer.writeheader()
+        writer.writerows(randuri)
+        
+    media_reg = MediaFileUpload(cale_reg_scrie, mimetype="text/csv")
+    
+    try:
+        if file_id:
+            service.files().update(fileId=file_id, media_body=media_reg, supportsAllDrives=True).execute()
+        else:
+            # Dacă nu avem încă un File ID (caz excepțional), încercăm să îl creăm din nou
+            metadata = {'name': nume_registru, 'parents': [TARGET_FOLDER_ID]}
+            creata = service.files().create(body=metadata, media_body=media_reg, supportsAllDrives=True).execute()
+            file_id = creata["id"]
+    except Exception as e:
+        print(f"   {RED}⚠️ Eroare la sincronizarea registrului în Drive: {e}{RESET}")
+        
+    if os.path.exists(cale_reg_scrie):
+        os.remove(cale_reg_scrie)
+        
+    return file_id
+
 def descarca_si_salveaza_simple():
     service = obtine_drive()
     nume_registru = f"status_{AN_CURENT}.csv"
     
+    # 1. Căutăm registrul existent în Drive
     query = f"'{TARGET_FOLDER_ID}' in parents and name = '{nume_registru}' and trashed = false"
     existente = service.files().list(
         q=query, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True
@@ -74,6 +104,10 @@ def descarca_si_salveaza_simple():
                 randuri_registru_nr = row.get("numar_baza")
                 if randuri_registru_nr:
                     fisiere_descarcate.add(int(randuri_registru_nr))
+    else:
+        # Dacă registrul nu există deloc în Drive, îl inițializăm imediat pe loc!
+        print(f"📝 Registrul {nume_registru} nu există. Îl creăm acum gol în Drive...")
+        file_id_registru = salveaza_registru_in_drive(service, None, nume_registru, [])
     
     print(f"📊 Anul {AN_CURENT}: {len(fisiere_descarcate)} numere simple mapate deja în registru.")
 
@@ -82,7 +116,7 @@ def descarca_si_salveaza_simple():
     
     download_counter = 0
     
-    # Rulăm tradițional și liniștit, în ordine crescătoare de la 1 la 1200
+    # Rulăm tradițional și în ordine crescătoare
     for nr in range(1, 1201):
         if nr in fisiere_descarcate:
             continue
@@ -90,7 +124,7 @@ def descarca_si_salveaza_simple():
         nume_pdf = f"MO_PI_{AN_CURENT}_{nr}.pdf"
         url = URL_TEMPLATE.format(numar=nr, an=AN_CURENT)
         
-        # O secundă fixă de pauză între cereri ca să nu agasăm serverul
+        # 1 secundă pauză fixă de siguranță
         time.sleep(1.0)
         print(f"⏳ Descarcă {nume_pdf}...")
         
@@ -130,6 +164,7 @@ def descarca_si_salveaza_simple():
                 ).execute()
                 os.remove(cale_pdf_temp)
                 
+                # Actualizăm datele locale
                 randuri_registru.append({
                     "numar_baza": str(nr),
                     "sufix": "",
@@ -142,16 +177,21 @@ def descarca_si_salveaza_simple():
                 
                 if marime_bytes > 52428800:
                     marime_mb = round(marime_bytes / 1024 / 1024, 2)
-                    print(f"   {YELLOW}⚠️ ATENȚIE: Fișier de dimensiune mare detectat ({marime_mb} MB)! Sincronizarea poate dura mai mult.{RESET}")
+                    print(f"   {YELLOW}⚠️ ATENȚIE: Fișier de dimensiune mare detectat ({marime_mb} MB)!{RESET}")
+                
+                # SALVĂM IMEDIAT ÎN DRIVE DUPĂ DESCARCARE
+                file_id_registru = salveaza_registru_in_drive(service, file_id_registru, nume_registru, randuri_registru)
                 
                 download_counter += 1
-                # Pauză de respirație mare (5 minute) la fiecare 40 de fișiere descărcate cu succes
+                # Pauză de cafea mare (5 minute) la fiecare 40 de fișiere descărcate activ
                 if download_counter % 40 == 0:
                     print(f"\n{YELLOW}☕ [Pauză inteligentă] Am descărcat {download_counter} fișiere. Pauză de 5 minute (300s)...{RESET}\n")
                     time.sleep(300)
             else:
                 if os.path.exists(cale_pdf_temp):
                     os.remove(cale_pdf_temp)
+                
+                # Înregistrăm statusul de nonexistent în memoria locală
                 randuri_registru.append({
                     "numar_baza": str(nr),
                     "sufix": "",
@@ -160,29 +200,16 @@ def descarca_si_salveaza_simple():
                     "drive_file_id": ""
                 })
                 
+                # SALVĂM IMEDIAT ÎN DRIVE ȘI PENTRU CELE INEXISTENTE
+                file_id_registru = salveaza_registru_in_drive(service, file_id_registru, nume_registru, randuri_registru)
+                
         except Exception as e:
             print(f"   {RED}⚠️ Eroare rețea la descărcarea numărului {nr}: {e}{RESET}")
-            # Așteptăm puțin în caz de eroare temporară înainte de următorul număr
-            time.sleep(3.0)
+            # În caz de eroare majoră de rețea, așteptăm 5 secunde, dar NU salvăm starea în Drive ca 'inexistent', 
+            # lăsând numărul să fie reîncercat la rularea următoare.
+            time.sleep(5.0)
 
-    # Sortare naturală crescătoare
-    randuri_registru.sort(key=lambda x: (int(x["numar_baza"]), x.get("sufix", "")))
-    cale_reg_scrie = f"temp_scrie_{nume_registru}"
-    
-    with open(cale_reg_scrie, mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["numar_baza", "sufix", "status", "dimensiune_kb", "drive_file_id"])
-        writer.writeheader()
-        writer.writerows(randuri_registru)
-        
-    media_reg = MediaFileUpload(cale_reg_scrie, mimetype="text/csv")
-    if file_id_registru:
-        service.files().update(fileId=file_id_registru, media_body=media_reg, supportsAllDrives=True).execute()
-    else:
-        metadata = {'name': nume_registru, 'parents': [TARGET_FOLDER_ID]}
-        service.files().create(body=metadata, media_body=media_reg, supportsAllDrives=True).execute()
-        
-    os.remove(cale_reg_scrie)
-    print(f"🚀 Registru {nume_registru} actualizat la zi în Drive!")
+    print(f"🚀 Procesare completată pentru anul {AN_CURENT}! Toate datele sunt securizate în Drive.")
 
 if __name__ == "__main__":
     descarca_si_salveaza_simple()
