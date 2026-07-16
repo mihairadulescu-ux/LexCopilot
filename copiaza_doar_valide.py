@@ -86,8 +86,7 @@ def copiaza_valide():
             pageSize=100,
             supportsAllDrives=True,
             includeItemsFromAllDrives=True,
-            corpora="drive",
-            driveId=TARGET_FOLDER_ID
+            corpora="user"  # Schimbat corpora în user pentru compatibilitate cu ID folder
         ).execute()
         
         for f in response.get("files", []):
@@ -119,8 +118,7 @@ def copiaza_valide():
             pageSize=1000,
             supportsAllDrives=True,
             includeItemsFromAllDrives=True,
-            corpora="drive",
-            driveId=TARGET_FOLDER_ID
+            corpora="user"  # Schimbat corpora în user pentru compatibilitate cu ID folder
         ).execute()
         
         for f in response.get("files", []):
@@ -138,9 +136,7 @@ def copiaza_valide():
     print("\n⚙️ Pasul 4: Începem procesarea registrelor pentru copiere...", flush=True)
     total_copiate_acum = 0
     
-    # Sortăm registrele după an ca să lucrăm organizat (status_2000.csv -> status_2026.csv)
     for nume_csv, csv_id in sorted(registre_id.items()):
-        # Extragem anul din numele CSV-ului
         an = nume_csv.split("_")[1].split(".")[0]
         print(f"\n📂 Procesăm registrul pentru anul {an} ({nume_csv})...", flush=True)
         
@@ -153,7 +149,6 @@ def copiaza_valide():
         for row in reader:
             numar = row["numar"]
             
-            # Mapăm fiecare ediție posibilă definită în coloane
             editii = {
                 "simplu": "",
                 "bis": "Bis",
@@ -165,22 +160,18 @@ def copiaza_valide():
             for coloana, sufix in editii.items():
                 stare = int(row.get(coloana, 0))
                 
-                # Regula de Aur: Copiem DOAR dacă starea din registru este 20 (OK / Validă)
                 if stare == 20:
                     nume_pdf = f"MO_PI_{an}_{numar}{sufix}.pdf"
                     
-                    # 1. Verificăm dacă fișierul este deja copiat în destinație
                     if nume_pdf in fisiere_destinatie_existente:
                         continue
                         
-                    # 2. Verificăm dacă fișierul există fizic în sursa veche
                     if nume_pdf not in fisiere_sursa:
                         print(f"⚠️ Atenție: Registrul indică stare 20 pentru {nume_pdf}, dar fișierul lipsește din sursa veche!")
                         continue
                         
                     info_sursa = fisiere_sursa[nume_pdf]
                     
-                    # 3. Executăm copierea server-to-server nativă
                     try:
                         copie_metadata = {
                             'name': nume_pdf,
@@ -195,11 +186,8 @@ def copiaza_valide():
                         
                         total_copiate_acum += 1
                         print(f"   📥 [OK] Copiat cu succes: {nume_pdf}", flush=True)
-                        
-                        # Adăugăm în lista temporară locală pentru a preveni încercările multiple la aceeași rulare
                         fisiere_destinatie_existente.add(nume_pdf)
                         
-                        # Scurtă pauză pentru controlul rate-limiting-ului API
                         time.sleep(random.uniform(0.15, 0.35))
                         
                     except Exception as e:
@@ -207,7 +195,6 @@ def copiaza_valide():
 
     print(f"\n🎉 OPERAȚIUNE FINALIZATĂ!")
     print(f"📊 S-au copiat selectiv în noul Shared Drive un total de: {total_copiate_acum} PDF-uri valide.")
-    print("🧹 Fișierele dummy de 1 byte au fost lăsate în urmă în siguranță.")
 
 if __name__ == "__main__":
     copiaza_valide()
