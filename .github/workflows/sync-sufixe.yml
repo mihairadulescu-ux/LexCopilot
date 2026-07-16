@@ -1,4 +1,5 @@
-name: "Descarcare minitoare secundare"
+name: "Descarcare monitoare secundare"
+
 on:
   workflow_dispatch:
   schedule:
