@@ -8,7 +8,7 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_PDF")
+TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_PDF", "1gRh-rWe32RNJU2PmN67XoFvkaCSotTA1")
 AN_CURENT = os.getenv("AN_PROCESAT")
 
 if not AN_CURENT:
