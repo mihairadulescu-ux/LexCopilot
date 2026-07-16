@@ -5,11 +5,12 @@ import csv
 import io
 import time
 import random
-import requests
+import httpx
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+# ID-ul fix al folderului tău Google Drive
 TARGET_FOLDER_ID = "1gRh-rWe32RNJU2PmN67XoFvkaCSotTA1"
 
 AN_CURENT = os.getenv("AN_PROCESAT")
@@ -17,7 +18,14 @@ if not AN_CURENT:
     print("❌ EROARE CRITICĂ: Variabila de mediu 'AN_PROCESAT' nu este setată!")
     sys.exit(1)
 
-URL_TEMPLATE = "https://www.monitoruloficial.ro/emonitor/PDF_baza.php?an={an}&numar={numar}"
+# Folosim template-ul URL verificat care funcționează nativ prin redirect direct la PDF
+URL_TEMPLATE = "https://monitoruloficial.ro/Monitorul-Oficial--PI--{numar}--{an}.html"
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0"
+]
 
 def obtine_drive():
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
@@ -50,47 +58,55 @@ def descarca_si_salveaza_simple():
         
         for row in reader:
             randuri_registru.append(row)
-            if row.get("status") == "descarcat" and not row.get("sufix"):
+            if row.get("status") in ["descarcat", "inexistent"] and not row.get("sufix"):
                 randuri_registru_nr = row.get("numar_baza")
                 if randuri_registru_nr:
                     fisiere_descarcate.add(int(randuri_registru_nr))
     
-    print(f"📊 Anul {AN_CURENT}: {len(fisiere_descarcate)} numere simple detectate deja ca descărcate.")
+    print(f"📊 Anul {AN_CURENT}: {len(fisiere_descarcate)} numere simple mapate deja (descărcate/inexistente).")
 
-    # Inițiem o sesiune HTTP persistentă cu headere de browser real
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "ro-RO,ro;q=0.9,en-US;q=0.8,en;q=0.7"
-    })
-
-    consecutive_errors = 0
-
+    timeout_resilient = httpx.Timeout(timeout=120.0, connect=20.0, read=120.0)
+    
+    # Plaja standard stabilita de tine
     for nr in range(1, 1201):
         if nr in fisiere_descarcate:
             continue
             
         nume_pdf = f"MO_PI_{AN_CURENT}_{nr}.pdf"
-        url = URL_TEMPLATE.format(an=AN_CURENT, numar=nr)
+        url = URL_TEMPLATE.format(numar=nr, an=AN_CURENT)
         
-        # Pauză mică și random între cereri ca să nu pară atac automat (1.0 - 2.5 secunde)
-        time.sleep(random.uniform(1.0, 2.5))
+        time.sleep(random.uniform(1.0, 2.0))
+        print(f"⏳ Descarcă {nume_pdf} via endpoint public...")
         
-        print(f"⏳ Descarcă {nume_pdf}...")
+        headers = {
+            "User-Agent": random.choice(USER_AGENTS), 
+            "Referer": "https://monitoruloficial.ro/e-monitor/"
+        }
+        
         try:
-            res = session.get(url, timeout=30)
+            cale_pdf_temp = f"temp_{nume_pdf}"
+            descarcat_ok = False
             
-            # Resetăm contorul de erori la un răspuns de succes de la server
-            consecutive_errors = 0
+            with httpx.Client(headers=headers, timeout=timeout_resilient, follow_redirects=True) as client:
+                with client.stream("GET", url) as response:
+                    if response.status_code == 404:
+                        print(f"   ✗ Numărul {nr} returnează 404 (Inexistent).")
+                    else:
+                        response.raise_for_status()
+                        content_type = response.headers.get("Content-Type", "").lower()
+                        
+                        # Siguranță: Serverul trebuie să ne trimită PDF-ul real în urma redirect-ului
+                        if "application/pdf" in content_type:
+                            with open(cale_pdf_temp, "wb") as f_pdf:
+                                for chunk in response.iter_bytes(chunk_size=131072):
+                                    f_pdf.write(chunk)
+                            descarcat_ok = True
+                        else:
+                            print(f"   ✗ Endpoint-ul a întors HTML în loc de PDF la numărul {nr}.")
             
-            if res.status_code == 200 and len(res.content) > 2000:
-                size_kb = round(len(res.content) / 1024, 1)
+            if descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) > 2000:
+                size_kb = round(os.path.getsize(cale_pdf_temp) / 1024, 1)
                 
-                cale_pdf_temp = f"temp_{nume_pdf}"
-                with open(cale_pdf_temp, "wb") as f_pdf:
-                    f_pdf.write(res.content)
-                    
                 metadata = {'name': nume_pdf, 'parents': [TARGET_FOLDER_ID]}
                 media = MediaFileUpload(cale_pdf_temp, mimetype="application/pdf")
                 nou_pdf = service.files().create(
@@ -107,18 +123,20 @@ def descarca_si_salveaza_simple():
                 })
                 print(f"   ✓ Succes ({size_kb} KB) -> ID: {nou_pdf['id']}")
             else:
-                print(f"   ✗ Numărul {nr} nu e disponibil (Pagina goala/Eroare server).")
+                if os.path.exists(cale_pdf_temp):
+                    os.remove(cale_pdf_temp)
+                # Îl salvăm ca nonexistent în CSV ca să protejăm fluxul viitor
+                randuri_registru.append({
+                    "numar_baza": str(nr),
+                    "sufix": "",
+                    "status": "inexistent",
+                    "dimensiune_kb": "0",
+                    "drive_file_id": ""
+                })
+                
         except Exception as e:
-            consecutive_errors += 1
-            print(f"   ⚠️ Eroare conexiune la numărul {nr}: {e}")
-            
-            # Siguranță: dacă primim 10 erori consecutive de conexiune, înseamnă că IP-ul e blocat de tot
-            if consecutive_errors >= 10:
-                print("🚨 BLOCAJ DETECTAT: Prea multe erori de conexiune consecutive. Oprim execuția pentru salvare.")
-                break
-            
-            # Așteptăm mai mult în caz de eroare, dând timp serverului să se liniștească
-            time.sleep(10)
+            print(f"   ⚠️ Eroare rețea la descărcarea numărului {nr}: {e}")
+            time.sleep(5)
 
     randuri_registru.sort(key=lambda x: (int(x["numar_baza"]), x.get("sufix", "")))
     cale_reg_scrie = f"temp_scrie_{nume_registru}"
@@ -136,7 +154,7 @@ def descarca_si_salveaza_simple():
         service.files().create(body=metadata, media_body=media_reg, supportsAllDrives=True).execute()
         
     os.remove(cale_reg_scrie)
-    print(f"🚀 Registru {nume_registru} salvat securizat în Drive!")
+    print(f"🚀 Registru {nume_registru} actualizat la zi în Drive!")
 
 if __name__ == "__main__":
     descarca_si_salveaza_simple()
