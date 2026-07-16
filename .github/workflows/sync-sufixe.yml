@@ -40,4 +40,4 @@ jobs:
           AN_PROCESAT: ${{ matrix.an }}
           PYTHONUNBUFFERED: "1"
         run: |
-          python -u download_sufixe.py
+          python -u sync_sufixe.py
