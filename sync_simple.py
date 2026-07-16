@@ -17,11 +17,32 @@ AN_CURENT = 2026
 URL_TEMPLATE = "https://www.monitoruloficial.ro/emonitor/PDF_baza.php?an={an}&numar={numar}"
 
 def obtine_drive():
+    print("🔑 Inițializare conexiune Google Drive API...")
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
         raise EnvironmentError("❌ Lipseste secretul GOOGLE_SERVICE_ACCOUNT_JSON!")
     info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
     creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
     return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+def listeaza_pdf_existente_in_drive(service, an):
+    """Identifică toate fișierele PDF din Drive pentru anul respectiv pentru a le pune codul 20 direct."""
+    print(f"📂 Scanare fișiere fizice existente în Drive pentru anul {an}...")
+    pdf_gasite = set()
+    page_token = None
+    query = f"'{TARGET_FOLDER_ID}' in parents and name contains 'MO_PI_{an}_' and name contains '.pdf' and trashed = false"
+    
+    while True:
+        response = service.files().list(
+            q=query, fields="nextPageToken, files(name)", pageToken=page_token, pageSize=1000,
+            supportsAllDrives=True, includeItemsFromAllDrives=True, corpora="user"
+        ).execute()
+        for f in response.get("files", []):
+            pdf_gasite.add(f["name"])
+        page_token = response.get("nextPageToken", None)
+        if not page_token:
+            break
+    print(f"📊 S-au detectat {len(pdf_gasite)} fișiere PDF deja salvate în Drive pentru anul {an}.")
+    return pdf_gasite
 
 def obtine_sau_creaza_csv(service, an):
     nume_csv = f"status_{an}.csv"
@@ -42,6 +63,7 @@ def obtine_sau_creaza_csv(service, an):
         reader = list(csv.DictReader(linii))
         return file_id, reader
     else:
+        # Dacă nu există deloc registrul, generăm unul curat cu 0 peste tot
         matrice = []
         for n in range(1, 1501):
             matrice.append({"numar": str(n), "simplu": "0", "bis": "0", "tris": "0", "quatro": "0", "s": "0"})
@@ -65,69 +87,68 @@ def salveaza_csv_in_drive(service, file_id, nume_csv, date_rows):
     media = MediaFileUpload(cale_temp, mimetype="text/csv", resumable=True)
     service.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
     os.remove(cale_temp)
-    print(f"💾 Registru actualizat cu succes: {nume_csv}")
+    print(f"💾 Registru complet actualizat și salvat în Drive: {nume_csv}")
 
 def descarca_monitoare():
+    print("🚀 Pornire script radical sync_simple...")
     if not TARGET_FOLDER_ID:
         print("❌ EROARE: DRIVE_FOLDER_PDF nu este setat!")
         sys.exit(1)
+        
     service = obtine_drive()
     
     with httpx.Client(timeout=15.0, follow_redirects=True) as client:
         for an in YEARS_TO_PROCESS:
-            print(f"\n--- 📅 Sincronizare numere simple Anul {an} ---")
+            print(f"\n--- 📅 Sincronizare Radicală Anul {an} ---")
             nume_csv = f"status_{an}.csv"
+            
+            # Pasul 1: Scanăm ce fișiere avem cu adevărat în Drive
+            pdf_existente = listeaza_pdf_existente_in_drive(service, an)
+            
+            # Pasul 2: Preluăm registrul CSV
             file_id, rows = obtine_sau_creaza_csv(service, an)
             modificari = False
             rows_dict = {int(r["numar"]): r for r in rows}
             
-            # ---------------------------------------------------------
-            # DETECTARE COADĂ-CAP SMART (Controlată prin erori consecutive)
-            # ---------------------------------------------------------
-            if an == AN_CURENT:
-                ultimul_valid = 0
-                for n in range(1500, 0, -1):
-                    if int(rows_dict[n]["simplu"]) in [15, 20]:
-                        ultimul_valid = n
-                        break
-                limita_maxima_interogare = min(1500, max(1, ultimul_valid) + 10)
-                print(f"📊 [An curent] Ultimul valid: {ultimul_valid}. Căutăm monitoare noi în zona: 1 ➔ {limita_maxima_interogare}")
-            else:
-                # Pentru anii din trecut, scanăm complet de la 1 la 1500. 
-                # Oprirea se va face automat și sigur prin contorul de 15 erori consecutive.
-                limita_maxima_interogare = 1500
-                print(f"📊 [An istoric] Scanare completă 1 ➔ 1500 controlată prin contorul de erori.")
+            # Pasul 3: Resemnalizăm matricea conform realității fizice din Drive
+            for n in range(1, 1501):
+                nume_pdf_simplu = f"MO_PI_{an}_{n}.pdf"
+                
+                if nume_pdf_simplu in pdf_existente:
+                    if rows_dict[n]["simplu"] != "20":
+                        rows_dict[n]["simplu"] = "20"
+                        modificari = True
+                else:
+                    # Dacă nu există în Drive și nu a fost deja marcat ca eșec critic (15), îl aducem la starea de verificare (0)
+                    if rows_dict[n]["simplu"] != "15":
+                        if rows_dict[n]["simplu"] != "0":
+                            rows_dict[n]["simplu"] = "0"
+                            modificari = True
             
             eroare_consecutiva_404 = 0
             
-            for numar in range(1, limita_maxima_interogare + 1):
+            # Pasul 4: Scanare curată de la 1 la 1500
+            for numar in range(1, 1501):
                 if eroare_consecutiva_404 >= 15:
-                    print(f"🛑 Oprim scanarea pe anul {an}: s-a atins granița publicațiilor reale.")
+                    print(f"🛑 Oprim scanarea pe anul {an}: am atins granița publicațiilor reale (15 erori consecutive).")
                     break
                     
                 row = rows_dict[numar]
                 stare_simpla = int(row["simplu"])
                 
-                # Sărim peste cele deja descărcate (20) sau marcate cu eșec critic (15)
+                # Dacă e confirmat valid în Drive (20) sau eșec critic (15), resetăm contorul de 404 și mergem mai departe
                 if stare_simpla in [15, 20]:
                     eroare_consecutiva_404 = 0
                     continue
-                    
-                # Dacă numărul a fost declarat permanent inexistent (10), îl sărim și propagăm
-                if stare_simpla == 10:
-                    for col in ["bis", "tris", "quatro", "s"]:
-                        if row[col] != "10":
-                            row[col] = "10"
-                            modificari = True
-                    continue
                 
-                # Încercăm descărcarea pentru codurile temporare (0-4)
-                if 0 <= stare_simpla <= 4:
+                # Dacă starea este 0, înseamnă că fișierul lipsește din Drive, deci îl căutăm pe serverul oficial
+                if stare_simpla == 0:
                     url = URL_TEMPLATE.format(an=an, numar=numar)
                     nume_pdf = f"MO_PI_{an}_{numar}.pdf"
                     try:
-                        print(f"🔍 Descărcare {nume_pdf} (Încercarea {stare_simpla})...")
+                        print(f"🔍 Interogare server pentru monitorul lipsă: {nume_pdf}...")
                         r = client.get(url)
+                        
                         if r.status_code == 200 and len(r.content) > 1000:
                             cale_pdf = f"temp_{nume_pdf}"
                             with open(cale_pdf, "wb") as f_pdf:
@@ -136,43 +157,32 @@ def descarca_monitoare():
                             metadata = {'name': nume_pdf, 'parents': [TARGET_FOLDER_ID]}
                             service.files().create(body=metadata, media_body=media, supportsAllDrives=True).execute()
                             os.remove(cale_pdf)
+                            
                             row["simplu"] = "20"
                             modificari = True
                             eroare_consecutiva_404 = 0
-                            print(f"   ✅ Salvat în Drive: {nume_pdf}")
+                            print(f"   ✅ [DESCARCAT ȘI SALVAT] {nume_pdf}")
                         else:
-                            stare_noua = stare_simpla + 1
-                            row["simplu"] = str(stare_noua)
+                            # În caz de 404 sau fișier gol de pe server, setăm eșec critic 15
+                            row["simplu"] = "15"
+                            # Propagăm automat 10 pe sufixe, fiindcă numărul de bază nu există pe server
+                            for col in ["bis", "tris", "quatro", "s"]:
+                                row[col] = "10"
+                            
                             modificari = True
-                            
-                            # Incrementare contor erori consecutive garantată pentru orice tip de eșec
                             eroare_consecutiva_404 += 1
-                            print(f"   ⚠️ Eșec (HTTP {r.status_code}). Stare nouă pentru {nume_pdf}: {stare_noua}")
+                            print(f"   ⚠️ Inexistent pe server (HTTP {r.status_code}). Marcat definitiv cu status 15.")
                             
-                            if stare_noua == 5:
-                                row["simplu"] = "15"
-                                for col in ["bis", "tris", "quatro", "s"]:
-                                    row[col] = "10"
-                                nume_failed = f"MO_PI_{an}_{numar}_FAILED.pdf"
-                                cale_failed = f"temp_{nume_failed}"
-                                with open(cale_failed, "w") as f_failed:
-                                    f_failed.write(url)
-                                media = MediaFileUpload(cale_failed, mimetype="text/plain")
-                                metadata = {'name': nume_failed, 'parents': [TARGET_FOLDER_ID]}
-                                service.files().create(body=metadata, media_body=media, supportsAllDrives=True).execute()
-                                os.remove(cale_failed)
-                                print(f"   🛑 Promovat la 15 (FAILED): {nume_failed}")
                         time.sleep(random.uniform(0.1, 0.3))
                     except Exception as e:
-                        print(f"   ❌ Eroare rețea/conexiune la {nume_pdf}: {e}")
-                        row["simplu"] = str(stare_simpla + 1)
-                        modificari = True
-                        eroare_consecutiva_404 += 1  # Incrementăm și pe problemele de conexiune
+                        print(f"   ❌ Eroare rețea/conexiune la {nume_pdf}: {e}. Lăsăm pe status 0 pentru reîncercare.")
+                        eroare_consecutiva_404 += 1
                         time.sleep(2.0)
+            
             if modificari:
                 salveaza_csv_in_drive(service, file_id, nume_csv, list(rows_dict.values()))
             else:
-                print(f"ℹ️ Fără modificări pentru anul {an}.")
+                print(f"ℹ️ Registrul pentru anul {an} este deja perfect sincronizat cu fișierele din Drive.")
 
 if __name__ == "__main__":
     descarca_monitoare()
