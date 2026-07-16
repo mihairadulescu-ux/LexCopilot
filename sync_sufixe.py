@@ -5,11 +5,12 @@ import csv
 import io
 import time
 import random
-import requests
+import httpx
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+# ID-ul fix al folderului tău Google Drive
 TARGET_FOLDER_ID = "1gRh-rWe32RNJU2PmN67XoFvkaCSotTA1"
 
 AN_CURENT = os.getenv("AN_PROCESAT")
@@ -17,8 +18,16 @@ if not AN_CURENT:
     print("❌ EROARE CRITICĂ: Variabila de mediu 'AN_PROCESAT' nu este setată!")
     sys.exit(1)
 
-URL_TEMPLATE = "https://www.monitoruloficial.ro/emonitor/PDF_baza.php?an={an}&numar={numar}"
-SUFIXE_TEST = ["S", "Bis", "Supliment", "A", "B"]
+URL_TEMPLATE = "https://monitoruloficial.ro/Monitorul-Oficial--PI--{numar}--{an}.html"
+
+# Variantele de sufixe conform structurii din scriptul tău vechi functional
+SUFIXE_TEST = ["Bis", "Tris", "Quatro", "S"]
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0"
+]
 
 def obtine_drive():
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
@@ -51,49 +60,52 @@ def descarca_si_salveaza_sufixe():
         
         for row in reader:
             randuri_registru.append(row)
-            if row.get("status") == "descarcat":
+            if row.get("status") in ["descarcat", "inexistent"]:
                 nr_baza = row.get("numar_baza")
                 sfx = row.get("sufix", "")
                 if nr_baza:
                     combinatii_descarcate.add((int(nr_baza), sfx))
     
-    print(f"📊 Anul {AN_CURENT}: {len(combinatii_descarcate)} combinații totale identificate în registru.")
+    print(f"📊 Anul {AN_CURENT}: {len(combinatii_descarcate)} combinații totale mapate în registru.")
 
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "ro-RO,ro;q=0.9,en-US;q=0.8,en;q=0.7"
-    })
-
-    consecutive_errors = 0
-    stop_processing = False
+    timeout_resilient = httpx.Timeout(timeout=120.0, connect=20.0, read=120.0)
 
     for nr in range(1, 1201):
-        if stop_processing:
-            break
         for sfx in SUFIXE_TEST:
             if (nr, sfx) in combinatii_descarcate:
                 continue
                 
             numar_url = f"{nr}{sfx}"
             nume_pdf = f"MO_PI_{AN_CURENT}_{nr}{sfx}.pdf"
-            url = URL_TEMPLATE.format(an=AN_CURENT, numar=numar_url)
+            url = URL_TEMPLATE.format(numar=numar_url, an=AN_CURENT)
             
-            time.sleep(random.uniform(1.0, 2.5))
-            
+            time.sleep(random.uniform(1.0, 2.0))
             print(f"⏳ Verifică sufix {nume_pdf}...")
+            
+            headers = {
+                "User-Agent": random.choice(USER_AGENTS), 
+                "Referer": "https://monitoruloficial.ro/e-monitor/"
+            }
+            
             try:
-                res = session.get(url, timeout=20)
-                consecutive_errors = 0
+                cale_pdf_temp = f"temp_{nume_pdf}"
+                descarcat_ok = False
                 
-                if res.status_code == 200 and len(res.content) > 2000:
-                    size_kb = round(len(res.content) / 1024, 1)
+                with httpx.Client(headers=headers, timeout=timeout_resilient, follow_redirects=True) as client:
+                    with client.stream("GET", url) as response:
+                        if response.status_code != 404:
+                            response.raise_for_status()
+                            content_type = response.headers.get("Content-Type", "").lower()
+                            
+                            if "application/pdf" in content_type:
+                                with open(cale_pdf_temp, "wb") as f_pdf:
+                                    for chunk in response.iter_bytes(chunk_size=131072):
+                                        f_pdf.write(chunk)
+                                descarcat_ok = True
+                
+                if descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) > 2000:
+                    size_kb = round(os.path.getsize(cale_pdf_temp) / 1024, 1)
                     
-                    cale_pdf_temp = f"temp_{nume_pdf}"
-                    with open(cale_pdf_temp, "wb") as f_pdf:
-                        f_pdf.write(res.content)
-                        
                     metadata = {'name': nume_pdf, 'parents': [TARGET_FOLDER_ID]}
                     media = MediaFileUpload(cale_pdf_temp, mimetype="application/pdf")
                     nou_pdf = service.files().create(
@@ -109,15 +121,19 @@ def descarca_si_salveaza_sufixe():
                         "drive_file_id": nou_pdf["id"]
                     })
                     print(f"🔥 [SUFIX] Găsit și descărcat: {nume_pdf} ({size_kb} KB)!")
+                else:
+                    if os.path.exists(cale_pdf_temp):
+                        os.remove(cale_pdf_temp)
+                    randuri_registru.append({
+                        "numar_baza": str(nr),
+                        "sufix": sfx,
+                        "status": "inexistent",
+                        "dimensiune_kb": "0",
+                        "drive_file_id": ""
+                    })
             except Exception as e:
-                consecutive_errors += 1
                 print(f"   ⚠️ Eroare la verificarea numărului {nr}{sfx}: {e}")
-                
-                if consecutive_errors >= 10:
-                    print("🚨 BLOCAJ DETECTAT: Oprim execuția pentru salvare.")
-                    stop_processing = True
-                    break
-                time.sleep(10)
+                time.sleep(5)
 
     randuri_registru.sort(key=lambda x: (int(x["numar_baza"]), x.get("sufix", "")))
     cale_reg_scrie = f"temp_scrie_{nume_registru}"
