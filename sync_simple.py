@@ -168,7 +168,7 @@ def descarca_si_salveaza_simple():
                                     f_pdf.write(chunk)
                             descarcat_ok = True
                         else:
-                            print(f"   ✗ Endpoint-ul a întors HTML în loc de PDF la numărul {nr.")
+                            print(f"   ✗ Endpoint-ul a întors HTML în loc de PDF la numărul {nr}.")
             
             if descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) > 2000:
                 marime_bytes = os.path.getsize(cale_pdf_temp)
