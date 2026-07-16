@@ -1,5 +1,4 @@
 name: "Descarcare minitoare secundare"
-
 on:
   workflow_dispatch:
   schedule:
