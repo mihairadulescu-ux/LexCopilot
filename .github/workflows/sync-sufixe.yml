@@ -1,4 +1,4 @@
-name: "Prod: Sincronizare Sufixe (Slicing)"
+name: "Descarcare minitoare secundare"
 
 on:
   workflow_dispatch:
