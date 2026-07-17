@@ -6,25 +6,23 @@ import io
 import re
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaFileUpload
 
-# Destinația pentru folderele de PDF brute
-TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_PDF", "1gRh-rWe32RNJU2PmN67XoFvkaCSotTA1")
+# Destinația pentru folderele de PDF brute (Citesște din aceleași Variabile)
+TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_PDF")
 
 def obtine_drive():
     print("🔑 [Reset] Conectare Google Drive...")
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
-        raise EnvironmentError("❌ Lipseste secretul GOOGLE_SERVICE_ACCOUNT_JSON!")
+        raise EnvironmentError("❌ Lipsește secretul GOOGLE_SERVICE_ACCOUNT_JSON!")
     info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
     creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 def listeaza_toate_pdf_urile_fizice(service):
-    """Scanează folderul o singură dată și extrage fișierele cu metadatele de dimensiune."""
     print(f"📂 Scanare generală folder PDF (ID: {TARGET_FOLDER_ID})...")
     pdf_uri = []
     page_token = None
-    
     query = f"'{TARGET_FOLDER_ID}' in parents and mimeType = 'application/pdf' and trashed = false"
     
     while True:
@@ -47,68 +45,87 @@ def listeaza_toate_pdf_urile_fizice(service):
     return pdf_uri
 
 def sparge_numar_si_sufix(nume_fisier):
-    """
-    Sparge denumirea standardizată în trei componente atomice:
-    Exemple:
-      - MO_PI_2020_1S.pdf         -> an='2020', nr_baza=1, sufix='S'
-      - MO_PI_2004_123.pdf        -> an='2004', nr_baza=123, sufix=''
-      - MO_PI_2015_45Bis.pdf      -> an='2015', nr_baza=45, sufix='Bis'
-      - MO_PI_2021_14Supliment.pdf-> an='2021', nr_baza=14, sufix='Supliment'
-    """
     m = re.search(r"MO_PI_(\d{4})_([A-Za-z0-9]+)\.pdf", nume_fisier)
     if m:
         an = m.group(1)
         numar_complet = m.group(2)
         
-        # Izolăm cifrele de la începutul grupului de număr
         match_baza = re.match(r"^(\d+)", numar_complet)
         if match_baza:
             nr_baza = int(match_baza.group(1))
-            # Sufixul reprezintă tot ce rămâne după cifrele de bază
             sufix = numar_complet[len(match_baza.group(1)):]
             return an, nr_baza, sufix
             
     return None, None, None
 
+def cheie_sortare_sufixe(sufix):
+    """Ordonează sufixele ierarhic conform legilor de publicare."""
+    ordine = {"Bis": 1, "Tris": 2, "Quater": 3, "S": 4, "Supliment": 5}
+    # Dacă e un sufix exotic nestandardizat, îl punem la final ordonat alfabetic
+    return ordine.get(sufix, 100), sufix
+
 def reseteaza_tot():
+    if not TARGET_FOLDER_ID:
+        print("❌ EROARE CRITICĂ: Variabila DRIVE_FOLDER_PDF este goală în mediu!")
+        sys.exit(1)
+
     service = obtine_drive()
-    
     toate_pdf_urile = listeaza_toate_pdf_urile_fizice(service)
+    
     if not toate_pdf_urile:
         print("⚠️ ATENȚIE: Nu s-a găsit niciun PDF potrivit în folder! Nimic de resetat.")
         return
 
-    # Structura din memorie: { "2020": [ { "nr_baza": 1, "sufix": "S", "id": "...", "size": 12 }, ... ] }
-    date_pe_ani = {}
+    structura_ani = {}
     
     for pdf in toate_pdf_urile:
         nume = pdf["name"]
         an, nr_baza, sufix = sparge_numar_si_sufix(nume)
         
-        if an is not None and nr_baza is not None:
-            if an not in date_pe_ani:
-                date_pe_ani[an] = []
+        if an and nr_baza:
+            if an not in structura_ani:
+                structura_ani[an] = {}
+            if nr_baza not in structura_ani[an]:
+                structura_ani[an][nr_baza] = {}
                 
             raw_size = pdf.get("size")
             size_kb = round(int(raw_size) / 1024, 1) if raw_size else 0.0
             
-            date_pe_ani[an].append({
-                "nr_baza": nr_baza,
-                "sufix": sufix,
-                "size_kb": size_kb,
-                "id": pdf["id"]
-            })
-            
-    print(f"🗂️ Fișierele au fost catalogate în memorie pentru {len(date_pe_ani)} ani.")
+            structura_ani[an][nr_baza][sufix] = {
+                "id": pdf["id"],
+                "size_kb": size_kb
+            }
 
-    # 3. Generare și scriere registre ordonate natural
-    for an, rows in sorted(date_pe_ani.items()):
+    print(f"🗂️ Fișierele au fost catalogate structural pentru {len(structura_ani)} ani.")
+
+    for an, numere_baza in sorted(structura_ani.items()):
         nume_registru = f"status_{an}.csv"
-        print(f"⚙️ Generare registru sortat: {nume_registru} ({len(rows)} PDF-uri)...")
         
-        # Sortare multi-criteriu: mai întâi crescător după numărul de bază (numeric), apoi alfabetic după sufix
-        rows.sort(key=lambda x: (x["nr_baza"], x["sufix"]))
+        maxim_nr_baza = max(numere_baza.keys())
+        print(f"⚙️ Generare registru structural: {nume_registru} (Număr maxim detectat: {maxim_nr_baza})...")
         
+        randuri_csv = []
+        
+        for nr in range(1, maxim_nr_baza + 1):
+            if nr in numere_baza:
+                sub_editii = numere_baza[nr]
+                
+                # 1. Mapăm numărul principal de bază
+                if "" in sub_editii:
+                    randuri_csv.append([str(nr), "", "descarcat", sub_editii[""]["size_kb"], sub_editii[""]["id"]])
+                else:
+                    # Găură pe numărul principal (dar avem un S sau un Bis independent în Drive)
+                    randuri_csv.append([str(nr), "", "", "0", ""])
+                
+                # 2. Mapăm edițiile speciale ordonate ierarhic (Bis -> Tris -> Quater -> S)
+                sufixe_ordonate = sorted([s for s in sub_editii.keys() if s != ""], key=cheie_sortare_sufixe)
+                for sufix in sufixe_ordonate:
+                    randuri_csv.append([str(nr), sufix, "descarcat", sub_editii[sufix]["size_kb"], sub_editii[sufix]["id"]])
+            else:
+                # Găură completă pe numărul principal -> status gol pentru a fi prins la download
+                randuri_csv.append([str(nr), "", "", "0", ""])
+
+        # Identificare și suprascriere în Drive direct în folderul principal
         query_reg = f"'{TARGET_FOLDER_ID}' in parents and name = '{nume_registru}' and trashed = false"
         existente = service.files().list(
             q=query_reg, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True, corpora="user"
@@ -117,25 +134,22 @@ def reseteaza_tot():
         cale_temp = f"temp_{nume_registru}"
         with open(cale_temp, mode="w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            # Structura nouă a antetului cu coloane separate clar
             writer.writerow(["numar_baza", "sufix", "status", "dimensiune_kb", "drive_file_id"])
-            
-            for r in rows:
-                writer.writerow([r["nr_baza"], r["sufix"], "descarcat", r["size_kb"], r["id"]])
+            writer.writerows(randuri_csv)
                 
         media = MediaFileUpload(cale_temp, mimetype="text/csv")
         if existente:
             file_id = existente[0]["id"]
             service.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
-            print(f"   💾 Sincronizat [UPDATE]: {nume_registru} (ID: {file_id})")
+            print(f"    💾 Sincronizat [UPDATE STRUCTURAL]: {nume_registru} (ID: {file_id})")
         else:
             metadata = {'name': nume_registru, 'parents': [TARGET_FOLDER_ID]}
             nou = service.files().create(body=metadata, media_body=media, fields="id", supportsAllDrives=True).execute()
-            print(f"   🆕 Generat [CREATE]: {nume_registru} (ID: {nou['id']})")
+            print(f"    🆕 Generat [CREATE STRUCTURAL]: {nume_registru} (ID: {nou['id']})")
             
         os.remove(cale_temp)
         
-    print("🚀 Sincronizarea registrelor de status în ordine naturală s-a terminat cu succes!")
+    print("🚀 Sincronizarea registrelor structurale s-a terminat! Toate găurile sunt aliniate ierarhic.")
 
 if __name__ == "__main__":
     reseteaza_tot()
