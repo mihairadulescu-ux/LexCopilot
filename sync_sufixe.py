@@ -3,342 +3,158 @@ import sys
 import json
 import csv
 import io
-import time
-import random
-import ssl
-import urllib3
+import re
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-# Culori ANSI pentru terminal
-GREEN = "\033[92m"
-YELLOW = "\033[93m"
-RED = "\033[91m"
-RESET = "\033[0m"
-
-TARGET_FOLDER_ID = "1gRh-rWe32RNJU2PmN67XoFvkaCSotTA1"
-
-AN_CURENT = os.getenv("AN_PROCESAT")
-if not AN_CURENT:
-    print(f"{RED}❌ EROARE CRITICĂ: Variabila de mediu 'AN_PROCESAT' nu este setată!{RESET}")
-    sys.exit(1)
-
-URL_TEMPLATE = "https://monitoruloficial.ro/Monitorul-Oficial--PI--{numar}--{an}.html"
-SUFIXE_TEST = ["Bis", "Tris", "Quatro", "S"]
-
-MAX_RETRIES_DISTRIBUTED = 3
-
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0"
-]
-
-def creeaza_pool_manager_compatibil():
-    """Creează un PoolManager urllib3 tolerant pentru servere cu SSL defect/vechi."""
-    context = ssl.create_default_context()
-    context.options |= ssl.OP_LEGACY_SERVER_CONNECT
-    context.set_ciphers('DEFAULT@SECLEVEL=1')
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    return urllib3.PoolManager(ssl_context=context, timeout=120.0, retries=False)
+# Destinația pentru folderele de PDF brute
+TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_PDF", "1gRh-rWe32RNJU2PmN67XoFvkaCSotTA1")
 
 def obtine_drive():
+    print("🔑 [Reset] Conectare Google Drive...")
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
-        raise EnvironmentError(f"{RED}❌ Lipseste secretul GOOGLE_SERVICE_ACCOUNT_JSON!{RESET}")
+        raise EnvironmentError("❌ Lipseste secretul GOOGLE_SERVICE_ACCOUNT_JSON!")
     info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
     creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
-def incearca_descarcare_sufix(nr, sfx, service, http_pool, randuri_registru):
-    """
-    Încearcă descarcarea folosind urllib3.
-    Returnează: "OK", "404" sau "ERROR"
-    """
-    numar_url = f"{nr}{sfx}"
-    nume_pdf = f"MO_PI_{AN_CURENT}_{nr}{sfx}.pdf"
-    url = URL_TEMPLATE.format(numar=numar_url, an=AN_CURENT)
-    cale_pdf_temp = f"temp_{nume_pdf}"
-    descarcat_ok = False
-    status_serviciu = "404"
+def listeaza_toate_pdf_urile_fizice(service):
+    print(f"📂 Scanare generală folder PDF (ID: {TARGET_FOLDER_ID})...")
+    pdf_uri = []
+    page_token = None
+    query = f"'{TARGET_FOLDER_ID}' in parents and mimeType = 'application/pdf' and trashed = false"
     
-    headers = {
-        "User-Agent": random.choice(USER_AGENTS), 
-        "Referer": "https://monitoruloficial.ro/e-monitor/"
-    }
-    
-    try:
-        response = http_pool.request("GET", url, headers=headers, preload_content=False)
+    while True:
+        response = service.files().list(
+            q=query, 
+            fields="nextPageToken, files(id, name, size)", 
+            pageToken=page_token, 
+            pageSize=1000,
+            supportsAllDrives=True, 
+            includeItemsFromAllDrives=True, 
+            corporas="user"
+        ).execute()
         
-        if response.status == 200:
-            content_type = response.headers.get("Content-Type", "").lower()
-            if "application/pdf" in content_type:
-                with open(cale_pdf_temp, "wb") as f_pdf:
-                    for chunk in response.stream(131072):
-                        f_pdf.write(chunk)
-                descarcat_ok = True
-        elif response.status == 404:
-            status_serviciu = "404"
+        pdf_uri.extend(response.get("files", []))
+        page_token = response.get("nextPageToken", None)
+        if not page_token:
+            break
             
-        response.release_conn()
-                
-        if descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) > 2000:
-            marime_bytes = os.path.getsize(cale_pdf_temp)
-            size_kb = round(marime_bytes / 1024, 1)
-            
-            metadata = {'name': nume_pdf, 'parents': [TARGET_FOLDER_ID]}
-            media = MediaFileUpload(cale_pdf_temp, mimetype="application/pdf")
-            nou_pdf = service.files().create(
-                body=metadata, media_body=media, fields="id", supportsAllDrives=True
-            ).execute()
-            os.remove(cale_pdf_temp)
-            
-            existente_in_lista = [r for r in randuri_registru if r["numar_baza"] == str(nr) and r["sufix"] == sfx]
-            if existente_in_lista:
-                existente_in_lista[0].update({
-                    "status": "descarcat",
-                    "dimensiune_kb": str(size_kb),
-                    "drive_file_id": nou_pdf["id"]
-                })
-            else:
-                randuri_registru.append({
-                    "numar_baza": str(nr),
-                    "sufix": sfx,
-                    "status": "descarcat",
-                    "dimensiune_kb": str(size_kb),
-                    "drive_file_id": nou_pdf["id"]
-                })
-            
-            print(f"   {GREEN}🔥 [SUFIX] Găsit și descărcat: {nume_pdf} ({size_kb} KB)!{RESET}")
-            if marime_bytes > 52428800:
-                marime_mb = round(marime_bytes / 1024 / 1024, 2)
-                print(f"   {YELLOW}⚠️ ATENȚIE: Fișier de dimensiune mare detectat ({marime_mb} MB)!{RESET}")
-                
-            return "OK"
-            
-    except Exception as e:
-        print(f"   {RED}⚠️ Eroare la verificarea numărului {nr}{sfx}: {e}{RESET}")
-        if os.path.exists(cale_pdf_temp):
-            os.remove(cale_pdf_temp)
-        return "ERROR"
-            
-    return status_serviciu
+    print(f"📊 S-au găsit în total {len(pdf_uri)} fișiere PDF fizice în Drive.")
+    return pdf_uri
 
-def gestioneaza_status_esec(nr, sfx, status_curent, randuri_registru):
-    incercare_noua = 1
-    if status_curent and status_curent.startswith("esec_"):
-        try:
-            incercare_noua = int(status_curent.split("_")[1]) + 1
-        except ValueError:
-            incercare_noua = 1
+def sparge_numar_si_sufix(nume_fisier):
+    """
+    Exemple:
+      - MO_PI_2003_941.pdf        -> an='2003', nr_baza=941, sufix=''
+      - MO_PI_2003_941Bis.pdf     -> an='2003', nr_baza=941, sufix='Bis'
+      - MO_PI_2003_941S.pdf       -> an='2003', nr_baza=941, sufix='S'
+    """
+    m = re.search(r"MO_PI_(\d{4})_([A-Za-z0-9]+)\.pdf", nume_fisier)
+    if m:
+        an = m.group(1)
+        numar_complet = m.group(2)
+        
+        match_baza = re.match(r"^(\d+)", numar_complet)
+        if match_baza:
+            nr_baza = int(match_baza.group(1))
+            sufix = numar_complet[len(match_baza.group(1)):]
+            return an, nr_baza, sufix
+            
+    return None, None, None
 
-    existente_in_lista = [r for r in randuri_registru if r["numar_baza"] == str(nr) and r["sufix"] == sfx]
-    
-    if incercare_noua > MAX_RETRIES_DISTRIBUTED:
-        print(f"   ❌ [SUFIX] S-au atins cele {MAX_RETRIES_DISTRIBUTED} încercări consecutive de rețea pentru {nr}{sfx}. Marcat definitiv ca inexistent.")
-        nou_status = "inexistent"
-    else:
-        print(f"   🕒 [SUFIX] Înregistrat eșec temporar de rețea pentru {nr}{sfx} (Încercarea {incercare_noua}/{MAX_RETRIES_DISTRIBUTED}).")
-        nou_status = f"esec_{incercare_noua}"
-
-    if existente_in_lista:
-        existente_in_lista[0].update({
-            "status": nou_status,
-            "dimensiune_kb": "0",
-            "drive_file_id": ""
-        })
-    else:
-        randuri_registru.append({
-            "numar_baza": str(nr),
-            "sufix": sfx,
-            "status": nou_status,
-            "dimensiune_kb": "0",
-            "drive_file_id": ""
-        })
-
-def descarca_si_salveaza_sufixe():
+def reseteaza_tot():
     service = obtine_drive()
-    nume_registru = f"status_{AN_CURENT}.csv"
+    toate_pdf_urile = listeaza_toate_pdf_urile_fizice(service)
     
-    query = f"'{TARGET_FOLDER_ID}' in parents and name = '{nume_registru}' and trashed = false"
-    existente = service.files().list(
-        q=query, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True
-    ).execute().get("files", [])
-    
-    randuri_registru = []
-    statusuri_existente = {}
-    numere_baza_existente = []
-    file_id_registru = None
+    if not toate_pdf_urile:
+        print("⚠️ ATENȚIE: Nu s-a găsit niciun PDF potrivit în folder! Nimic de resetat.")
+        return
 
-    if existente:
-        file_id_registru = existente[0]["id"]
-        request = service.files().get_media(fileId=file_id_registru)
-        continut_bytes = request.execute()
-        
-        fh = io.BytesIO(continut_bytes)
-        wrapper = io.TextIOWrapper(fh, encoding='utf-8')
-        reader = csv.DictReader(wrapper)
-        
-        for row in reader:
-            randuri_registru.append(row)
-            nr_baza = row.get("numar_baza")
-            sfx = row.get("sufix", "")
-            status = row.get("status", "")
-            
-            if nr_baza:
-                numere_baza_existente.append(int(nr_baza))
-                statusuri_existente[(int(nr_baza), sfx)] = status
+    # Mapă mapă: { "2003": { 941: { "": {"id": "...", "size": 12}, "Bis": {...} } } }
+    structura_ani = {}
     
-    if numere_baza_existente:
-        vârf_sufixe = max(numere_baza_existente)
-    else:
-        vârf_sufixe = 600
+    for pdf in toate_pdf_urile:
+        nume = pdf["name"]
+        an, nr_baza, sufix = sparge_numar_si_sufix(nume)
         
-    print(f"📊 Anul {AN_CURENT}: {len(statusuri_existente)} combinații totale mapate în registru.")
-    print(f"🎯 Vârf preluat direct din registrul simplu: {vârf_sufixe}. Rulăm ierarhic în jos.")
+        if an and nr_baza:
+            if an not in structura_ani:
+                structura_ani[an] = {}
+            if nr_baza not in structura_ani[an]:
+                structura_ani[an][nr_baza] = {}
+                
+            raw_size = pdf.get("size")
+            size_kb = round(int(raw_size) / 1024, 1) if raw_size else 0.0
+            
+            structura_ani[an][nr_baza][sufix] = {
+                "id": pdf["id"],
+                "size_kb": size_kb
+            }
 
-    http_pool = creeaza_pool_manager_compatibil()
-    download_counter = 0
-    
-    for nr in range(vârf_sufixe, 0, -1):
+    print(f"🗂️ Fișierele au fost catalogate structural pentru {len(structura_ani)} ani.")
+
+    # Generare registre cu umplerea automată a găurilor din trecut
+    for an, numere_baza in sorted(structura_ani.items()):
+        nume_registru = f"status_{an}.csv"
         
-        # ------------------------------------------------------------------
-        # 1. Verificare SUPLIMENT (S) - independent
-        # ------------------------------------------------------------------
-        status_s = statusuri_existente.get((nr, "S"), "")
-        if status_s not in ["descarcat", "inexistent"]:
-            time.sleep(1.0)  # Pauza fixă solicitată de 1 secundă
-            print(f"⏳ Verifică sufix independent {nr}S...")
-            rezultat_s = incearca_descarcare_sufix(nr, "S", service, http_pool, randuri_registru)
-            
-            if rezultat_s == "OK":
-                download_counter += 1
-                if download_counter % 40 == 0:
-                    print(f"\n{YELLOW}☕ [Pauză inteligentă] Am descărcat {download_counter} sufixe. Pauză de 5 minute (300s)...{RESET}\n")
-                    time.sleep(300)
-            elif rezultat_s == "404":
-                existente_in_lista = [r for r in randuri_registru if r["numar_baza"] == str(nr) and r["sufix"] == "S"]
-                if existente_in_lista:
-                    existente_in_lista[0].update({"status": "inexistent", "dimensiune_kb": "0", "drive_file_id": ""})
+        # Aflăm matematic care este ultimul număr principal salvat în Drive pentru acest an
+        maxim_nr_baza = max(numere_baza.keys())
+        print(f"⚙️ Generare registru structural: {nume_registru} (Număr maxim detectat: {maxim_nr_baza})...")
+        
+        randuri_csv = []
+        
+        # Parcurgem liniar de la 1 la maximul istoric generat
+        for nr in range(1, maxim_nr_baza + 1):
+            # Cazul 1: Numărul de bază există în structura din Drive
+            if nr in numere_baza:
+                sub_editii = numere_baza[nr]
+                
+                # 1. Adăugăm numărul principal dacă există
+                if "" in sub_editii:
+                    randuri_csv.append([str(nr), "", "descarcat", sub_editii[""]["size_kb"], sub_editii[""]["id"]])
                 else:
-                    randuri_registru.append({"numar_baza": str(nr), "sufix": "S", "status": "inexistent", "dimensiune_kb": "0", "drive_file_id": ""})
-            elif rezultat_s == "ERROR":
-                gestioneaza_status_esec(nr, "S", status_s, randuri_registru)
-
-        # ------------------------------------------------------------------
-        # 2. Lanțul Ierarhic: Bis -> Tris -> Quatro
-        # ------------------------------------------------------------------
-        status_bis = statusuri_existente.get((nr, "Bis"), "")
-        bis_exists = False
-        bis_has_network_error = False
-        
-        if status_bis == "descarcat":
-            bis_exists = True
-        elif status_bis == "inexistent":
-            bis_exists = False
-        else:
-            time.sleep(1.0)  # Pauza fixă solicitată de 1 secundă
-            print(f"⏳ Verifică sufix {nr}Bis...")
-            rezultat_bis = incearca_descarcare_sufix(nr, "Bis", service, http_pool, randuri_registru)
+                    # Dacă numărul principal lipsește, dar avem un Bis sau un S la acel număr,
+                    # lăsăm numărul principal gol ca să fie descărcat de script!
+                    randuri_csv.append([str(nr), "", "", "0", ""])
+                
+                # 2. Adăugăm edițiile speciale (Bis, S, Supliment etc.) sortate alfabetic
+                for sufix in sorted(sub_editii.keys()):
+                    if sufix == "": 
+                        continue
+                    randuri_csv.append([str(nr), sufix, "descarcat", sub_editii[sufix]["size_kb"], sub_editii[sufix]["id"]])
             
-            if rezultat_bis == "OK":
-                bis_exists = True
-                download_counter += 1
-                if download_counter % 40 == 0:
-                    print(f"\n{YELLOW}☕ [Pauză inteligentă] Am descărcat {download_counter} sufixe. Pauză de 5 minute (300s)...{RESET}\n")
-                    time.sleep(300)
-            elif rezultat_bis == "404":
-                bis_exists = False
-                existente_in_lista = [r for r in randuri_registru if r["numar_baza"] == str(nr) and r["sufix"] == "Bis"]
-                if existente_in_lista:
-                    existente_in_lista[0].update({"status": "inexistent", "dimensiune_kb": "0", "drive_file_id": ""})
-                else:
-                    randuri_registru.append({"numar_baza": str(nr), "sufix": "Bis", "status": "inexistent", "dimensiune_kb": "0", "drive_file_id": ""})
-            elif rezultat_bis == "ERROR":
-                bis_has_network_error = True
-                gestioneaza_status_esec(nr, "Bis", status_bis, randuri_registru)
-
-        tris_exists = False
-        tris_has_network_error = False
-        
-        if bis_exists:
-            status_tris = statusuri_existente.get((nr, "Tris"), "")
-            if status_tris == "descarcat":
-                tris_exists = True
-            elif status_tris == "inexistent":
-                tris_exists = False
+            # Cazul 2: Numărul principal lipsește complet (e o gaură lăsată de un crash vechi)
             else:
-                time.sleep(1.0)  # Pauza fixă solicitată de 1 secundă
-                print(f"⏳ Verifică sufix {nr}Tris...")
-                rezultat_tris = incearca_descarcare_sufix(nr, "Tris", service, http_pool, randuri_registru)
-                
-                if rezultat_tris == "OK":
-                    tris_exists = True
-                    download_counter += 1
-                    if download_counter % 40 == 0:
-                        print(f"\n{YELLOW}☕ [Pauză inteligentă] Am descărcat {download_counter} sufixe. Pauză de 5 minute (300s)...{RESET}\n")
-                        time.sleep(300)
-                elif rezultat_tris == "404":
-                    tris_exists = False
-                    existente_in_lista = [r for r in randuri_registru if r["numar_baza"] == str(nr) and r["sufix"] == "Tris"]
-                    if existente_in_lista:
-                        existente_in_lista[0].update({"status": "inexistent", "dimensiune_kb": "0", "drive_file_id": ""})
-                    else:
-                        randuri_registru.append({"numar_baza": str(nr), "sufix": "Tris", "status": "inexistent", "dimensiune_kb": "0", "drive_file_id": ""})
-                elif rezultat_tris == "ERROR":
-                    tris_has_network_error = True
-                    gestioneaza_status_esec(nr, "Tris", status_tris, randuri_registru)
-        else:
-            if not bis_has_network_error:
-                for sfx in ["Tris", "Quatro"]:
-                    if (nr, sfx) not in statusuri_existente:
-                        randuri_registru.append({"numar_baza": str(nr), "sufix": sfx, "status": "inexistent", "dimensiune_kb": "0", "drive_file_id": ""})
+                # Îl scriem în CSV cu status gol. Scriptul de download îl va detecta instant ca nemapat!
+                randuri_csv.append([str(nr), "", "", "0", ""])
 
-        if tris_exists:
-            status_quatro = statusuri_existente.get((nr, "Quatro"), "")
-            if status_quatro not in ["descarcat", "inexistent"]:
-                time.sleep(1.0)  # Pauza fixă solicitată de 1 secundă
-                print(f"⏳ Verifică sufix {nr}Quatro...")
-                rezultat_quatro = incearca_descarcare_sufix(nr, "Quatro", service, http_pool, randuri_registru)
-                
-                if rezultat_quatro == "OK":
-                    download_counter += 1
-                    if download_counter % 40 == 0:
-                        print(f"\n{YELLOW}☕ [Pauză inteligentă] Am descărcat {download_counter} sufixe. Pauză de 5 minute (300s)...{RESET}\n")
-                        time.sleep(300)
-                elif rezultat_quatro == "404":
-                    existente_in_lista = [r for r in randuri_registru if r["numar_baza"] == str(nr) and r["sufix"] == "Quatro"]
-                    if existente_in_lista:
-                        existente_in_lista[0].update({"status": "inexistent", "dimensiune_kb": "0", "drive_file_id": ""})
-                    else:
-                        randuri_registru.append({"numar_baza": str(nr), "sufix": "Quatro", "status": "inexistent", "dimensiune_kb": "0", "drive_file_id": ""})
-                elif rezultat_quatro == "ERROR":
-                    gestioneaza_status_esec(nr, "Quatro", status_quatro, randuri_registru)
-        else:
-            if not bis_has_network_error and not tris_has_network_error:
-                if (nr, "Quatro") not in statusuri_existente:
-                    randuri_registru.append({"numar_baza": str(nr), "sufix": "Quatro", "status": "inexistent", "dimensiune_kb": "0", "drive_file_id": ""})
-
-    http_pool.clear()
-
-    # Sortare și salvare registru
-    randuri_registru.sort(key=lambda x: (int(x["numar_baza"]), x.get("sufix", "")))
-    cale_reg_scrie = f"temp_scrie_{nume_registru}"
-    
-    with open(cale_reg_scrie, mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["numar_baza", "sufix", "status", "dimensiune_kb", "drive_file_id"])
-        writer.writeheader()
-        writer.writerows(randuri_registru)
+        # Identificare și suprascriere în Drive
+        query_reg = f"'{TARGET_FOLDER_ID}' in parents and name = '{nume_registru}' and trashed = false"
+        existente = service.files().list(
+            q=query_reg, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True, corpora="user"
+        ).execute().get("files", [])
         
-    media_reg = MediaFileUpload(cale_reg_scrie, mimetype="text/csv")
-    if file_id_registru:
-        service.files().update(fileId=file_id_registru, media_body=media_reg, supportsAllDrives=True).execute()
-    else:
-        metadata = {'name': nume_registru, 'parents': [TARGET_FOLDER_ID]}
-        service.files().create(body=metadata, media_body=media_reg, supportsAllDrives=True).execute()
+        cale_temp = f"temp_{nume_registru}"
+        with open(cale_temp, mode="w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["numar_baza", "sufix", "status", "dimensiune_kb", "drive_file_id"])
+            writer.writerows(randuri_csv)
+                
+        media = MediaFileUpload(cale_temp, mimetype="text/csv")
+        if existente:
+            file_id = existente[0]["id"]
+            service.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
+            print(f"    💾 Sincronizat [UPDATE STRUCTURAL]: {nume_registru} (ID: {file_id})")
+        else:
+            metadata = {'name': nume_registru, 'parents': [TARGET_FOLDER_ID]}
+            nou = service.files().create(body=metadata, media_body=media, fields="id", supportsAllDrives=True).execute()
+            print(f"    🆕 Generat [CREATE STRUCTURAL]: {nume_registru} (ID: {nou['id']})")
+            
+        os.remove(cale_temp)
         
-    os.remove(cale_reg_scrie)
-    print(f"🚀 Registru {nume_registru} actualizat cu sufixele ierarhice în Drive!")
+    print("🚀 Sincronizarea registrelor structurale s-a terminat! Toate găurile au fost expuse pentru download.")
 
 if __name__ == "__main__":
-    descarca_si_salveaza_sufixe()
+    reseteaza_tot()
