@@ -115,7 +115,7 @@ def executa_sincronizare():
                 break
                 
             # --- 2. FRÂNĂ INTELIGENTĂ ANI ISTORICI ---
-            if an_curent != "2026" and consecutive_errors >= 100:
+            if an_curent != "2026" and consecutive_errors >= 50:
                 print(f"\n🛑 {YELLOW}[FINAL DE AN ISTORIC]{RESET} Am detectat {consecutive_errors} goluri consecutive în anul {an_curent}. Sigur s-a terminat anul. Oprire.")
                 break
                 
