@@ -9,11 +9,9 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
-# Citire strictă din mediu - fără rezerve!
+# Preluare variabile de mediu (Aliniate cu GitHub Variables)
 SOURCE_XML_FOLDER_ID = os.getenv("DRIVE_FOLDER_XML")
 METADATA_FOLDER_ID = os.getenv("METADATA_FOLDER_ID")
-
-URL_TEMPLATE = "https://www.monitoruloficial.ro/emonitor/PDF_baza.php?an={an}&numar={numar}"
 
 def obtine_drive():
     print("🔑 Conectare Google Drive API...")
@@ -51,15 +49,18 @@ def descarca_continut_xml(service, file_id):
         _, done = downloader.next_chunk()
     return fh.getvalue()
 
-def salveaza_csv_in_drive(service, nume_fisier, fieldnames, date_rows):
+def salveaza_csv_unic_in_drive(service, nume_fisier, fieldname, set_date):
     cale_temp = f"temp_{nume_fisier}"
-    print(f"✍️ Scrierea temporară a celor {len(date_rows)} înregistrări...")
+    # Sortăm elementele pentru o listă ordonată estetic și curat
+    randuri_ordonate = sorted(list(set_date))
+    
+    print(f"✍️ Scrierea listei unice: {nume_fisier} ({len(randuri_ordonate)} valori distincte)...")
     with open(cale_temp, mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(date_rows)
+        writer = csv.writer(f)
+        writer.writerow([fieldname])  # Header-ul coloanei
+        for valoare in randuri_ordonate:
+            writer.writerow([valoare])
         
-    # Verificăm existența în folderul DEDICAT de metadate
     query = f"'{METADATA_FOLDER_ID}' in parents and name = '{nume_fisier}' and trashed = false"
     existente = service.files().list(
         q=query, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True, corpora="user"
@@ -69,11 +70,11 @@ def salveaza_csv_in_drive(service, nume_fisier, fieldnames, date_rows):
     if existente:
         file_id = existente[0]["id"]
         service.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
-        print(f"💾 [UPDATE] Catalog stocat în folderul dedicat metadate: {nume_fisier} (ID: {file_id})")
+        print(f"💾 [UPDATE] Catalog unic salvat: {nume_fisier} -> ID: {file_id}")
     else:
         metadata = {'name': nume_fisier, 'parents': [METADATA_FOLDER_ID]}
         nou = service.files().create(body=metadata, media_body=media, fields="id", supportsAllDrives=True).execute()
-        print(f"🆕 [CREATE] Catalog nou creat în folderul dedicat metadate: {nume_fisier} (ID: {nou['id']})")
+        print(f"🆕 [CREATE] Catalog unic creat: {nume_fisier} -> ID: {nou['id']}")
     os.remove(cale_temp)
 
 def extrage_an_si_numar_mo(nume_fisier):
@@ -83,21 +84,17 @@ def extrage_an_si_numar_mo(nume_fisier):
     return "", ""
 
 def parcurge_si_extrage():
-    # Validare strictă a variabilelor de mediu înainte de a începe orice procesare
-    if not SOURCE_XML_FOLDER_ID:
-        print("❌ EROARE CRITICĂ: Variabila de mediu 'DRIVE_FOLDER_XML' nu este setată!")
-        sys.exit(1)
-        
-    if not METADATA_FOLDER_ID:
-        print("❌ EROARE CRITICĂ: Variabila de mediu 'METADATA_FOLDER_ID' nu este setată!")
+    if not SOURCE_XML_FOLDER_ID or not METADATA_FOLDER_ID:
+        print("❌ EROARE CRITICĂ: Variabilele de mediu DRIVE_FOLDER_XML sau METADATA_FOLDER_ID sunt incomplete!")
         sys.exit(1)
         
     service = obtine_drive()
     fisiere_xml = listeaza_xml_uri_drive(service)
     
-    catalog_acte = []
-    # Aceste coloane acoperă complet necesarul tău de cross-check cu PDF-urile din MO
-    fieldnames = ["emitent", "tip_act", "titlu_act", "numar_act", "an_act", "mo_numar", "mo_an", "fisier_xml_sursa"]
+    # Folosim structuri de tip SET pentru a asigura unicitatea absolută din fașă
+    set_tipuri_acte = set()
+    set_emitenti = set()
+    set_numere_mo = set()
     
     count = 0
     for fx in fisiere_xml:
@@ -105,7 +102,7 @@ def parcurge_si_extrage():
         nume_xml = fx['name']
         an_implicit, pag_implicit = extrage_an_si_numar_mo(nume_xml)
         
-        print(f"⏳ [{count}/{len(fisiere_xml)}] Se procesează {nume_xml}...")
+        print(f"⏳ [{count}/{len(fisiere_xml)}] Colectare valori unice din {nume_xml}...")
         try:
             xml_bytes = descarca_continut_xml(service, fx['id'])
             root = etree.fromstring(xml_bytes)
@@ -115,8 +112,7 @@ def parcurge_si_extrage():
                 noduri_acte = list(root)
                 
             for nod in noduri_acte:
-                act_data = {f: "" for f in fieldnames}
-                act_data["fisier_xml_sursa"] = nume_xml
+                mo_numar_raw = ""
                 
                 for copil in nod.iter():
                     tag_simplu = copil.tag.split('}')[-1].lower() if '}' in copil.tag else copil.tag.lower()
@@ -125,75 +121,42 @@ def parcurge_si_extrage():
                     if not text:
                         continue
                         
-                    # Mapare Emitent
-                    if tag_simplu in ["emitent", "autor", "institutie"]:
-                        act_data["emitent"] = text.upper()
-                    
-                    # Mapare Tip Act
-                    elif tag_simplu in ["tip", "tip_act", "tipact", "categorie"]:
-                        act_data["tip_act"] = text.upper()
+                    # 1. Colectăm tipul de act direct în formatul lui brut curățat
+                    if tag_simplu in ["tip", "tip_act", "tipact", "categorie"]:
+                        set_tipuri_acte.add(text.upper())
                         
-                    # Mapare Titlu Act
-                    elif tag_simplu in ["titlu", "titlu_act", "denumire", "text_titlu"]:
-                        act_data["titlu_act"] = text
+                    # 2. Colectăm emitentul direct
+                    elif tag_simplu in ["emitent", "autor", "institutie"]:
+                        set_emitenti.add(text.upper())
                         
-                    # Mapare Număr Act
-                    elif tag_simplu in ["numar", "numar_act", "nr", "nr_act"]:
-                        act_data["numar_act"] = text
-                    
-                    # Mapare An Act
-                    elif tag_simplu in ["an", "an_act", "data", "data_act", "data_emitere"]:
-                        an_m = re.search(r"\b(19\d{2}|20[0-2]\d)\b", text)
-                        if an_m:
-                            act_data["an_act"] = an_m.group(1)
-                        else:
-                            act_data["an_act"] = text
-                    
-                    # Mapare Număr Monitor Oficial din XML
+                    # 3. Colectăm numărul de Monitor Oficial întâlnit
                     elif tag_simplu in ["mo", "mo_numar", "monitor", "monitor_oficial", "numar_mo", "publicare_nr"]:
-                        # Curățăm caractere parazite dacă există (ex: "M.Of. 12" -> "12")
                         mo_curat = re.search(r"\b\d+\b", text)
-                        act_data["mo_numar"] = mo_curat.group(0) if mo_curat else text
-                        
-                    # Mapare An Monitor Oficial din XML (dacă există tag separat de dată publicare)
-                    elif tag_simplu in ["mo_an", "data_mo", "data_publicare", "publicare_data"]:
-                        an_mo_m = re.search(r"\b(19\d{2}|20[0-2]\d)\b", text)
-                        if an_mo_m:
-                            act_data["mo_an"] = an_mo_m.group(1)
-
-                # --- Reguli Inteligente de Salvare și Fallback pentru Cross-Check ---
-                if act_data["emitent"] or act_data["tip_act"] or act_data["titlu_act"] or act_data["numar_act"]:
-                    
-                    # Fallback pentru An Act
-                    if not act_data["an_act"]:
-                        act_data["an_act"] = an_implicit
-                    else:
-                        an_curat = re.search(r"\b(19\d{2}|20[0-2]\d)\b", str(act_data["an_act"]))
-                        if_an = an_curat.group(1) if an_curat else None
-                        if if_an:
-                            act_data["an_act"] = if_an
-                    
-                    # Fallback critic pentru MO_NUMAR: Dacă XML-ul nu are nod de monitor, 
-                    # înseamnă că tot ce e în acea pagină aparține monitorului din numele fișierului!
-                    if not act_data["mo_numar"]:
-                        act_data["mo_numar"] = pag_implicit
-                    
-                    # Fallback critic pentru MO_AN
-                    if not act_data["mo_an"]:
-                        act_data["mo_an"] = an_implicit
-                        
-                    catalog_acte.append(act_data)
+                        if mo_curat:
+                            mo_numar_raw = mo_curat.group(0)
+                
+                # Fallback pe numele fișierului dacă nodul curent n-a raportat un număr de MO
+                mo_final = mo_numar_raw if mo_numar_raw else pag_implicit
+                if mo_final:
+                    set_numere_mo.add(mo_final)
                     
         except Exception as e:
-            print(f"    ⚠️ Eroare la parsarea fișierului {nume_xml}: {e}")
+            print(f"    ⚠️ Eroare la citirea fișierului {nume_xml}: {e}")
             
-    print(f"\n📊 Extracție completă! Am strâns {len(catalog_acte)} înregistrări brute.")
+    print(f"\n📊 Extracție unică terminată! Inventar nomenclature brute:")
+    print(f" -> Tipuri acte unice: {len(set_tipuri_acte)}")
+    print(f" -> Emitenți unici: {len(set_emitenti)}")
+    print(f" -> Numere MO unice întâlnite: {len(set_numere_mo)}")
     
-    if catalog_acte:
-        salveaza_csv_in_drive(service, "raw_catalog_acte.csv", fieldnames, catalog_acte)
-        print("🚀 Gata! Tabelul master a fost salvat curat în folderul de metadate.")
-    else:
-        print("⚠️ Nu s-au putut extrage date.")
+    # Salvarea celor 3 liste subțiri de valori distincte
+    if set_tipuri_acte:
+        salveaza_csv_unic_in_drive(service, "catalog_tip_acte.csv", "tip_act", set_tipuri_acte)
+    if set_emitenti:
+        salveaza_csv_unic_in_drive(service, "catalog_emitenti.csv", "emitent", set_emitenti)
+    if set_numere_mo:
+        salveaza_csv_unic_in_drive(service, "catalog_numar_mo.csv", "mo_numar", set_numere_mo)
+        
+    print("\n🚀 [FINALIZAT] Nomenclatoarele unice au fost salvate la dimensiuni minime în Drive!")
 
 if __name__ == "__main__":
     parcurge_si_extrage()
