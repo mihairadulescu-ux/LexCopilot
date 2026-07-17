@@ -1,4 +1,4 @@
-name: Pipeline Descărcare Monitoare Oficiale Simple
+name: "1. Descărcare Monitoare Simple"
 
 on:
   workflow_dispatch:
