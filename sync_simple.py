@@ -77,7 +77,6 @@ def incarca_pdf_in_drive(service, cale_local_pdf, nume_pdf, drive_folder_pdf):
     return fisier_drive.get("id")
 
 def executa_sincronizare():
-    # Preluare dinamică a variabilelor de mediu direct în firul de execuție principal al funcției
     an_curent = os.getenv("AN_CURENT")
     drive_folder_pdf = os.getenv("DRIVE_FOLDER_PDF")
     metadata_folder_id = os.getenv("METADATA_FOLDER_ID")
@@ -93,7 +92,6 @@ def executa_sincronizare():
     nume_registru = f"status_{an_curent}.csv"
     file_id_registru, randuri_registru = obtine_sau_creeaza_registru(service, nume_registru, metadata_folder_id)
     
-    # Colectăm doar tuplurile (numar, sufix) complet descărcate
     fisiere_simple_descarcate = set()
     for r in randuri_registru:
         if r["status"] == "descarcat" and r["sufix"] == "":
@@ -117,7 +115,7 @@ def executa_sincronizare():
                 
             # --- 2. FRÂNĂ INTELIGENTĂ ANI ISTORICI ---
             if an_curent != "2026" and consecutive_errors >= 100:
-                print(f"\n🛑 {YELLOW}[FINAL DE AN ISTORIC]{RESET} Am detectat {consecutive_errors} goluri consecutive în anul {an_curent}. Sigur s-a terminat anul. Oprire sprint.")
+                print(f"\n🛑 {YELLOW}[FINAL DE AN ISTORIC]{RESET} Am detectat {consecutive_errors} goluri consecutive în anul {an_curent}. Sigur s-a terminat anul. Oprire.")
                 break
                 
             if nr in fisiere_simple_descarcate:
