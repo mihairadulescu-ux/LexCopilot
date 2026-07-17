@@ -96,7 +96,8 @@ def parcurge_si_extrage():
     fisiere_xml = listeaza_xml_uri_drive(service)
     
     catalog_acte = []
-    fieldnames = ["emitent", "tip_act", "titlu_act", "numar_act", "an_act", "mo_numar", "mo_an"]
+    # Aceste coloane acoperă complet necesarul tău de cross-check cu PDF-urile din MO
+    fieldnames = ["emitent", "tip_act", "titlu_act", "numar_act", "an_act", "mo_numar", "mo_an", "fisier_xml_sursa"]
     
     count = 0
     for fx in fisiere_xml:
@@ -115,6 +116,7 @@ def parcurge_si_extrage():
                 
             for nod in noduri_acte:
                 act_data = {f: "" for f in fieldnames}
+                act_data["fisier_xml_sursa"] = nume_xml
                 
                 for copil in nod.iter():
                     tag_simplu = copil.tag.split('}')[-1].lower() if '}' in copil.tag else copil.tag.lower()
@@ -123,37 +125,67 @@ def parcurge_si_extrage():
                     if not text:
                         continue
                         
+                    # Mapare Emitent
                     if tag_simplu in ["emitent", "autor", "institutie"]:
                         act_data["emitent"] = text.upper()
+                    
+                    # Mapare Tip Act
+                    elif tag_simplu in ["tip", "tip_act", "tipact", "categorie"]:
+                        act_data["tip_act"] = text.upper()
+                        
+                    # Mapare Titlu Act
+                    elif tag_simplu in ["titlu", "titlu_act", "denumire", "text_titlu"]:
+                        act_data["titlu_act"] = text
+                        
+                    # Mapare Număr Act
+                    elif tag_simplu in ["numar", "numar_act", "nr", "nr_act"]:
+                        act_data["numar_act"] = text
+                    
+                    # Mapare An Act
                     elif tag_simplu in ["an", "an_act", "data", "data_act", "data_emitere"]:
                         an_m = re.search(r"\b(19\d{2}|20[0-2]\d)\b", text)
                         if an_m:
                             act_data["an_act"] = an_m.group(1)
                         else:
                             act_data["an_act"] = text
-                        if_an_m = an_m.group(1) if_an_m := an_m else None
-                        if if_an_m:
-                            act_data["an_act"] = if_an_m.group(1)
-                        else:
-                            act_data["an_act"] = text
-                    elif tag_simplu in ["mo", "mo_numar", "monitor", "monitor_oficial", "numar_mo"]:
-                        act_data["mo_numar"] = text
+                    
+                    # Mapare Număr Monitor Oficial din XML
+                    elif tag_simplu in ["mo", "mo_numar", "monitor", "monitor_oficial", "numar_mo", "publicare_nr"]:
+                        # Curățăm caractere parazite dacă există (ex: "M.Of. 12" -> "12")
+                        mo_curat = re.search(r"\b\d+\b", text)
+                        act_data["mo_numar"] = mo_curat.group(0) if mo_curat else text
                         
-                if act_data["emitent"] or act_data["tip_act"] or act_data["titlu_act"]:
+                    # Mapare An Monitor Oficial din XML (dacă există tag separat de dată publicare)
+                    elif tag_simplu in ["mo_an", "data_mo", "data_publicare", "publicare_data"]:
+                        an_mo_m = re.search(r"\b(19\d{2}|20[0-2]\d)\b", text)
+                        if an_mo_m:
+                            act_data["mo_an"] = an_mo_m.group(1)
+
+                # --- Reguli Inteligente de Salvare și Fallback pentru Cross-Check ---
+                if act_data["emitent"] or act_data["tip_act"] or act_data["titlu_act"] or act_data["numar_act"]:
+                    
+                    # Fallback pentru An Act
                     if not act_data["an_act"]:
                         act_data["an_act"] = an_implicit
                     else:
                         an_curat = re.search(r"\b(19\d{2}|20[0-2]\d)\b", str(act_data["an_act"]))
-                        if an_curat:
-                            act_data["an_act"] = an_curat.group(1)
-                            
+                        if_an = an_curat.group(1) if an_curat else None
+                        if if_an:
+                            act_data["an_act"] = if_an
+                    
+                    # Fallback critic pentru MO_NUMAR: Dacă XML-ul nu are nod de monitor, 
+                    # înseamnă că tot ce e în acea pagină aparține monitorului din numele fișierului!
+                    if not act_data["mo_numar"]:
+                        act_data["mo_numar"] = pag_implicit
+                    
+                    # Fallback critic pentru MO_AN
                     if not act_data["mo_an"]:
                         act_data["mo_an"] = an_implicit
                         
                     catalog_acte.append(act_data)
                     
         except Exception as e:
-            print(f"   ⚠️ Eroare la parsarea fișierului {nume_xml}: {e}")
+            print(f"    ⚠️ Eroare la parsarea fișierului {nume_xml}: {e}")
             
     print(f"\n📊 Extracție completă! Am strâns {len(catalog_acte)} înregistrări brute.")
     
