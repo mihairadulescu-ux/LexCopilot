@@ -1,6 +1,5 @@
 name: "1. Descărcare PDF-uri Simple (Matrice)"
 
-
 on:
   workflow_dispatch:
 
@@ -10,7 +9,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Matricea curată, exact de la primul an disponibil în format PDF
         an: [2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026]
 
     steps:
@@ -20,7 +18,7 @@ jobs:
       - name: Configurare mediu Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13' # <--- Upgrade direct la 3.11, fără avertismente de EOL
+          python-version: '3.11'
 
       - name: Instalare librării necesare
         run: |
@@ -28,9 +26,13 @@ jobs:
 
       - name: Executare Script Sincronizare PDF
         env:
+          # Fiind un fișier JSON privat, cheia contului rămâne în continuare sub SECRETS:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_PDF: ${{ secrets.DRIVE_FOLDER_PDF }}
-          METADATA_FOLDER_ID: ${{ secrets.METADATA_FOLDER_ID }}
+          
+          # Citire directă din meniul VARIABLES (Settings -> Secrets and Variables -> Variables):
+          DRIVE_FOLDER_PDF: ${{ vars.DRIVE_FOLDER_PDF }}
+          METADATA_FOLDER_ID: ${{ vars.METADATA_FOLDER_ID }}
+          
           AN_CURENT: ${{ matrix.an }}
         run: |
           python -u sync_simple.py
