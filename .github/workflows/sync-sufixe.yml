@@ -1,4 +1,4 @@
-name: "2. Descărcare Monitoare Oficiale Sufixe
+name: "2. Descărcare Monitoare Oficiale Sufixe"
 
 on:
   workflow_dispatch:
