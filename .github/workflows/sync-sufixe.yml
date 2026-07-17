@@ -1,4 +1,4 @@
-name: "2. Descărcare PDF-uri Sufixe (Matrice)"
+name: "2. Descărcare Monitoare cu Sufixe"
 
 on:
   workflow_dispatch: # Permite pornirea manuală din interfața GitHub
