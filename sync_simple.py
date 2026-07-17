@@ -23,8 +23,9 @@ def obtine_drive():
     creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
-def obtine_sau_creeaza_registru(service, nume_registru, metadata_folder_id):
-    query = f"'{metadata_folder_id}' in parents and name = '{nume_registru}' and trashed = false"
+def obtine_sau_creeaza_registru(service, nume_registru, drive_folder_pdf):
+    # Căutăm registrul structural direct în folderul principal de PDF, unde l-a pus scriptul de reset
+    query = f"'{drive_folder_pdf}' in parents and name = '{nume_registru}' and trashed = false"
     existente = service.files().list(
         q=query, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True, corpora="user"
     ).execute().get("files", [])
@@ -49,11 +50,11 @@ def obtine_sau_creeaza_registru(service, nume_registru, metadata_folder_id):
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
         
-        metadata = {'name': nume_registru, 'parents': [metadata_folder_id]}
+        metadata = {'name': nume_registru, 'parents': [drive_folder_pdf]}
         media = MediaFileUpload(cale_temp, mimetype="text/csv")
         nou = service.files().create(body=metadata, media_body=media, fields="id", supportsAllDrives=True).execute()
         os.remove(cale_temp)
-        print(f"🆕 [{GREEN}CREAT{RESET}] Registru CSV nou în folderul de metadate (ID: {nou['id']})")
+        print(f"🆕 [{GREEN}CREAT{RESET}] Registru CSV nou (ID: {nou['id']})")
         return nou["id"], []
 
 def salveaza_registru_in_drive(service, file_id, nume_registru, randuri):
@@ -79,19 +80,19 @@ def incarca_pdf_in_drive(service, cale_local_pdf, nume_pdf, drive_folder_pdf):
 def executa_sincronizare():
     an_curent = os.getenv("AN_CURENT")
     drive_folder_pdf = os.getenv("DRIVE_FOLDER_PDF")
-    metadata_folder_id = os.getenv("METADATA_FOLDER_ID")
 
-    if not an_curent or not drive_folder_pdf or not metadata_folder_id:
+    if not an_curent or not drive_folder_pdf:
         print(f"{RED}❌ EROARE CRITICĂ: Variabilele de mediu sunt incomplete!{RESET}")
-        print(f"-> AN_CURENT: '{an_curent}', DRIVE_FOLDER_PDF: '{drive_folder_pdf}', METADATA_FOLDER_ID: '{metadata_folder_id}'")
+        print(f"-> AN_CURENT: '{an_curent}', DRIVE_FOLDER_PDF: '{drive_folder_pdf}'")
         sys.exit(1)
         
     print(f"🌍 {GREEN}Inițializare pipeline legislativ pentru anul {an_curent}...{RESET}")
     service = obtine_drive()
     
     nume_registru = f"status_{an_curent}.csv"
-    file_id_registru, randuri_registru = obtine_sau_creeaza_registru(service, nume_registru, metadata_folder_id)
+    file_id_registru, randuri_registru = obtine_sau_creeaza_registru(service, nume_registru, drive_folder_pdf)
     
+    # Colectăm istoricul din fișierul citit din Drive
     fisiere_simple_descarcate = set()
     for r in randuri_registru:
         if r["status"] == "descarcat" and r["sufix"] == "":
@@ -197,7 +198,8 @@ def executa_sincronizare():
                 else:
                     print(f"   ⚠️ Numărul {nr} (istoric) nu există. Trecem peste.")
             
-            time.sleep(0.5)
+            # Pauză mărită la 1.5 secunde între request-uri ca să evităm 503-urile de la server
+            time.sleep(1.5)
             
             if download_counter > 0 and download_counter % 200 == 0:
                 print(f"\n☕ {YELLOW}[Pauză de protecție IP]{RESET} Am descărcat {download_counter} fișiere. Pauză de 5 minute (300s)...")
