@@ -33,7 +33,7 @@ def listeaza_toate_pdf_urile_fizice(service):
             pageSize=1000,
             supportsAllDrives=True, 
             includeItemsFromAllDrives=True, 
-            corporas="user"
+            corpora="user"
         ).execute()
         
         pdf_uri.extend(response.get("files", []))
