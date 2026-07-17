@@ -9,14 +9,8 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
-# --- CONFIGURĂRI STRICTE DIN MEDIU ---
-AN_CURENT = os.getenv("AN_CURENT")
-DRIVE_FOLDER_PDF = os.getenv("DRIVE_FOLDER_PDF")
-METADATA_FOLDER_ID = os.getenv("METADATA_FOLDER_ID")
-
 URL_TEMPLATE = "https://www.monitoruloficial.ro/emonitor/PDF_baza.php?an={an}&numar={numar}"
 
-# Culori consolă pentru lizibilitate
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
 RED = "\033[91m"
@@ -29,9 +23,8 @@ def obtine_drive():
     creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
-def obtine_sau_creeaza_registru(service, nume_registru):
-    """Încarcă registrul CSV existent din Drive sau creează unul nou dacă nu există."""
-    query = f"'{METADATA_FOLDER_ID}' in parents and name = '{nume_registru}' and trashed = false"
+def obtine_sau_creeaza_registru(service, nume_registru, metadata_folder_id):
+    query = f"'{metadata_folder_id}' in parents and name = '{nume_registru}' and trashed = false"
     existente = service.files().list(
         q=query, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True, corpora="user"
     ).execute().get("files", [])
@@ -56,7 +49,7 @@ def obtine_sau_creeaza_registru(service, nume_registru):
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
         
-        metadata = {'name': nume_registru, 'parents': [METADATA_FOLDER_ID]}
+        metadata = {'name': nume_registru, 'parents': [metadata_folder_id]}
         media = MediaFileUpload(cale_temp, mimetype="text/csv")
         nou = service.files().create(body=metadata, media_body=media, fields="id", supportsAllDrives=True).execute()
         os.remove(cale_temp)
@@ -64,7 +57,6 @@ def obtine_sau_creeaza_registru(service, nume_registru):
         return nou["id"], []
 
 def salveaza_registru_in_drive(service, file_id, nume_registru, randuri):
-    """Suprascrie incremental registrul în Google Drive."""
     cale_temp = f"temp_save_{nume_registru}"
     fieldnames = ["numar_baza", "sufix", "status", "dimensiune_kb", "drive_file_id"]
     
@@ -78,56 +70,61 @@ def salveaza_registru_in_drive(service, file_id, nume_registru, randuri):
     os.remove(cale_temp)
     return file_id
 
-def incarca_pdf_in_drive(service, cale_local_pdf, nume_pdf):
-    """Încarcă un fișier PDF în folderul dedicat din Drive."""
-    metadata = {'name': nume_pdf, 'parents': [DRIVE_FOLDER_PDF]}
+def incarca_pdf_in_drive(service, cale_local_pdf, nume_pdf, drive_folder_pdf):
+    metadata = {'name': nume_pdf, 'parents': [drive_folder_pdf]}
     media = MediaFileUpload(cale_local_pdf, mimetype="application/pdf", resumable=True)
     fisier_drive = service.files().create(body=metadata, media_body=media, fields="id", supportsAllDrives=True).execute()
     return fisier_drive.get("id")
 
 def executa_sincronizare():
-    if not AN_CURENT or not DRIVE_FOLDER_PDF or not METADATA_FOLDER_ID:
-        print(f"{RED}❌ EROARE CRITICĂ: Variabilele de mediu AN_CURENT, DRIVE_FOLDER_PDF sau METADATA_FOLDER_ID sunt incomplete!{RESET}")
+    # Preluare dinamică a variabilelor de mediu direct în firul de execuție principal al funcției
+    an_curent = os.getenv("AN_CURENT")
+    drive_folder_pdf = os.getenv("DRIVE_FOLDER_PDF")
+    metadata_folder_id = os.getenv("METADATA_FOLDER_ID")
+
+    if not an_curent or not drive_folder_pdf or not metadata_folder_id:
+        print(f"{RED}❌ EROARE CRITICĂ: Variabilele de mediu sunt incomplete!{RESET}")
+        print(f"-> AN_CURENT: '{an_curent}', DRIVE_FOLDER_PDF: '{drive_folder_pdf}', METADATA_FOLDER_ID: '{metadata_folder_id}'")
         sys.exit(1)
         
-    print(f"🌍 {GREEN}Inițializare pipeline legislativ pentru anul {AN_CURENT}...{RESET}")
+    print(f"🌍 {GREEN}Inițializare pipeline legislativ pentru anul {an_curent}...{RESET}")
     service = obtine_drive()
     
-    nume_registru = f"status_{AN_CURENT}.csv"
-    file_id_registru, randuri_registru = obtine_sau_creeaza_registru(service, nume_registru)
+    nume_registru = f"status_{an_curent}.csv"
+    file_id_registru, randuri_registru = obtine_sau_creeaza_registru(service, nume_registru, metadata_folder_id)
     
-    # Mapăm fișierele deja procesate (doar cele descarcate cu succes, cele inexistent au fost rase de utilitarul de reset)
-    fisiere_procesate = set()
+    # Colectăm doar tuplurile (numar, sufix) complet descărcate
+    fisiere_simple_descarcate = set()
     for r in randuri_registru:
-        if r["status"] == "descarcat":
-            fisiere_procesate.add(int(r["numar_baza"]))
+        if r["status"] == "descarcat" and r["sufix"] == "":
+            fisiere_simple_descarcate.add(int(r["numar_baza"]))
             
-    print(f"📊 Anul {AN_CURENT}: {len(fisiere_procesate)} numere valide deja mapate în registru.")
+    print(f"📊 Anul {an_curent}: {len(fisiere_simple_descarcate)} numere simple validate deja în Drive.")
     
     limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
     timeout = httpx.Timeout(30.0, connect=15.0)
     
     download_counter = 0
-    consecutive_errors = 0  # Contor pentru frânele inteligente
+    consecutive_errors = 0  
     
     with httpx.Client(limits=limits, timeout=timeout, follow_redirects=True) as client:
         for nr in range(1, 1201):
             
             # --- 1. FRÂNĂ INTELIGENTĂ AN CURENT (2026) ---
-            if AN_CURENT == "2026" and consecutive_errors >= 7:
+            if an_curent == "2026" and consecutive_errors >= 7:
                 print(f"\n🛑 {YELLOW}[FRÂNĂ 2026]{RESET} S-au detectat {consecutive_errors} goluri consecutive. Am ajuns la zi cu anul 2026. Oprire.")
                 break
                 
-            # --- 2. FRÂNĂ INTELIGENTĂ ANI ISTORICI (Ex: 2003) ---
-            if AN_CURENT != "2026" and consecutive_errors >= 100:
-                print(f"\n🛑 {YELLOW}[FINAL DE AN ISTORIC]{RESET} Am detectat {consecutive_errors} goluri consecutive în anul {AN_CURENT}. Sigur s-a terminat anul. Oprire sprint.")
+            # --- 2. FRÂNĂ INTELIGENTĂ ANI ISTORICI ---
+            if an_curent != "2026" and consecutive_errors >= 100:
+                print(f"\n🛑 {YELLOW}[FINAL DE AN ISTORIC]{RESET} Am detectat {consecutive_errors} goluri consecutive în anul {an_curent}. Sigur s-a terminat anul. Oprire sprint.")
                 break
                 
-            if nr in fisiere_procesate:
+            if nr in fisiere_simple_descarcate:
                 continue
                 
-            nume_pdf = f"MO_PI_{AN_CURENT}_{nr}.pdf"
-            url = URL_TEMPLATE.format(an=AN_CURENT, numar=nr)
+            nume_pdf = f"MO_PI_{an_curent}_{nr}.pdf"
+            url = URL_TEMPLATE.format(an=an_curent, numar=nr)
             cale_pdf_temp = f"temp_{nume_pdf}"
             
             print(f"⏳ Descarcă {nume_pdf}...")
@@ -151,25 +148,39 @@ def executa_sincronizare():
                 print(f"   {RED}⚠️ Eroare de rețea la numărul {nr}: {e}{RESET}")
                 time.sleep(2)
                 
-            # --- LOGICĂ DE SALVARE ȘI BUFFER ---
+            # --- LOGICĂ DE SALVARE ȘI SINCRONIZARE ---
             if descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) > 2000:
                 dimensiune_bytes = os.path.getsize(cale_pdf_temp)
                 dimensiune_kb = f"{dimensiune_bytes / 1024:.1f}"
                 
                 try:
-                    drive_id = incarca_pdf_in_drive(service, cale_local_pdf=cale_pdf_temp, nume_pdf=nume_pdf)
+                    drive_id = incarca_pdf_in_drive(service, cale_local_pdf=cale_pdf_temp, nume_pdf=nume_pdf, drive_folder_pdf=drive_folder_pdf)
                     print(f"   {GREEN}✓ Succes ({dimensiune_kb} KB) -> ID: {drive_id}{RESET}")
                     
-                    randuri_registru.append({
-                        "numar_baza": str(nr),
-                        "sufix": "",
-                        "status": "descarcat",
-                        "dimensiune_kb": dimensiune_kb,
-                        "drive_file_id": drive_id
-                    })
+                    gasit_in_csv = False
+                    for idx, r in enumerate(randuri_registru):
+                        if int(r["numar_baza"]) == nr and r["sufix"] == "":
+                            randuri_registru[idx] = {
+                                "numar_baza": str(nr),
+                                "sufix": "",
+                                "status": "descarcat",
+                                "dimensiune_kb": dimensiune_kb,
+                                "drive_file_id": drive_id
+                            }
+                            gasit_in_csv = True
+                            break
+                    
+                    if not gasit_in_csv:
+                        randuri_registru.append({
+                            "numar_baza": str(nr),
+                            "sufix": "",
+                            "status": "descarcat",
+                            "dimensiune_kb": dimensiune_kb,
+                            "drive_file_id": drive_id
+                        })
                     
                     file_id_registru = salveaza_registru_in_drive(service, file_id_registru, nume_registru, randuri_registru)
-                    consecutive_errors = 0  # Am găsit un fișier valid, resetăm contorul de goluri!
+                    consecutive_errors = 0  
                     download_counter += 1
                     
                 except Exception as e:
@@ -183,22 +194,19 @@ def executa_sincronizare():
                 
                 consecutive_errors += 1
                 
-                # --- ZERO SCRIERE PENTRU TOTI ANII ---
-                # Nu mai adăugăm rânduri de "inexistent" deloc. 
-                # Tabelul se va termina matematic la ultimul succes.
-                if AN_CURENT == "2026":
-                    print(f"   ⚠️ Numărul {nr} (2026) nu este încă publicat. Ignorat de la scrierea în registru.")
+                if an_curent == "2026":
+                    print(f"   ⚠️ Numărul {nr} (2026) nu este încă publicat în realitate. Trecem peste.")
                 else:
-                    print(f"   ⚠️ Numărul {nr} (istoric) nu există în baza de date. Trecem peste fără salvare.")
+                    print(f"   ⚠️ Numărul {nr} (istoric) nu există. Trecem peste.")
             
             time.sleep(0.5)
             
             if download_counter > 0 and download_counter % 200 == 0:
-                print(f"\n☕ {YELLOW}[Pauză inteligentă]{RESET} Am descărcat {download_counter} fișiere. Pauză de 5 minute (300s)...")
+                print(f"\n☕ {YELLOW}[Pauză de protecție IP]{RESET} Am descărcat {download_counter} fișiere. Pauză de 5 minute (300s)...")
                 time.sleep(300)
                 download_counter = 0
 
-    print(f"\n🏁 {GREEN}Procesul de sincronizare pentru anul {AN_CURENT} s-a finalizat elegant.{RESET}")
+    print(f"\n🏁 {GREEN}Procesul de sincronizare pentru anul {an_curent} s-a finalizat elegant și curat.{RESET}")
 
 if __name__ == "__main__":
     executa_sincronizare()
