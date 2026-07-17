@@ -1,15 +1,17 @@
 name: "1. Descărcare PDF-uri Simple (Matrice)"
+
+
 on:
-  workflow_dispatch: # Permite pornirea manuală a pipeline-ului din interfața GitHub Actions
+  workflow_dispatch:
 
 jobs:
   sincronizare_matrice:
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false # CRITIC: Dacă un an dă timeout, restul continuă să descarce independenți!
+      fail-fast: false
       matrix:
-        # Lista completă a tuturor anilor care vor rula în paralel
-        an: [1990, 1991, 1992, 1993, 1994, 1995, 1996, 1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026]
+        # Matricea curată, exact de la primul an disponibil în format PDF
+        an: [2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026]
 
     steps:
       - name: Descărcare cod din repository
@@ -18,36 +20,11 @@ jobs:
       - name: Configurare mediu Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.13' # <--- Upgrade direct la 3.11, fără avertismente de EOL
 
       - name: Instalare librării necesare
         run: |
           pip install httpx google-auth google-auth-httplib2 google-api-python-client
-
-      - name: 🔍 Debug Diagnostic Mediu
-        # Acest pas ne va arăta exact ce variabile ajung goale la runner
-        env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_PDF: ${{ secrets.DRIVE_FOLDER_PDF }}
-          METADATA_FOLDER_ID: ${{ secrets.METADATA_FOLDER_ID }}
-          # Încercăm și varianta cu vars. în caz că le-ai salvat în celălalt tab din GitHub
-          VARS_FOLDER_PDF: ${{ vars.DRIVE_FOLDER_PDF }}
-          VARS_METADATA_ID: ${{ vars.METADATA_FOLDER_ID }}
-        run: |
-          echo "=========================================================="
-          echo "📊 DIAGNOSTIC MEDIU PENTRU COORDONATORUL RUNNER-ULUI"
-          echo "=========================================================="
-          echo "▶️ Anul activ curent primit din matrice: ${{ matrix.an }}"
-          echo "▶️ Lungime secret GOOGLE_SERVICE_ACCOUNT_JSON: ${#GOOGLE_SERVICE_ACCOUNT_JSON} caractere"
-          echo "----------------------------------------------------------"
-          echo "📌 Testare surse SECRETS (Settings -> Secrets -> Actions):"
-          echo "▶️ Lungime DRIVE_FOLDER_PDF: ${#DRIVE_FOLDER_PDF} caractere"
-          echo "▶️ Lungime METADATA_FOLDER_ID: ${#METADATA_FOLDER_ID} caractere"
-          echo "----------------------------------------------------------"
-          echo "📌 Testare surse VARIABLES (Settings -> Variables -> Actions):"
-          echo "▶️ Lungime vars.DRIVE_FOLDER_PDF: ${#VARS_FOLDER_PDF} caractere"
-          echo "▶️ Lungime vars.METADATA_FOLDER_ID: ${#VARS_METADATA_ID} caractere"
-          echo "=========================================================="
 
       - name: Executare Script Sincronizare PDF
         env:
