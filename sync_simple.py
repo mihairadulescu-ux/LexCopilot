@@ -96,28 +96,31 @@ def executa_sincronizare():
     nume_registru = f"status_{AN_CURENT}.csv"
     file_id_registru, randuri_registru = obtine_sau_creeaza_registru(service, nume_registru)
     
-    # Mapăm fișierele deja procesate
+    # Mapăm fișierele deja procesate (doar cele descarcate cu succes, cele inexistent au fost rase de utilitarul de reset)
     fisiere_procesate = set()
     for r in randuri_registru:
-        if r["status"] in ["descarcat", "inexistent"]:
+        if r["status"] == "descarcat":
             fisiere_procesate.add(int(r["numar_baza"]))
             
-    print(f"📊 Anul {AN_CURENT}: {len(fisiere_procesate)} numere deja mapate în registru.")
+    print(f"📊 Anul {AN_CURENT}: {len(fisiere_procesate)} numere valide deja mapate în registru.")
     
-    # Configurare client HTTP cu politici de Keep-Alive și Timeout generos
     limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
     timeout = httpx.Timeout(30.0, connect=15.0)
     
     download_counter = 0
-    consecutive_errors = 0  # Contor critic pentru detectarea capătului de an curent
+    consecutive_errors = 0  # Contor pentru frânele inteligente
     
     with httpx.Client(limits=limits, timeout=timeout, follow_redirects=True) as client:
-        # Rulăm în ordine strict crescătoare
         for nr in range(1, 1201):
             
-            # --- FRÂNĂ INTELIGENTĂ URGENȚĂ AN CURENT ---
+            # --- 1. FRÂNĂ INTELIGENTĂ AN CURENT (2026) ---
             if AN_CURENT == "2026" and consecutive_errors >= 7:
-                print(f"\n🛑 {YELLOW}[FRÂNĂ INTELIGENTĂ]{RESET} Am detectat {consecutive_errors} numere HTML consecutive. Am ajuns la zi cu publicațiile pe 2026. Oprire automată sprint.")
+                print(f"\n🛑 {YELLOW}[FRÂNĂ 2026]{RESET} S-au detectat {consecutive_errors} goluri consecutive. Am ajuns la zi cu anul 2026. Oprire.")
+                break
+                
+            # --- 2. FRÂNĂ INTELIGENTĂ ANI ISTORICI (Ex: 2003) ---
+            if AN_CURENT != "2026" and consecutive_errors >= 100:
+                print(f"\n🛑 {YELLOW}[FINAL DE AN ISTORIC]{RESET} Am detectat {consecutive_errors} goluri consecutive în anul {AN_CURENT}. Sigur s-a terminat anul. Oprire sprint.")
                 break
                 
             if nr in fisiere_procesate:
@@ -129,7 +132,6 @@ def executa_sincronizare():
             
             print(f"⏳ Descarcă {nume_pdf}...")
             descarcat_ok = False
-            dimensiune_kb = "0"
             
             try:
                 response = client.get(url)
@@ -149,7 +151,7 @@ def executa_sincronizare():
                 print(f"   {RED}⚠️ Eroare de rețea la numărul {nr}: {e}{RESET}")
                 time.sleep(2)
                 
-            # --- LOGICĂ DE SALVARE ȘI COLECTARE METADATE ---
+            # --- LOGICĂ DE SALVARE ȘI BUFFER ---
             if descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) > 2000:
                 dimensiune_bytes = os.path.getsize(cale_pdf_temp)
                 dimensiune_kb = f"{dimensiune_bytes / 1024:.1f}"
@@ -167,7 +169,7 @@ def executa_sincronizare():
                     })
                     
                     file_id_registru = salveaza_registru_in_drive(service, file_id_registru, nume_registru, randuri_registru)
-                    consecutive_errors = 0  # Am avut succes, resetăm contorul de erori HTML!
+                    consecutive_errors = 0  # Am găsit un fișier valid, resetăm contorul de goluri!
                     download_counter += 1
                     
                 except Exception as e:
@@ -181,21 +183,13 @@ def executa_sincronizare():
                 
                 consecutive_errors += 1
                 
-                # --- ASIGURARE ZERO POLUARE REGISTRU PENTRU ANUL CURENT ---
-                if AN_CURENT != "2026":
-                    # Pentru anii trecuți, e sigur 100% că numărul nu există istoric, îl salvăm ca inexistent
-                    randuri_registru.append({
-                        "numar_baza": str(nr),
-                        "sufix": "",
-                        "status": "inexistent",
-                        "dimensiune_kb": "0",
-                        "drive_file_id": ""
-                    })
-                    file_id_registru = salveaza_registru_in_drive(service, file_id_registru, nume_registru, randuri_registru)
+                # --- ZERO SCRIERE PENTRU TOTI ANII ---
+                # Nu mai adăugăm rânduri de "inexistent" deloc. 
+                # Tabelul se va termina matematic la ultimul succes.
+                if AN_CURENT == "2026":
+                    print(f"   ⚠️ Numărul {nr} (2026) nu este încă publicat. Ignorat de la scrierea în registru.")
                 else:
-                    # Pentru 2026, DOAR afișăm avertismentul. NU scriem în buffer, NU salvăm în Drive.
-                    # Astfel, ultimele 7 rânduri de test nu vor exista fizic în CSV la oprire!
-                    print(f"   ⚠️ Numărul {nr} nu este încă publicat în realitate. Ignorat complet de la scrierea în registru.")
+                    print(f"   ⚠️ Numărul {nr} (istoric) nu există în baza de date. Trecem peste fără salvare.")
             
             time.sleep(0.5)
             
