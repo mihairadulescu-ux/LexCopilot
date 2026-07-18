@@ -70,7 +70,6 @@ def executa_sincronizare_totala():
     nume_registru = f"status_{AN_CURENT}.csv"
     file_id_registru, randuri_registru = obtine_sau_creeaza_registru(service, nume_registru, DRIVE_FOLDER_PDF)
     
-    # Încărcăm în memorie doar ce e "descarcat" sau verificat ca "inexistent"
     fisiere_rezolvate = {(int(r["numar_baza"]), r["sufix"]) for r in randuri_registru if r["status"] in ["descarcat", "inexistent"]}
     
     download_counter, consecutive_errors = 0, 0  
@@ -84,7 +83,6 @@ def executa_sincronizare_totala():
             nr_baza_eșuat = False
             
             for sufix in VARIANTE_DE_VERIFICAT:
-                # Dacă l-am procesat anterior (e în CSV ca descărcat sau 404 confirmat), sărim peste
                 if (nr, sufix) in fisiere_rezolvate: continue
                     
                 nume_pdf = f"MO_PI_{AN_CURENT}_{nr}{sufix}.pdf"
@@ -135,7 +133,6 @@ def executa_sincronizare_totala():
                 elif lovit_404 or (descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) <= 2000):
                     if os.path.exists(cale_pdf_temp): os.remove(cale_pdf_temp)
                     
-                    # Marcăm inexistent ca să nu-l mai căutăm la rulările viitoare
                     gasit = False
                     for idx, r in enumerate(randuri_registru):
                         if int(r["numar_baza"]) == nr and r["sufix"] == sufix:
@@ -145,17 +142,19 @@ def executa_sincronizare_totala():
                     if not gasit:
                         randuri_registru.append({"numar_baza": str(nr), "sufix": sufix, "status": "inexistent", "dimensiune_kb": "0", "drive_file_id": ""})
                     
-                    # MAGIA ANTI-WAF: Dacă numărul simplu a dat 404, clar nu există nici Bis/Tris pentru el. Ieșim din for-ul sufixelor.
+                    # Dacă numărul simplu nu există, nu căutăm sufixe
                     if sufix == "": 
                         nr_baza_eșuat = True
                         break 
                 
-                # CAZ 3: EROARE TEMPORARĂ (503, Timeout etc) - nu scriem nimic, încercăm data viitoare
+                # CAZ 3: EROARE TEMPORARĂ (503, EROARE REȚEA)
                 else:
                     if os.path.exists(cale_pdf_temp): os.remove(cale_pdf_temp)
-                    if sufix == "": nr_baza_eșuat = True
+                    if sufix == "": 
+                        nr_baza_eșuat = True
+                        # OPTIMIZARE: Dacă numărul simplu e blocat/503, oprim verificarea sufixelor pentru acest număr
+                        break
                 
-                # Salvăm CSV-ul actualizat
                 file_id_registru = salveaza_registru_in_drive(service, file_id_registru, nume_registru, randuri_registru)
                 
                 if lovit_503: time.sleep(5.0)
