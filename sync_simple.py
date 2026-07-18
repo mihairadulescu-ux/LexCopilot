@@ -89,12 +89,12 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
     este_anul_curent_real = (str(an) == "2026")
     are_eoy = any(r["status"] == "EndOfYear" for r in randuri_registru)
     
-    # Dacă este Faza 1 și avem deja EoY, nu mai are rost să rulăm deloc Faza 1
     if faza == 1 and are_eoy and not este_anul_curent_real:
         print(f"🛑 [SKIP FAZA 1] Anul istoric {an} are deja marcajul EndOfYear în registru.")
         return file_id_registru
 
     deja_procesate = set()
+    numere_valide_faza1 = set()
     ultimul_numar_valid = None
 
     for r in randuri_registru:
@@ -102,25 +102,63 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
         if r["status"] == "descarcat":
             deja_procesate.add(cheie)
             if r["sufix"] == "":
+                numere_valide_faza1.add(int(r["numar_baza"]))
                 ultimul_numar_valid = int(r["numar_baza"])
         elif r["status"] == "EndOfYear" and r["sufix"] == "":
             ultimul_numar_valid = int(r["numar_baza"])
 
-    liste_sufixe = [""] if faza == 1 else ["a", "b", "c", "d", "bis"]
     download_counter = 0
     consecutive_404 = 0
     
     for nr in range(1, 1301):
-        for sufix in liste_sufixe:
-            
-            if (nr, sufix) in deja_procesate:
-                if sufix == "":
-                    ultimul_numar_valid = nr
+        if faza == 2 and nr not in numere_valide_faza1:
+            if not este_anul_curent_real:
                 continue
-                
-            if faza == 2 and ultimul_numar_valid and nr > (ultimul_numar_valid + 10) and not este_anul_curent_real:
+            elif ultimul_numar_valid and nr > (ultimul_numar_valid + 2):
                 break
 
+        if faza == 1:
+            sufixe_de_verificat = [""]
+        else:
+            sufixe_de_verificat = []
+            
+            # Secvența alfabetică
+            for litera in ["a", "b", "c", "d"]:
+                if (nr, litera) in deja_procesate:
+                    continue
+                url = URL_TEMPLATE.format(an=an, numar=nr, sufix=litera)
+                try:
+                    res = client.head(url)
+                    exista = (res.status_code == 200 and "application/pdf" in res.headers.get("content-type", "").lower())
+                except:
+                    exista = False
+                
+                if exista:
+                    sufixe_de_verificat.append(litera)
+                else:
+                    break
+            
+            # Secvența latină
+            for latina in ["bis", "tris", "quater"]:
+                if (nr, latina) in deja_procesate:
+                    continue
+                url = URL_TEMPLATE.format(an=an, numar=nr, sufix=latina)
+                try:
+                    res = client.head(url)
+                    exista = (res.status_code == 200 and "application/pdf" in res.headers.get("content-type", "").lower())
+                except:
+                    exista = False
+                    
+                if exista:
+                    sufixe_de_verificat.append(latina)
+                else:
+                    break
+                    
+            # Ediția Specială (S)
+            if (nr, "S") not in deja_procesate:
+                sufixe_de_verificat.append("S")
+
+        for sufix in sufixe_de_verificat:
             nume_afisare_sufix = f"_{sufix}" if sufix else ""
             nume_pdf = f"MO_PI_{an}_{nr}{nume_afisare_sufix}.pdf"
             url = URL_TEMPLATE.format(an=an, numar=nr, sufix=sufix)
@@ -151,7 +189,7 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                 status_special = "NETWORK_OVERLOAD"
                 
             if este_anul_curent_real and status_special in ["NETWORK_OVERLOAD", "SERVER_ERROR_500", "SERVER_ERROR_502", "SERVER_ERROR_503", "SERVER_ERROR_504"]:
-                print(f"   ⚠️ {YELLOW}[SKIP PROTECTIV 2026]{RESET} Server suprasolicitat la {nume_pdf}. Abandonăm deocamdată. Reluăm la noapte.")
+                print(f"   ⚠️ {YELLOW}[SKIP PROTECTIV 2026]{RESET} Server suprasolicitat la {nume_pdf}. Abandonăm deocamdată.")
                 time.sleep(1.5)
                 continue
 
@@ -175,7 +213,6 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                 finally:
                     if os.path.exists(cale_pdf_temp):
                         os.remove(cale_pdf_temp)
-                        
             else:
                 if os.path.exists(cale_pdf_temp):
                     os.remove(cale_pdf_temp)
@@ -189,14 +226,13 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                 if faza == 1:
                     if este_anul_curent_real:
                         if consecutive_404 >= 15:
-                            print(f"\n🛑 {YELLOW}[FRÂNĂ AN CURENT 2026]{RESET} S-au detectat {consecutive_404} goluri consecutive. Suntem la zi. Oprire.")
+                            print(f"\n🛑 {YELLOW}[FRÂNĂ AN CURENT 2026]{RESET} S-au detectat {consecutive_404} goluri consecutive. Suntem la zi.")
                             file_id_registru = salveaza_registru_in_drive(service, file_id_registru, nume_registru, randuri_registru)
                             return file_id_registru
                     else:
                         if consecutive_404 >= 5:
                             numar_marcare = ultimul_numar_valid if ultimul_numar_valid is not None else 0
                             print(f"\n🛑 {YELLOW}[EARLY EXIT AN ISTORIC {an}]{RESET} S-au găsit 5 erori 404 consecutive.")
-                            print(f"➡️ Marcăm EndOfYear în Drive la ultimul număr valid: {numar_marcare}")
                             
                             for eliminat in range(nr - 4, nr + 1):
                                 randuri_registru = [r for r in randuri_registru if not (int(r["numar_baza"]) == eliminat and r["sufix"] == "")]
@@ -223,34 +259,30 @@ def incarca_pdf_in_drive(service, cale_local_pdf, nume_pdf, drive_folder_pdf):
     return fisier_drive.get("id")
 
 def executa_sincronizare():
-    an_curent_raw = os.getenv("AN_CURENT")
+    an_raw = os.getenv("AN_CURENT")
     drive_folder_pdf = os.getenv("DRIVE_FOLDER_PDF")
 
-    if not an_curent_raw or not drive_folder_pdf:
+    if not an_raw or not drive_folder_pdf:
         print(f"{RED}❌ EROARE CRITICĂ: Variabile de mediu incomplete.{RESET}")
         sys.exit(1)
         
-    ani_de_procesat = [int(x.strip()) for x in an_curent_raw.split(",") if x.strip()]
-    print(f"🌍 {GREEN}Orchestrator universal pornit în mod secvențial pe ani.{RESET}")
+    an = int(an_raw.strip())
+    print(f"🌍 {GREEN}Procesare paralelă instanțiată. Rulăm exclusiv anul:{RESET} {an}")
     service = obtine_drive()
     
     limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
     timeout = httpx.Timeout(30.0, connect=15.0)
     
     with httpx.Client(limits=limits, timeout=timeout, follow_redirects=True) as client:
-        # --- AICI S-A MODIFICAT LOGICA: Buclele sunt inversate ---
-        for an in ani_de_procesat:
-            print(f"\n=======================================================")
-            print(f"📅 ÎNCEPE PROCESAREA COMPLETĂ PENTRU ANUL: {an}")
-            print(f"=======================================================")
-            
-            # Pasul 1: Descarcă monitoarele simple pentru anul curent din buclă
-            proceseaza_an_faza(client, service, an, faza=1, drive_folder_pdf=drive_folder_pdf)
-            
-            # Pasul 2: Direct, caută și sufixele pentru același an înainte de a pleca mai departe
-            proceseaza_an_faza(client, service, an, faza=2, drive_folder_pdf=drive_folder_pdf)
+        print(f"\n=======================================================")
+        print(f"📅 PROCESARE COMPLETĂ INTEGRALĂ PENTRU ANUL: {an}")
+        print(f"=======================================================")
+        
+        # Ruleaza ambele faze direct pentru acest singur an primit
+        proceseaza_an_faza(client, service, an, faza=1, drive_folder_pdf=drive_folder_pdf)
+        proceseaza_an_faza(client, service, an, faza=2, drive_folder_pdf=drive_folder_pdf)
 
-    print(f"\n🏁 {GREEN}Toți anii din matrice au fost finalizați complet (Faza 1 + Faza 2)!{RESET}")
+    print(f"\n🏁 {GREEN}Rularea pentru anul {an} a fost finalizată cu succes!{RESET}")
 
 if __name__ == "__main__":
     executa_sincronizare()
