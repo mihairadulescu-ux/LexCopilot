@@ -65,12 +65,12 @@ def executa_sincronizare_totala():
         print(f"{RED}❌ EROARE CRITICĂ: Variabilele de mediu sunt incomplete!{RESET}")
         sys.exit(1)
         
-    print(f"🌍 {GREEN}Pornire pipeline UNIFICAT (Varianta B) pentru anul {AN_CURENT}...{RESET}")
+    print(f"🌍 {GREEN}Pornire pipeline UNIFICAT pentru anul {AN_CURENT}...{RESET}")
     service = obtine_drive()
     nume_registru = f"status_{AN_CURENT}.csv"
     file_id_registru, randuri_registru = obtine_sau_creeaza_registru(service, nume_registru, DRIVE_FOLDER_PDF)
     
-    # Sărim peste tot ce e "descarcat" SAU deja marcat ca "inexistent"
+    # Încărcăm în memorie doar ce e "descarcat" sau verificat ca "inexistent"
     fisiere_rezolvate = {(int(r["numar_baza"]), r["sufix"]) for r in randuri_registru if r["status"] in ["descarcat", "inexistent"]}
     
     download_counter, consecutive_errors = 0, 0  
@@ -84,6 +84,7 @@ def executa_sincronizare_totala():
             nr_baza_eșuat = False
             
             for sufix in VARIANTE_DE_VERIFICAT:
+                # Dacă l-am procesat anterior (e în CSV ca descărcat sau 404 confirmat), sărim peste
                 if (nr, sufix) in fisiere_rezolvate: continue
                     
                 nume_pdf = f"MO_PI_{AN_CURENT}_{nr}{sufix}.pdf"
@@ -99,7 +100,7 @@ def executa_sincronizare_totala():
                         with open(cale_pdf_temp, "wb") as f_pdf: f_pdf.write(response.content)
                         descarcat_ok = True
                     elif response.status_code == 404:
-                        print(f"   {YELLOW}⚠ Fișier inexistent pe server (404) la {nume_pdf}. Se va marca în registru.{RESET}")
+                        print(f"   {YELLOW}⚠ Fișier inexistent pe server (404) la {nume_pdf}.{RESET}")
                         lovit_404 = True
                     elif response.status_code == 503:
                         print(f"   {RED}✗ Server ocupat (503) la {nume_pdf}.{RESET}")
@@ -108,14 +109,13 @@ def executa_sincronizare_totala():
                     print(f"   ⚠️ Conexiune picată la {nume_pdf}: {e}")
                     time.sleep(3)
                     
-                # Dacă s-a descărcat corect și e fișier PDF valid (peste 2KB)
+                # CAZ 1: GĂSIT ȘI VALID
                 if descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) > 2000:
                     dimensiune_kb = f"{os.path.getsize(cale_pdf_temp) / 1024:.1f}"
                     try:
                         drive_id = incarca_pdf_in_drive(service, cale_pdf_temp, nume_pdf, DRIVE_FOLDER_PDF)
                         print(f"   {GREEN}✓ Salvat în Drive -> ID: {drive_id}{RESET}")
                         
-                        # Actualizăm rândul ca descărcat
                         gasit = False
                         for idx, r in enumerate(randuri_registru):
                             if int(r["numar_baza"]) == nr and r["sufix"] == sufix:
@@ -131,11 +131,11 @@ def executa_sincronizare_totala():
                     finally:
                         if os.path.exists(cale_pdf_temp): os.remove(cale_pdf_temp)
                 
-                # Dacă fișierul e 404 sau e o pagină HTML de eroare de la server (sub 2KB)
+                # CAZ 2: SIGUR NU EXISTĂ (404)
                 elif lovit_404 or (descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) <= 2000):
                     if os.path.exists(cale_pdf_temp): os.remove(cale_pdf_temp)
                     
-                    # Îl marcăm ca inexistent ca să nu mai trimitem cereri de rețea data viitoare
+                    # Marcăm inexistent ca să nu-l mai căutăm la rulările viitoare
                     gasit = False
                     for idx, r in enumerate(randuri_registru):
                         if int(r["numar_baza"]) == nr and r["sufix"] == sufix:
@@ -145,14 +145,17 @@ def executa_sincronizare_totala():
                     if not gasit:
                         randuri_registru.append({"numar_baza": str(nr), "sufix": sufix, "status": "inexistent", "dimensiune_kb": "0", "drive_file_id": ""})
                     
-                    if sufix == "": nr_baza_eșuat = True
+                    # MAGIA ANTI-WAF: Dacă numărul simplu a dat 404, clar nu există nici Bis/Tris pentru el. Ieșim din for-ul sufixelor.
+                    if sufix == "": 
+                        nr_baza_eșuat = True
+                        break 
                 
+                # CAZ 3: EROARE TEMPORARĂ (503, Timeout etc) - nu scriem nimic, încercăm data viitoare
                 else:
-                    # Erori temporare (503, Timeout). Nu marcăm în CSV, doar curățăm fișierul local.
                     if os.path.exists(cale_pdf_temp): os.remove(cale_pdf_temp)
                     if sufix == "": nr_baza_eșuat = True
                 
-                # Salvăm registrul în Drive după fiecare interogare finalizată
+                # Salvăm CSV-ul actualizat
                 file_id_registru = salveaza_registru_in_drive(service, file_id_registru, nume_registru, randuri_registru)
                 
                 if lovit_503: time.sleep(5.0)
