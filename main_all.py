@@ -23,9 +23,9 @@ from zeep.plugins import HistoryPlugin
 GOOGLE_DRIVE_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
-# Detectare flexibilă: citește orice variabilă trimisă din YAML
-an_detectat = os.getenv("AN_CURENT") or os.getenv("START_YEAR") or "2026"
-TARGET_YEAR = int(str(an_detectat).strip())
+# Citim corect intervalul definit în segmentul curent al matricei YAML
+START_YEAR = int(os.getenv("START_YEAR", "2000"))
+END_YEAR = int(os.getenv("END_YEAR", "2026"))
 
 
 def get_drive_service():
@@ -73,6 +73,7 @@ def get_already_downloaded_pages(service, target_year):
                 match = re.search(r"_pag(\d+)\.xml$", name)
                 if match:
                     valoare_pagina = int(match.group(1))
+                    # ELIMINAT: Fără limita de 150. Permitem citirea tuturor paginilor valide salvate istoric.
                     if valoare_pagina < 99999:
                         pages.add(valoare_pagina)
                     else:
@@ -235,14 +236,23 @@ def download_year(drive_service, composite_type_name, target_year):
 
 
 def download_laws_main():
-    """Funcția principală care orchestrează descărcarea pe anul curent selectat."""
+    """Funcția principală care ciclează prin anii din segmentul alocat."""
     try:
-        print(f"{VERDE}🚀 Pornire procesor XML universal adaptiv. An curent țintă: {TARGET_YEAR}...{RESET}")
+        print(f"{VERDE}🚀 Pornire segment industrial paralel. Interval curent alocat: {START_YEAR} – {END_YEAR}...{RESET}")
         drive_service = get_drive_service()
         composite_type_name = "{http://schemas.datacontract.org/2004/07/FreeWebService}CompositeType"
+        total_files_segment = 0
         
-        files_saved = download_year(drive_service, composite_type_name, TARGET_YEAR)
-        print(f"\n{VERDE}🎉🎉 PROCES COMPLETAT pentru anul {TARGET_YEAR}. Total fișiere noi: {files_saved}{RESET}")
+        # Buclează prin toți anii din segmentul trimis de YAML (ex: 2005 și apoi 2006)
+        for year in range(START_YEAR, END_YEAR + 1):
+            try:
+                files_saved = download_year(drive_service, composite_type_name, year)
+                total_files_segment += files_saved
+            except Exception as year_error:
+                print(f"{ROSU}💥 Eroare izolată pentru anul {year}: {year_error}. Trecem la următorul an din segment.{RESET}")
+                time.sleep(10)
+
+        print(f"\n{VERDE}🎉🎉 SEGMENT FINALIZAT COMPLET ({START_YEAR}-{END_YEAR}). Total fișiere noi în acest segment: {total_files_segment}{RESET}")
 
     except Exception as e:
         print(f"{ROSU}💥 Eroare critică la inițializare: {str(e)}{RESET}")
