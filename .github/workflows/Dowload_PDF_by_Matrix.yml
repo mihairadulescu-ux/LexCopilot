@@ -1,4 +1,4 @@
-name: "[MO] Rulare Matrice Anuala"
+name: "1. Descarcare PDF pe matrice de ani"
 
 on:
   workflow_dispatch:
