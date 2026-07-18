@@ -29,7 +29,8 @@ jobs:
 
       - name: Executare Script Universal
         run: |
-          python sync-simple.py
+          # CORECTAT: S-a schimbat din cratima in underscore ca sa se potriveasca cu fisierul tau real
+          python sync_simple.py
         env:
           AN_CURENT: "2018,2019,2024,2026"
           DRIVE_FOLDER_PDF: ${{ vars.DRIVE_FOLDER_PDF }}
