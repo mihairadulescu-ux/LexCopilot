@@ -1,4 +1,4 @@
-name: Pipeline Sincronizare Monitoare PDF
+name: "🚀 REGELE PDF - Sincronizare Unificata"
 on:
   schedule:
     - cron: '0 6,18 * * *'
