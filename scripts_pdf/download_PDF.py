@@ -374,4 +374,4 @@ if __name__ == "__main__":
         
     print(f"🎯 [Config Matrix] Rulăm scriptul izolat pentru intervalul: {an_s} - {an_f}")
     descarcat_monitoare_precalculat(an_start=an_s, am_stop=an_f)
-    descarca_monitoare_precalculat(an_start=an_s, am_stop=an_f)
+ 
