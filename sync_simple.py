@@ -220,8 +220,15 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                 status_salvare = status_special if status_special else "Inexistent"
                 adauga_sau_updateaza_rand(randuri_registru, nr, sufix, status_salvare)
                 
-                if faza == 1 and (status_special == "404_NotFound" or (status_special and "SERVER_ERROR" not in status_special and "NETWORK" not in status_special)):
-                    consecutive_404 += 1
+                # --- CORECTURĂ: Numărăm strict erorile 404 REALE apărute în rularea asta ---
+                if faza == 1:
+                    if status_special == "404_NotFound":
+                        consecutive_404 += 1
+                    elif status_special == "NETWORK_OVERLOAD" or (status_special and "SERVER_ERROR" in status_special):
+                        # Dacă e eroare de rețea, NU o numărăm ca 404 (serverul e doar ocupat), dar nici nu o resetăm
+                        pass
+                    else:
+                        consecutive_404 += 1
                 
                 if faza == 1:
                     if este_anul_curent_real:
@@ -232,10 +239,12 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                     else:
                         if consecutive_404 >= 5:
                             numar_marcare = ultimul_numar_valid if ultimul_numar_valid is not None else 0
-                            print(f"\n🛑 {YELLOW}[EARLY EXIT AN ISTORIC {an}]{RESET} S-au găsit 5 erori 404 consecutive.")
+                            print(f"\n🛑 {YELLOW}[EARLY EXIT AN ISTORIC {an}]{RESET} S-au găsit 5 erori 404 consecutive reale în această rulare.")
                             
+                            # Ștergem din registru doar ultimele 5 eșecuri stricte din loop-ul curent
                             for eliminat in range(nr - 4, nr + 1):
-                                randuri_registru = [r for r in randuri_registru if not (int(r["numar_baza"]) == eliminat and r["sufix"] == "")]
+                                if eliminat > numar_marcare:
+                                    randuri_registru = [r for r in randuri_registru if not (int(r["numar_baza"]) == eliminat and r["sufix"] == "")]
                                 
                             adauga_sau_updateaza_rand(randuri_registru, numar_marcare, "", "EndOfYear")
                             file_id_registru = salveaza_registru_in_drive(service, file_id_registru, nume_registru, randuri_registru)
@@ -267,7 +276,7 @@ def executa_sincronizare():
         sys.exit(1)
         
     an = int(an_raw.strip())
-    print(f"🌍 {GREEN}Procesare paralelă instanțiată. Rulăm exclusiv anul:{RESET} {an}")
+    print(f"🌍 {GREEN}Procesare individuală protejată anti-early-exit fals. An:{RESET} {an}")
     service = obtine_drive()
     
     limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
@@ -275,14 +284,13 @@ def executa_sincronizare():
     
     with httpx.Client(limits=limits, timeout=timeout, follow_redirects=True) as client:
         print(f"\n=======================================================")
-        print(f"📅 PROCESARE COMPLETĂ INTEGRALĂ PENTRU ANUL: {an}")
+        print(f"📅 SCANARE SIMULTANĂ ANUL: {an}")
         print(f"=======================================================")
         
-        # Ruleaza ambele faze direct pentru acest singur an primit
         proceseaza_an_faza(client, service, an, faza=1, drive_folder_pdf=drive_folder_pdf)
         proceseaza_an_faza(client, service, an, faza=2, drive_folder_pdf=drive_folder_pdf)
 
-    print(f"\n🏁 {GREEN}Rularea pentru anul {an} a fost finalizată cu succes!{RESET}")
+    print(f"\n🏁 {GREEN}Rularea securizată pentru anul {an} s-a terminat!{RESET}")
 
 if __name__ == "__main__":
     executa_sincronizare()
