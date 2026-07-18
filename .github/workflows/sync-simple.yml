@@ -29,9 +29,8 @@ jobs:
 
       - name: Executare Script Universal
         run: |
-          python scripts/mo/mo_download_universal.py
+          python sync-simple.py
         env:
           AN_CURENT: "2018,2019,2024,2026"
-          # Corectat conform tabelului tau:
           DRIVE_FOLDER_PDF: ${{ vars.DRIVE_FOLDER_PDF }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
