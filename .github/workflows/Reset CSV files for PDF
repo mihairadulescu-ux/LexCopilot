@@ -1,4 +1,4 @@
-name: "Actualizare Registre și Curățare PDF"
+name: "2. Actualizare Registre și Curățare PDF"
 
 on:
   workflow_dispatch:
