@@ -27,4 +27,4 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           PYTHONUNBUFFERED: "1"
         run: |
-          python -u reset_registre.py
+         python -u scripts_pdf/inventar_si_reset.py
