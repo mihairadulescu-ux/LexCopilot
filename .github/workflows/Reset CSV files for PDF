@@ -1,9 +1,8 @@
-name: 2. Pipeline Inventar si Reset PDF
-
+name: 2. Refacere Inventar PDF si Reset CSV
 on:
   workflow_dispatch:
 
-jobs:
+jobs:e
   inventar_pdf:
     runs-on: ubuntu-latest
     steps:
