@@ -32,6 +32,6 @@ jobs:
           # Adaugam flag-ul "-u" (unbuffered) ca sa vedem print-urile instant pe ecran
           python -u sync_simple.py
         env:
-          AN_CURENT: "2018,2019,2024,2026"
+          AN_CURENT: "2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018,2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026"
           DRIVE_FOLDER_PDF: ${{ vars.DRIVE_FOLDER_PDF }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
