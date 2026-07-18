@@ -358,11 +358,20 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
     print("\n🎉 Rularea nocturnă s-a finalizat!", flush=True)
 
 if __name__ == "__main__":
-    if len(sys.argv) >= 3:
+    # Verificăm dinamic argumentele primite din linia de comandă
+    if len(sys.argv) == 2:
+        # Dacă s-a trimis un singur an (ex: GitHub Matrix pentru 2016)
+        an_s = int(sys.argv[1])
+        an_f = int(sys.argv[1])
+    elif len(sys.argv) >= 3:
+        # Dacă s-a trimis un interval (ex: 2000 2005)
         an_s = int(sys.argv[1])
         an_f = int(sys.argv[2])
     else:
+        # Dacă nu s-a trimis nimic, luăm din variabilele de mediu sau implicit
         an_s = START_YEAR
         an_f = END_YEAR
         
+    print(f"🎯 [Config Matrix] Rulăm scriptul izolat pentru intervalul: {an_s} - {an_f}")
+    descarcat_monitoare_precalculat(an_start=an_s, am_stop=an_f)
     descarca_monitoare_precalculat(an_start=an_s, am_stop=an_f)
