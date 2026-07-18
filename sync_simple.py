@@ -8,6 +8,7 @@ import httpx
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.errors import HttpError
 
 URL_TEMPLATE = "https://www.monitoruloficial.ro/emonitor/PDF_baza.php?an={an}&numar={numar}{sufix}"
 
@@ -65,9 +66,25 @@ def salveaza_registru_in_drive(service, file_id, nume_registru, randuri):
         writer.writeheader()
         writer.writerows(randuri)
         
-    media = MediaFileUpload(cale_temp, mimetype="text/csv", resumable=False)
-    service.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
-    os.remove(cale_temp)
+    # Mecanism de Retry rezistent la "User rate limit exceeded"
+    for incercare in range(1, 5):
+        try:
+            media = MediaFileUpload(cale_temp, mimetype="text/csv", resumable=False)
+            service.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
+            if os.path.exists(cale_temp):
+                os.remove(cale_temp)
+            return file_id
+        except HttpError as err:
+            if err.resp.status in [403, 429]:
+                timp_asteptare = incercare * 5
+                print(f"   🛑 {YELLOW}[Limită Google API]{RESET} Serverul Google e suprasolicitat. Reîncercare în {timp_asteptare}s...")
+                time.sleep(timp_asteptare)
+            else:
+                if os.path.exists(cale_temp):
+                    os.remove(cale_temp)
+                raise err
+    if os.path.exists(cale_temp):
+        os.remove(cale_temp)
     return file_id
 
 def adauga_sau_updateaza_rand(randuri, nr, sufix, status, dim_kb="", d_id=""):
@@ -132,7 +149,6 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                     exista = (res.status_code == 200 and "application/pdf" in res.headers.get("content-type", "").lower())
                 except:
                     exista = False
-                
                 if exista:
                     sufixe_de_verificat.append(litera)
                 else:
@@ -148,7 +164,6 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                     exista = (res.status_code == 200 and "application/pdf" in res.headers.get("content-type", "").lower())
                 except:
                     exista = False
-                    
                 if exista:
                     sufixe_de_verificat.append(latina)
                 else:
@@ -157,6 +172,8 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
             # Ediția Specială (S)
             if (nr, "S") not in deja_procesate:
                 sufixe_de_verificat.append("S")
+
+        a_avut_loc_modificare = False
 
         for sufix in sufixe_de_verificat:
             nume_afisare_sufix = f"_{sufix}" if sufix else ""
@@ -202,7 +219,7 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                     print(f"   {GREEN}✓ Succes ({dimensiune_kb} KB) -> ID: {drive_id}{RESET}")
                     
                     adauga_sau_updateaza_rand(randuri_registru, nr, sufix, "descarcat", dimensiune_kb, drive_id)
-                    file_id_registru = salveaza_registru_in_drive(service, file_id_registru, nume_registru, randuri_registru)
+                    a_avut_loc_modificare = True
                     
                     if sufix == "":
                         consecutive_404 = 0
@@ -219,13 +236,12 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                     
                 status_salvare = status_special if status_special else "Inexistent"
                 adauga_sau_updateaza_rand(randuri_registru, nr, sufix, status_salvare)
+                a_avut_loc_modificare = True
                 
-                # --- CORECTURĂ: Numărăm strict erorile 404 REALE apărute în rularea asta ---
                 if faza == 1:
                     if status_special == "404_NotFound":
                         consecutive_404 += 1
                     elif status_special == "NETWORK_OVERLOAD" or (status_special and "SERVER_ERROR" in status_special):
-                        # Dacă e eroare de rețea, NU o numărăm ca 404 (serverul e doar ocupat), dar nici nu o resetăm
                         pass
                     else:
                         consecutive_404 += 1
@@ -239,9 +255,8 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                     else:
                         if consecutive_404 >= 5:
                             numar_marcare = ultimul_numar_valid if ultimul_numar_valid is not None else 0
-                            print(f"\n🛑 {YELLOW}[EARLY EXIT AN ISTORIC {an}]{RESET} S-au găsit 5 erori 404 consecutive reale în această rulare.")
+                            print(f"\n🛑 {YELLOW}[EARLY EXIT AN ISTORIC {an}]{RESET} S-au găsit 5 erori 404 consecutive reale.")
                             
-                            # Ștergem din registru doar ultimele 5 eșecuri stricte din loop-ul curent
                             for eliminat in range(nr - 4, nr + 1):
                                 if eliminat > numar_marcare:
                                     randuri_registru = [r for r in randuri_registru if not (int(r["numar_baza"]) == eliminat and r["sufix"] == "")]
@@ -249,8 +264,6 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                             adauga_sau_updateaza_rand(randuri_registru, numar_marcare, "", "EndOfYear")
                             file_id_registru = salveaza_registru_in_drive(service, file_id_registru, nume_registru, randuri_registru)
                             return file_id_registru
-                        
-                file_id_registru = salveaza_registru_in_drive(service, file_id_registru, nume_registru, randuri_registru)
             
             time.sleep(1.2)
             
@@ -258,6 +271,10 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                 print(f"\n☕ [Pauză Antistres IP] 5 minute...")
                 time.sleep(300)
                 download_counter = 0
+
+        # --- OPTIMIZARE: Salvăm fișierul de status în Drive DOAR O DATĂ per număr complet de monitor ---
+        if a_avut_loc_modificare:
+            file_id_registru = salveaza_registru_in_drive(service, file_id_registru, nume_registru, randuri_registru)
                 
     return file_id_registru
 
@@ -276,7 +293,7 @@ def executa_sincronizare():
         sys.exit(1)
         
     an = int(an_raw.strip())
-    print(f"🌍 {GREEN}Procesare individuală protejată anti-early-exit fals. An:{RESET} {an}")
+    print(f"🌍 {GREEN}Procesare individuală protejată anti-403-API. An:{RESET} {an}")
     service = obtine_drive()
     
     limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
@@ -284,13 +301,13 @@ def executa_sincronizare():
     
     with httpx.Client(limits=limits, timeout=timeout, follow_redirects=True) as client:
         print(f"\n=======================================================")
-        print(f"📅 SCANARE SIMULTANĂ ANUL: {an}")
+        print(f"📅 SCANARE BATCH ANUL: {an}")
         print(f"=======================================================")
         
         proceseaza_an_faza(client, service, an, faza=1, drive_folder_pdf=drive_folder_pdf)
         proceseaza_an_faza(client, service, an, faza=2, drive_folder_pdf=drive_folder_pdf)
 
-    print(f"\n🏁 {GREEN}Rularea securizată pentru anul {an} s-a terminat!{RESET}")
+    print(f"\n🏁 {GREEN}Rularea optimizată pentru anul {an} s-a terminat cu succes!{RESET}")
 
 if __name__ == "__main__":
     executa_sincronizare()
