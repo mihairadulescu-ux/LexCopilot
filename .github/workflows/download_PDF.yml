@@ -2,7 +2,7 @@ name: "🚀 REGELE PDF - Sincronizare Unificata"
 
 on:
   schedule:
-    - cron: '0 6,18 * * *'
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 jobs:
@@ -12,7 +12,7 @@ jobs:
       max-parallel: 1
       fail-fast: false
       matrix:
-        an: [ "2010", "2011", "2012", "2013", "2014", "2015", "2016", "2017", "2018", "2019", "2020", "2021", "2022", "2023", "2024", "2025", "2026"]
+        an: [ "2016", "2017", "2018", "2019", "2020", "2021", "2022", "2023", "2024", "2025", "2026"]
 
     steps:
       - name: Descărcare cod din repository
