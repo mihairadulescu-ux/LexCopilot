@@ -70,7 +70,7 @@ def executa_sincronizare_totala():
     nume_registru = f"status_{AN_CURENT}.csv"
     file_id_registru, randuri_registru = obtine_sau_creeaza_registru(service, nume_registru, DRIVE_FOLDER_PDF)
     
-    # [OPTIMIZARE B] Sărim peste tot ce e "descarcat" SAU deja marcat ca "inexistent"
+    # Sărim peste tot ce e "descarcat" SAU deja marcat ca "inexistent"
     fisiere_rezolvate = {(int(r["numar_baza"]), r["sufix"]) for r in randuri_registru if r["status"] in ["descarcat", "inexistent"]}
     
     download_counter, consecutive_errors = 0, 0  
@@ -112,7 +112,7 @@ def executa_sincronizare_totala():
                 if descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) > 2000:
                     dimensiune_kb = f"{os.path.getsize(cale_pdf_temp) / 1024:.1f}"
                     try:
-                        drive_id = incarca_pdf_in_drive(service, cale_local_pdf, nume_pdf, DRIVE_FOLDER_PDF)
+                        drive_id = incarca_pdf_in_drive(service, cale_pdf_temp, nume_pdf, DRIVE_FOLDER_PDF)
                         print(f"   {GREEN}✓ Salvat în Drive -> ID: {drive_id}{RESET}")
                         
                         # Actualizăm rândul ca descărcat
@@ -123,7 +123,7 @@ def executa_sincronizare_totala():
                                 gasit = True
                                 break
                         if not gasit:
-                            randuri_registru.append({"numar_baza": str(nr), "sufix": sufix", "status": "descarcat", "dimensiune_kb": dimensiune_kb, "drive_file_id": drive_id})
+                            randuri_registru.append({"numar_baza": str(nr), "sufix": sufix, "status": "descarcat", "dimensiune_kb": dimensiune_kb, "drive_file_id": drive_id})
                         
                         if sufix == "": consecutive_errors = 0
                         download_counter += 1
@@ -131,7 +131,7 @@ def executa_sincronizare_totala():
                     finally:
                         if os.path.exists(cale_pdf_temp): os.remove(cale_pdf_temp)
                 
-                # [LOGICA NOUĂ B] Dacă fișierul e 404 sau e o pagină HTML de eroare de la server
+                # Dacă fișierul e 404 sau e o pagină HTML de eroare de la server (sub 2KB)
                 elif lovit_404 or (descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) <= 2000):
                     if os.path.exists(cale_pdf_temp): os.remove(cale_pdf_temp)
                     
@@ -148,7 +148,7 @@ def executa_sincronizare_totala():
                     if sufix == "": nr_baza_eșuat = True
                 
                 else:
-                    # Aici intră erori temporare (ex: 503, Timeout). Nu marcăm nimic în CSV, doar curățăm fișierul local.
+                    # Erori temporare (503, Timeout). Nu marcăm în CSV, doar curățăm fișierul local.
                     if os.path.exists(cale_pdf_temp): os.remove(cale_pdf_temp)
                     if sufix == "": nr_baza_eșuat = True
                 
