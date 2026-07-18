@@ -75,4 +75,4 @@ jobs:
           END_YEAR: ${{ matrix.end }}
           PYTHONUNBUFFERED: "1"
         run: |
-          python -u main_all.py
+          python -u scripts.xml\Download XML.py
