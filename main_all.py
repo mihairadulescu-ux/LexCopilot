@@ -23,17 +23,13 @@ from zeep.plugins import HistoryPlugin
 GOOGLE_DRIVE_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
-# Citim intervalul de ani din variabilele transmise de GitHub Actions.
-# Dacă rulăm local și nu sunt definite, pornește implicit pe tot intervalul.
-START_YEAR = int(os.getenv("START_YEAR", "1900"))
-END_YEAR = int(os.getenv("END_YEAR", "2026"))
+# S-a trecut la procesarea unui singur AN trimis din matricea GitHub Actions
+TARGET_YEAR = int(os.getenv("AN_CURENT", "2026"))
 
 
 def get_drive_service():
     """Autentifică robotul în Google Drive (compatibil Local și Cloud/GitHub Actions)."""
     scopes = ["https://www.googleapis.com/auth/drive.file"]
-    
-    # Verificăm dacă suntem pe GitHub Actions
     github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     
     if github_secret:
@@ -54,9 +50,6 @@ def get_already_downloaded_pages(service, target_year):
     """Scanează folderul Google Drive și returnează paginile deja descărcate PENTRU UN AN ANUME."""
     pages = set()
     page_token = None
-    
-    # Căutăm în Drive fișiere care conțin numele de bază al anului. 
-    # Adăugăm filtrare suplimentară extrem de strictă direct în Python pentru a evita interferența cu alți ani!
     query = f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and name contains 'brut_legislatie_{target_year}_pag' and trashed = false"
 
     try:
@@ -73,14 +66,14 @@ def get_already_downloaded_pages(service, target_year):
             for file in response.get('files', []):
                 name = file.get('name', '')
                 
-                # VERIFICARE STRICTĂ: Numele fișierului TREBUIE să conțină exact structura anului curent
                 if f"brut_legislatie_{target_year}_pag" not in name:
-                    continue  # Ignorăm potrivirile greșite returnate eronat de motorul de căutare din Google Drive
+                    continue 
                 
                 match = re.search(r"_pag(\d+)\.xml$", name)
                 if match:
                     valoare_pagina = int(match.group(1))
-                    if valoare_pagina < 150:
+                    # CORECTAT: Limita a fost ridicată de la 150 la 99999 deoarece paginile de legi cumulate depășesc lejer câteva mii!
+                    if valoare_pagina < 99999:
                         pages.add(valoare_pagina)
                     else:
                         print(f"{GALBEN}⚠️ Ignorat număr pagină suspect în Drive: {valoare_pagina} (din fișierul: {name}){RESET}")
@@ -114,7 +107,7 @@ def upload_to_drive(service, filename, content_bytes):
 
 
 def create_fresh_soap_client():
-    """Creează o instanță curată de client SOAP cu timeout-uri robuste extinse."""
+    """Creează o instanță curată de client SOAP cu timeout-uri robuste externe."""
     history = HistoryPlugin()
     transport = Transport(timeout=90, operation_timeout=120)  
     client = Client(WSDL_URL, transport=transport, plugins=[history])
@@ -236,29 +229,20 @@ def download_year(drive_service, composite_type_name, target_year):
             if success:
                 files_saved += 1
 
-        time.sleep(3.0)
+        time.sleep(2.0)
 
     return files_saved
 
 
 def download_laws_main():
-    """Funcția principală care orchestrează descărcarea pe intervalul cerut."""
+    """Funcția principală care orchestrează descărcarea pe anul curent selectat."""
     try:
-        print(f"{VERDE}🚀 Pornire segment industrial auto-reparabil pentru anii {START_YEAR}–{END_YEAR}...{RESET}")
+        print(f"{VERDE}🚀 Pornire procesor XML pe un singur an, optimizat pentru arhitectură paralelă. An curent țintă: {TARGET_YEAR}...{RESET}")
         drive_service = get_drive_service()
-        
         composite_type_name = "{http://schemas.datacontract.org/2004/07/FreeWebService}CompositeType"
-        total_files_all_years = 0
         
-        for year in range(START_YEAR, END_YEAR + 1):
-            try:
-                files_saved = download_year(drive_service, composite_type_name, year)
-                total_files_all_years += files_saved
-            except Exception as year_error:
-                print(f"{ROSU}💥 Eroare catastrofală izolată pentru anul {year}: {year_error}. Mergem la următorul.{RESET}")
-                time.sleep(60)
-
-        print(f"\n{VERDE}🎉🎉 PROCES COMPLETAT pe intervalul {START_YEAR}-{END_YEAR}. Total fișiere noi: {total_files_all_years}{RESET}")
+        files_saved = download_year(drive_service, composite_type_name, TARGET_YEAR)
+        print(f"\n{VERDE}🎉🎉 PROCES COMPLETAT pentru anul {TARGET_YEAR}. Total fișiere salvate în această sesiune: {files_saved}{RESET}")
 
     except Exception as e:
         print(f"{ROSU}💥 Eroare critică la inițializare: {str(e)}{RESET}")
