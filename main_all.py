@@ -23,8 +23,9 @@ from zeep.plugins import HistoryPlugin
 GOOGLE_DRIVE_FOLDER_ID = "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m"
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
-# S-a trecut la procesarea unui singur AN trimis din matricea GitHub Actions
-TARGET_YEAR = int(os.getenv("AN_CURENT", "2026"))
+# Detectare flexibilă: citește orice variabilă trimisă din YAML
+an_detectat = os.getenv("AN_CURENT") or os.getenv("START_YEAR") or "2026"
+TARGET_YEAR = int(str(an_detectat).strip())
 
 
 def get_drive_service():
@@ -72,7 +73,6 @@ def get_already_downloaded_pages(service, target_year):
                 match = re.search(r"_pag(\d+)\.xml$", name)
                 if match:
                     valoare_pagina = int(match.group(1))
-                    # CORECTAT: Limita a fost ridicată de la 150 la 99999 deoarece paginile de legi cumulate depășesc lejer câteva mii!
                     if valoare_pagina < 99999:
                         pages.add(valoare_pagina)
                     else:
@@ -237,12 +237,12 @@ def download_year(drive_service, composite_type_name, target_year):
 def download_laws_main():
     """Funcția principală care orchestrează descărcarea pe anul curent selectat."""
     try:
-        print(f"{VERDE}🚀 Pornire procesor XML pe un singur an, optimizat pentru arhitectură paralelă. An curent țintă: {TARGET_YEAR}...{RESET}")
+        print(f"{VERDE}🚀 Pornire procesor XML universal adaptiv. An curent țintă: {TARGET_YEAR}...{RESET}")
         drive_service = get_drive_service()
         composite_type_name = "{http://schemas.datacontract.org/2004/07/FreeWebService}CompositeType"
         
         files_saved = download_year(drive_service, composite_type_name, TARGET_YEAR)
-        print(f"\n{VERDE}🎉🎉 PROCES COMPLETAT pentru anul {TARGET_YEAR}. Total fișiere salvate în această sesiune: {files_saved}{RESET}")
+        print(f"\n{VERDE}🎉🎉 PROCES COMPLETAT pentru anul {TARGET_YEAR}. Total fișiere noi: {files_saved}{RESET}")
 
     except Exception as e:
         print(f"{ROSU}💥 Eroare critică la inițializare: {str(e)}{RESET}")
