@@ -53,7 +53,7 @@ jobs:
         env:
           # Aici definești lista ta de ani. Când vrei să adaugi sau să scoți un an, 
           # modifici pur și simplu linia de mai jos direct din browser.
-          AN_CURENT: "2018,2019,2024,2026"
+          AN_CURENT: "2018,2019,2020, 2021, 20022, 2023, 2024,2026"
           
           # Injectarea ID-ului de folder din Google Drive (Salvat în repo la Settings -> Secrets)
           DRIVE_FOLDER_PDF: ${{ secrets.DRIVE_FOLDER_ID }}
