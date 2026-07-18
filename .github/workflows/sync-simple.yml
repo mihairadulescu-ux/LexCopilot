@@ -1,4 +1,4 @@
-name: "[MO] Rulare Matrice Anuala"
+name: "1. [MO] Rulare Matrice Anuala"
 
 on:
   workflow_dispatch:
@@ -29,8 +29,8 @@ jobs:
 
       - name: Executare Script Universal
         run: |
-          # CORECTAT: S-a schimbat din cratima in underscore ca sa se potriveasca cu fisierul tau real
-          python sync_simple.py
+          # Adaugam flag-ul "-u" (unbuffered) ca sa vedem print-urile instant pe ecran
+          python -u sync_simple.py
         env:
           AN_CURENT: "2018,2019,2024,2026"
           DRIVE_FOLDER_PDF: ${{ vars.DRIVE_FOLDER_PDF }}
