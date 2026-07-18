@@ -1,35 +1,62 @@
-name: "1. Descărcare Monitoare Simple"
+# =========================================================================
+# TITLU STANDARD: Vizibil în tab-ul Actions din interfața web GitHub
+# =========================================================================
+name: "[MO] Rulare Matrice Anuală"
 
+# Declarăm modul de pornire al pipeline-ului
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Îți permite să pornești manual rularea din browser
+  schedule:
+    # Opțional: Rulează automat în fiecare noapte la ora 02:00 AM (ora UTC)
+    - cron: '0 2 * * *'
+
+# Permisiuni implicite necesare pentru execuție safe
+permissions:
+  content: read
 
 jobs:
-  sincronizare_matrice:
+  sincronizare-monitoare:
+    name: "Procesare Liste de Ani"
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      # LIMITARE STRUCTURALĂ: Rulează maxim 2 ani în paralel ca să nu îngenunchem serverul cu 503!
-      max-parallel: 2 
-      matrix:
-        an: [2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026]
 
     steps:
-      - name: Descărcare cod din repository
+      # ---------------------------------------------------------------------
+      # 1. Descărcarea codului din repozitoriul tău privat pe mașina virtuală
+      # ---------------------------------------------------------------------
+      - name: Descărcare cod din repozitoriu
         uses: actions/checkout@v4
 
-      - name: Configurare mediu Python
+      # ---------------------------------------------------------------------
+      # 2. Configuram mediul Python (Actualizat la versiunea stabilă 3.13)
+      # ---------------------------------------------------------------------
+      - name: Configurare Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.13'
+          cache: 'pip' # Optimizează viteza la rulările viitoare
 
-      - name: Instalare librării necesare
+      # ---------------------------------------------------------------------
+      # 3. Instalarea dependențelor necesare pentru scriptul tău universal
+      # ---------------------------------------------------------------------
+      - name: Instalare dependențe HTTP și Google API
         run: |
-          pip install httpx google-auth google-auth-httplib2 google-api-python-client
+          python -m pip install --upgrade pip
+          pip install httpx google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
-      - name: Executare Script Sincronizare PDF
+      # ---------------------------------------------------------------------
+      # 4. Executarea Scriptului Universal cu Injectarea Variabilelor
+      # ---------------------------------------------------------------------
+      - name: Executare Script Universal
+        run: |
+          # Pornim scriptul universal care va procesa Faza 1 (Simple) și apoi Faza 2 (Sufixe)
+          python scripts/mo/mo_download_universal.py
         env:
+          # Aici definești lista ta de ani. Când vrei să adaugi sau să scoți un an, 
+          # modifici pur și simplu linia de mai jos direct din browser.
+          AN_CURENT: "2018,2019,2024,2026"
+          
+          # Injectarea ID-ului de folder din Google Drive (Salvat în repo la Settings -> Secrets)
+          DRIVE_FOLDER_PDF: ${{ secrets.DRIVE_FOLDER_ID }}
+          
+          # Injectarea cheii JSON de la Service Account pentru Google Drive
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_PDF: ${{ vars.DRIVE_FOLDER_PDF }}
-          AN_CURENT: ${{ matrix.an }}
-        run: |
-          python -u sync_simple.py
