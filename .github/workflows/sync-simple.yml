@@ -14,15 +14,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Folosim versiunea principala v4
       - name: Descarcare cod
         uses: actions/checkout@v4
 
+      # Am eliminat linia de cache care genera eroarea si am lasat doar configurarea curata
       - name: Configurare Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-          cache: "pip"
 
+      # Aici se instaleaza rapid pachetele direct pe masina virtuala
       - name: Instalare dependente
         run: |
           python -m pip install --upgrade pip
