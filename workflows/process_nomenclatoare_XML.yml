@@ -1,0 +1,20 @@
+name: Pipeline Procesare Nomenclatoare XML
+
+on:
+  workflow_dispatch:
+
+jobs:
+  procesare_xml:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descărcare cod din repository
+        uses: actions/checkout@v4
+
+      - name: Configurare mediu Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Executare Procesare XML
+        run: |
+          python -u scripts_xml/extrage_nomenclatoare.py
