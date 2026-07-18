@@ -100,7 +100,7 @@ def create_fresh_soap_client():
 
 
 def download_year(drive_service, composite_type_name, target_year):
-    """Descarcă toate paginile pentru UN singur an cu gestionare avansată a lacunelor permanente."""
+    """Descarcă toate paginile pentru UN singur an cu verificare extinsă la final de an (10 goluri)."""
     print(f"\n{GALBEN}{'='*70}\n📅 AN INDUSTRIAL: {target_year}\n{'='*70}{RESET}")
 
     downloaded_pages = get_already_downloaded_pages(drive_service, target_year)
@@ -124,6 +124,7 @@ def download_year(drive_service, composite_type_name, target_year):
     results_per_page = 50
     files_saved = 0
     consecutive_empty_pages = 0
+    LIMITE_GOLURI_FINAL_AN = 10  # MODIFICAT: de la 2 la 10 pagini goale consecutive
 
     client = None
     history = None
@@ -185,7 +186,6 @@ def download_year(drive_service, composite_type_name, target_year):
                 raw_xml_string = raw_xml_bytes.decode("utf-8")
 
                 if "<a:Legi>" not in raw_xml_string and "<Legi>" not in raw_xml_string:
-                    # Serverul funcționează curat (HTTP 200), dar datele lipsesc pe această poziție
                     contor_raspunsuri_goale_curate += 1
                     if is_gap_repair and contor_raspunsuri_goale_curate <= max_retries:
                         print(f"{GALBEN}   ⚠️ Pagina {current_page} e goală pe server (Verificarea {contor_raspunsuri_goale_curate}/{max_retries+1}). Reîncercăm confirmarea...{RESET}")
@@ -194,24 +194,20 @@ def download_year(drive_service, composite_type_name, target_year):
                 retry_success = True
                 break
             except Exception as soap_error:
-                # O eroare tehnică veritabilă (Timeout, Connection Refused, Bad Gateway, etc.)
                 print(f"{ROSU}   ⚠️ Eroare tehnică de funcționare la pagina {current_page}: {soap_error}{RESET}")
                 token_key = None
                 a_avut_eroare_tehnica = True
-                # În caz de eroare tehnică la reparație, o lăsăm baltă imediat pentru altă dată
                 if is_gap_repair:
                     break 
 
-        # --- DECIZIE BAZATĂ PE TIPUL DE EȘEC ---
         if is_gap_repair and a_avut_eroare_tehnica:
-            print(f"{ROSU}🛑 [LĂSAT LIPSA] Pagina {current_page} a avut erori tehnice de rețea/server. O lăsăm pentru altă dată.{RESET}")
+            print(f"{ROSU}🛑 [LĂSAT LIPSA] Pagina {current_page} a avut erori tehnice de rețea. O lăsăm pe altă dată.{RESET}")
             continue
 
         if not retry_success and not is_gap_repair:
             consecutive_empty_pages = 0
             continue
 
-        # Re-extragem XML în caz de succes sau în caz de gol confirmat
         last_response_envelope = history.last_received["envelope"]
         raw_xml_bytes = etree.tostring(last_response_envelope, pretty_print=True, encoding="utf-8")
         raw_xml_string = raw_xml_bytes.decode("utf-8")
@@ -221,11 +217,11 @@ def download_year(drive_service, composite_type_name, target_year):
         if "<a:Legi>" not in raw_xml_string and "<Legi>" not in raw_xml_string:
             if not is_gap_repair:
                 consecutive_empty_pages += 1
-                if consecutive_empty_pages >= 2:
-                    print(f"{VERDE}✅ Anul {target_year} finalizat complet (capăt de linie normal!){RESET}")
+                print(f"{GALBEN}   ℹ️ Pagină goală detectată în avans. Contor goluri consecutive: {consecutive_empty_pages}/{LIMITE_GOLURI_FINAL_AN}{RESET}")
+                if consecutive_empty_pages >= LIMITE_GOLURI_FINAL_AN:
+                    print(f"\n{VERDE}✅ Anul {target_year} finalizat complet (S-a confirmat capătul de linie după {LIMITE_GOLURI_FINAL_AN} pagini goale consecutive!){RESET}")
                     break
             else:
-                # S-a confirmat de mai multe ori că pagina e complet goală pe serverul lor (200 OK dar zero date)
                 print(f"{ROSU}🚨 [GAURĂ CONFIRMATĂ] Pagina de reparație {current_page} este definitiv goală în baza Just.ro.{RESET}")
                 print(f"   ✍️ Generăm fișier XML martor minimal pentru a opri scanarea repetată.")
                 xml_martor = b"<GrupLegi><Info>PaginaGoalaConfirmataJustRo</Info></GrupLegi>"
@@ -248,7 +244,7 @@ def download_year(drive_service, composite_type_name, target_year):
 def download_laws_main():
     """Funcția principală."""
     try:
-        print(f"{VERDE}🚀 Pornire segment industrial paralel securizat anti-erori. Interval: {START_YEAR} – {END_YEAR}...{RESET}")
+        print(f"{VERDE}🚀 Pornire segment industrial paralel securizat (Barieră final: 10 goluri). Interval: {START_YEAR} – {END_YEAR}...{RESET}")
         drive_service = get_drive_service()
         composite_type_name = "{http://schemas.datacontract.org/2004/07/FreeWebService}CompositeType"
         total_files_segment = 0
