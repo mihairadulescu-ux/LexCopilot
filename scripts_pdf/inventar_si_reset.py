@@ -32,7 +32,7 @@ def listeaza_si_curata_pdf_uri(service, drive_folder_pdf):
             pageSize=1000,
             supportsAllDrives=True, 
             includeItemsFromAllDrives=True, 
-            corporas="user"
+            corpora="user"
         ).execute()
         
         files = response.get("files", [])
