@@ -5,7 +5,7 @@ import csv
 import io
 import time
 import httpx
-from google.oauth2.service_account import Credentials
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 from googleapiclient.errors import HttpError
@@ -21,7 +21,7 @@ def obtine_drive():
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
         raise EnvironmentError("❌ Lipsește secretul GOOGLE_SERVICE_ACCOUNT_JSON!")
     info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
-    creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
+    creds = service_account.Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 def obtine_sau_creeaza_registru(service, nume_registru, drive_folder_pdf):
@@ -66,7 +66,7 @@ def salveaza_registru_in_drive(service, file_id, nume_registru, randuri):
         writer.writeheader()
         writer.writerows(randuri)
         
-    # Mecanism de Retry rezistent la "User rate limit exceeded"
+    # Mecanism de Retry avansat rezistent la erori HTTP și defecțiuni de rețea (BrokenPipe / OSError)
     for incercare in range(1, 5):
         try:
             media = MediaFileUpload(cale_temp, mimetype="text/csv", resumable=False)
@@ -83,6 +83,16 @@ def salveaza_registru_in_drive(service, file_id, nume_registru, randuri):
                 if os.path.exists(cale_temp):
                     os.remove(cale_temp)
                 raise err
+        except (OSError, Exception) as net_err:
+            timp_asteptare = incercare * 6
+            print(f"   ⚠️ {RED}[Eroare Conexiune Google API - Broken Pipe]{RESET} ({net_err}). Refacere sesiune în {timp_asteptare}s...")
+            time.sleep(timp_asteptare)
+            try:
+                # Re-autentificăm forțat instanța deoarece socket-ul sau tokenul intern a fost închis brutal de rețea
+                service = obtine_drive()
+            except Exception as e:
+                print(f"   ❌ Eșec la re-autentificare Drive: {e}")
+                
     if os.path.exists(cale_temp):
         os.remove(cale_temp)
     return file_id
@@ -202,11 +212,11 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                 else:
                     status_special = f"HTTP_ERROR_{response.status_code}"
             except Exception as e:
-                print(f"   {RED}⚠️ Eroare rețea: {e}{RESET}")
+                print(f"   {RED}⚠️ Eroare rețea server MO: {e}{RESET}")
                 status_special = "NETWORK_OVERLOAD"
                 
             if este_anul_curent_real and status_special in ["NETWORK_OVERLOAD", "SERVER_ERROR_500", "SERVER_ERROR_502", "SERVER_ERROR_503", "SERVER_ERROR_504"]:
-                print(f"   ⚠️ {YELLOW}[SKIP PROTECTIV 2026]{RESET} Server suprasolicitat la {nume_pdf}. Abandonăm deocamdată.")
+                print(f"   ⚠️ {YELLOW}[SKIP PROTECTIV 2026]{RESET} Server suprasolicitat la {nume_pdf}. Abandonăm temporar.")
                 time.sleep(1.5)
                 continue
 
@@ -226,7 +236,7 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                         ultimul_numar_valid = nr
                     download_counter += 1
                 except Exception as e:
-                    print(f"   {RED}⚠️ Eroare Drive: {e}{RESET}")
+                    print(f"   {RED}⚠️ Eroare Drive la încărcare: {e}{RESET}")
                 finally:
                     if os.path.exists(cale_pdf_temp):
                         os.remove(cale_pdf_temp)
@@ -272,7 +282,7 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                 time.sleep(300)
                 download_counter = 0
 
-        # --- OPTIMIZARE: Salvăm fișierul de status în Drive DOAR O DATĂ per număr complet de monitor ---
+        # Salvăm fișierul de status în Drive DOAR O DATĂ per număr complet de monitor procesat
         if a_avut_loc_modificare:
             file_id_registru = salveaza_registru_in_drive(service, file_id_registru, nume_registru, randuri_registru)
                 
@@ -293,7 +303,7 @@ def executa_sincronizare():
         sys.exit(1)
         
     an = int(an_raw.strip())
-    print(f"🌍 {GREEN}Procesare individuală protejată anti-403-API. An:{RESET} {an}")
+    print(f"🌍 {GREEN}Procesare individuală protejată anti-403-API și BrokenPipe. An:{RESET} {an}")
     service = obtine_drive()
     
     limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
@@ -304,6 +314,7 @@ def executa_sincronizare():
         print(f"📅 SCANARE BATCH ANUL: {an}")
         print(f"=======================================================")
         
+        service = obtine_drive() # Ne asigurăm că avem o sesiune fresh la începutul jobului
         proceseaza_an_faza(client, service, an, faza=1, drive_folder_pdf=drive_folder_pdf)
         proceseaza_an_faza(client, service, an, faza=2, drive_folder_pdf=drive_folder_pdf)
 
