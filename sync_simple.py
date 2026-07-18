@@ -81,20 +81,19 @@ def adauga_sau_updateaza_rand(randuri, nr, sufix, status, dim_kb="", d_id=""):
         randuri.append({"numar_baza": str(nr), "sufix": sufix, "status": status, "dimensiune_kb": dim_kb, "drive_file_id": d_id})
 
 def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
-    print(f"\n🚀 Porniți Faza **{faza}** pentru anul {YELLOW}{an}{RESET}")
+    print(f"\n🚀 Pornire Faza **{faza}** pentru anul {YELLOW}{an}{RESET}")
     
     nume_registru = f"status_{an}.csv"
     file_id_registru, randuri_registru = obtine_sau_creeaza_registru(service, nume_registru, drive_folder_pdf)
     
-    # --- LOGICA NOUĂ DE DETECTARE A TIPULUI DE AN ---
     este_anul_curent_real = (str(an) == "2026")
     are_eoy = any(r["status"] == "EndOfYear" for r in randuri_registru)
     
-    if are_eoy and not este_anul_curent_real:
-        print(f"🛑 [STOP] Anul istoric {an} are deja marcajul EndOfYear în registru. Trecem peste.")
+    # Dacă este Faza 1 și avem deja EoY, nu mai are rost să rulăm deloc Faza 1
+    if faza == 1 and are_eoy and not este_anul_curent_real:
+        print(f"🛑 [SKIP FAZA 1] Anul istoric {an} are deja marcajul EndOfYear în registru.")
         return file_id_registru
 
-    # Colectăm istoricul procesat
     deja_procesate = set()
     ultimul_numar_valid = None
 
@@ -151,13 +150,11 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                 print(f"   {RED}⚠️ Eroare rețea: {e}{RESET}")
                 status_special = "NETWORK_OVERLOAD"
                 
-            # --- PROTECȚIE LA ERORI DE REȚEA/503 STRICT PENTRU ANUL CURENT 2026 ---
             if este_anul_curent_real and status_special in ["NETWORK_OVERLOAD", "SERVER_ERROR_500", "SERVER_ERROR_502", "SERVER_ERROR_503", "SERVER_ERROR_504"]:
                 print(f"   ⚠️ {YELLOW}[SKIP PROTECTIV 2026]{RESET} Server suprasolicitat la {nume_pdf}. Abandonăm deocamdată. Reluăm la noapte.")
                 time.sleep(1.5)
                 continue
 
-            # --- TRATARE SUCCES ---
             if descarcat_ok and os.path.exists(cale_pdf_temp) and os.path.getsize(cale_pdf_temp) > 2000:
                 dimensiune_bytes = os.path.getsize(cale_pdf_temp)
                 dimensiune_kb = f"{dimensiune_bytes / 1024:.1f}"
@@ -179,7 +176,6 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                     if os.path.exists(cale_pdf_temp):
                         os.remove(cale_pdf_temp)
                         
-            # --- TRATARE ERORI / ABSENȚĂ FIȘIER (404) ---
             else:
                 if os.path.exists(cale_pdf_temp):
                     os.remove(cale_pdf_temp)
@@ -187,7 +183,6 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                 status_salvare = status_special if status_special else "Inexistent"
                 adauga_sau_updateaza_rand(randuri_registru, nr, sufix, status_salvare)
                 
-                # Incrementăm contorul de 404 doar la erori logice clare din Faza 1
                 if faza == 1 and (status_special == "404_NotFound" or (status_special and "SERVER_ERROR" not in status_special and "NETWORK" not in status_special)):
                     consecutive_404 += 1
                 
@@ -198,13 +193,11 @@ def proceseaza_an_faza(client, service, an, faza, drive_folder_pdf):
                             file_id_registru = salveaza_registru_in_drive(service, file_id_registru, nume_registru, randuri_registru)
                             return file_id_registru
                     else:
-                        # LOGICA DE EARLY EXIT PENTRU ANI ISTORICI (Inclusiv cei care rulau eronat)
                         if consecutive_404 >= 5:
                             numar_marcare = ultimul_numar_valid if ultimul_numar_valid is not None else 0
                             print(f"\n🛑 {YELLOW}[EARLY EXIT AN ISTORIC {an}]{RESET} S-au găsit 5 erori 404 consecutive.")
                             print(f"➡️ Marcăm EndOfYear în Drive la ultimul număr valid: {numar_marcare}")
                             
-                            # Curățăm ultimele înregistrări moarte ca să rămână curat
                             for eliminat in range(nr - 4, nr + 1):
                                 randuri_registru = [r for r in randuri_registru if not (int(r["numar_baza"]) == eliminat and r["sufix"] == "")]
                                 
@@ -238,22 +231,26 @@ def executa_sincronizare():
         sys.exit(1)
         
     ani_de_procesat = [int(x.strip()) for x in an_curent_raw.split(",") if x.strip()]
-    print(f"🌍 {GREEN}Orchestrator universal pornit pentru anii:{RESET} {ani_de_procesat}")
+    print(f"🌍 {GREEN}Orchestrator universal pornit în mod secvențial pe ani.{RESET}")
     service = obtine_drive()
     
     limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
     timeout = httpx.Timeout(30.0, connect=15.0)
     
     with httpx.Client(limits=limits, timeout=timeout, follow_redirects=True) as client:
-        print(f"\n--- 🔷 FAZA 1: DESCĂRCARE MONITOARE SIMPLE ---")
+        # --- AICI S-A MODIFICAT LOGICA: Buclele sunt inversate ---
         for an in ani_de_procesat:
+            print(f"\n=======================================================")
+            print(f"📅 ÎNCEPE PROCESAREA COMPLETĂ PENTRU ANUL: {an}")
+            print(f"=======================================================")
+            
+            # Pasul 1: Descarcă monitoarele simple pentru anul curent din buclă
             proceseaza_an_faza(client, service, an, faza=1, drive_folder_pdf=drive_folder_pdf)
             
-        print(f"\n--- 🔶 FAZA 2: EXECUTARE DETECTARE SUFIXE ---")
-        for an in ani_de_procesat:
+            # Pasul 2: Direct, caută și sufixele pentru același an înainte de a pleca mai departe
             proceseaza_an_faza(client, service, an, faza=2, drive_folder_pdf=drive_folder_pdf)
 
-    print(f"\n🏁 {GREEN}Toate fazele s-au terminat cu succes pentru toată matricea!{RESET}")
+    print(f"\n🏁 {GREEN}Toți anii din matrice au fost finalizați complet (Faza 1 + Faza 2)!{RESET}")
 
 if __name__ == "__main__":
     executa_sincronizare()
