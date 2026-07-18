@@ -1,4 +1,4 @@
-name: 2. Pipeline Sincronizare Monitoare PDF
+name: Pipeline Sincronizare Monitoare PDF
 
 on:
   schedule:
