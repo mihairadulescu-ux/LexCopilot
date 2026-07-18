@@ -36,7 +36,7 @@ jobs:
 
       - name: Executare Script Universal
         run: |
-          python -u sync_simple.py
+          python -u scripts_pdf/download_PDF.py
         env:
           # Trimitem un singur an catre script din matricea YAML
           AN_CURENT: "${{ matrix.an }}"
