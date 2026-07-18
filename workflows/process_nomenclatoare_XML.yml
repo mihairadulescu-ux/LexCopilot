@@ -1,8 +1,10 @@
-name: Pipeline Procesare Nomenclatoare XML
+name: "🚀 REGELE PDF - Sincronizare Unificata"
 
 on:
+  schedule:
+    # Rulează în fiecare noapte la 21:00 UTC (adică ora 00:00 în România)
+    - cron: '0 21 * * *'
   workflow_dispatch:
-
 jobs:
   procesare_xml:
     runs-on: ubuntu-latest
