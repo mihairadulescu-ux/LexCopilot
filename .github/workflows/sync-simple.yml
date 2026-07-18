@@ -1,18 +1,12 @@
-# =========================================================================
-# TITLU STANDARD: Vizibil în tab-ul Actions din interfața web GitHub
-# =========================================================================
-name: "[MO] Rulare Matrice Anuală"
+name: "[MO] Rulare Matrice Anuala"
 
-# Declarăm modul de pornire al pipeline-ului
 on:
-  workflow_dispatch: # Îți permite să pornești manual rularea din browser
+  workflow_dispatch:
   schedule:
-    # Opțional: Rulează automat în fiecare noapte la ora 02:00 AM (ora UTC)
-    - cron: '0 2 * * *'
+    - cron: "0 2 * * *"
 
-# Permisiuni implicite necesare pentru execuție safe
 permissions:
-  content: read
+  contents: read
 
 jobs:
   sincronizare-monitoare:
@@ -20,43 +14,24 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ---------------------------------------------------------------------
-      # 1. Descărcarea codului din repozitoriul tău privat pe mașina virtuală
-      # ---------------------------------------------------------------------
-      - name: Descărcare cod din repozitoriu
+      - name: Descarcare cod
         uses: actions/checkout@v4
 
-      # ---------------------------------------------------------------------
-      # 2. Configuram mediul Python (Actualizat la versiunea stabilă 3.13)
-      # ---------------------------------------------------------------------
       - name: Configurare Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
-          cache: 'pip' # Optimizează viteza la rulările viitoare
+          python-version: "3.13"
+          cache: "pip"
 
-      # ---------------------------------------------------------------------
-      # 3. Instalarea dependențelor necesare pentru scriptul tău universal
-      # ---------------------------------------------------------------------
-      - name: Instalare dependențe HTTP și Google API
+      - name: Instalare dependente
         run: |
           python -m pip install --upgrade pip
           pip install httpx google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
-      # ---------------------------------------------------------------------
-      # 4. Executarea Scriptului Universal cu Injectarea Variabilelor
-      # ---------------------------------------------------------------------
       - name: Executare Script Universal
         run: |
-          # Pornim scriptul universal care va procesa Faza 1 (Simple) și apoi Faza 2 (Sufixe)
           python scripts/mo/mo_download_universal.py
         env:
-          # Aici definești lista ta de ani. Când vrei să adaugi sau să scoți un an, 
-          # modifici pur și simplu linia de mai jos direct din browser.
           AN_CURENT: "2018,2019,2024,2026"
-          
-          # Injectarea ID-ului de folder din Google Drive (Salvat în repo la Settings -> Secrets)
           DRIVE_FOLDER_PDF: ${{ secrets.DRIVE_FOLDER_ID }}
-          
-          # Injectarea cheii JSON de la Service Account pentru Google Drive
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
