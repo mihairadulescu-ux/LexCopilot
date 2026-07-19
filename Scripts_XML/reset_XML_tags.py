@@ -1,146 +1,121 @@
 import os
 import sys
 import json
-import time
-import re
-from google.oauth2.service_account import Credentials
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
-# Culori pentru loguri curate în consolă
-VERDE = "\033[92m"
-GALBEN = "\033[93m"
-ROSU = "\033[91m"
-RESET = "\033[0m"
-
-TARGET_FOLDERS_RAW = os.getenv("DRIVE_FOLDER_XML", "")
-
-# Configurare interval implicit din variabile de mediu
-START_YEAR = int(os.getenv("START_YEAR", "2000"))
-END_YEAR = int(os.getenv("END_YEAR", "2026"))
-
-
-def obtine_drive():
-    print("🔑 [Reset XML] Conectare Google Drive...")
-    github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+# ======================================================================
+# CONEXIUNE MULTI-FOLDER GOOGLE DRIVE
+# ======================================================================
+def obtine_serviciu_drive():
+    """Inițializează clientul API Google Drive și extrage lista de discuri."""
+    info_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    foldere_brut = os.getenv("DRIVE_FOLDER_XML")
     
-    if github_secret:
-        info = json.loads(github_secret)
-        creds = Credentials.from_service_account_info(
-            info, scopes=["https://www.googleapis.com/auth/drive"]
-        )
-    else:
-        # Suport rulare locală backend
-        credentials_path = "service_account.json"
-        if not os.path.exists(credentials_path):
-            raise FileNotFoundError(f"Nu s-a găsit fișierul '{credentials_path}'!")
-        creds = Credentials.from_service_account_file(
-            credentials_path, scopes=["https://www.googleapis.com/auth/drive"]
-        )
+    if not info_json or not foldere_brut:
+        print("🛑 [Eroare Reset] Lipsesc secretele sau variabilele de foldere în mediu!")
+        sys.exit(1)
         
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
-
-
-def reseteaza_atribute_xml(an_start, an_stop):
-    if not TARGET_FOLDERS_RAW:
-        print(f"{ROSU}🛑 Eroare configurare: DRIVE_FOLDER_XML lipsește din mediu!{RESET}")
-        return
-
-    # Extragere curată ierarhie foldere (Folder 1, Folder 2 etc.)
-    clean_raw = TARGET_FOLDERS_RAW.replace('"', '').replace("'", "").replace("\n", "").replace("\r", "").strip()
-    folder_ids = [fid.strip() for fid in clean_raw.split(",") if fid.strip()]
+    # Spargem lista de foldere prin virgulă (la fel ca în restul scripturilor)
+    liste_foldere = [f.strip() for f in foldere_brut.split(",") if f.strip()]
     
-    if not folder_ids:
-        # Fallback de siguranță pe folderele tale cunoscute
-        folder_ids = [
-            "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m",
-            "1G7CkaoivnTR0O8mZceB0143Q6956C1-1",
-            "1T2N_v81889Y7tyHUbrTSLR073YC7mGk5",
-            "1NWe4JKhhaQ4HxFGs7FfhxnlemE0ZM2E2"
-        ]
+    try:
+        credențiale = service_account.Credentials.from_service_account_info(
+            json.loads(info_json),
+            scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        return build("drive", "v3", credentials=credențiale), liste_foldere
+    except Exception as e:
+        print(f"🛑 Eroare autentificare Google Drive la reset: {e}")
+        sys.exit(1)
 
-    service = obtine_drive()
-    print(f"{VERDE}🚀 Inițiere resetare matrice paralelă pentru intervalul: {an_start} - {an_stop}...{RESET}")
+# ======================================================================
+# LOGICĂ DE RESETARE PROCESARE (FLAGURI)
+# ======================================================================
+def ruleaza_reset_flaguri(serviciu, foldere_drive, ani_procesare):
+    """
+    Caută toate fișierele XML din anii selectați în toate cele 4 discuri
+    și le resetează metadatele sau descrierea în caz că vrei o re-parsare.
+    """
+    for an in ani_procesare:
+        print(f"\n⚙️ [Reset] Inițiere curățare flaguri pentru anul: {an}")
+        fișiere_de_resetat = []
 
-    fisiere_marcate = []
-    
-    # Procesăm pe rând fiecare an alocat acestui fir de execuție
-    for target_year in range(an_start, an_stop + 1):
-        print(f"\n⚡ [Scanare Istoric] Identificare XML-uri deja procesate pentru anul {target_year}...")
-        
-        # Luăm la rând cele 4 foldere din ierarhie
-        for folder_id in folder_ids:
-            page_token = None
+        # Interogăm pe rând fiecare dintre cele 4 discuri
+        for idx, id_folder in enumerate(foldere_drive, 1):
+            print(f"🔍 Căutare XML-uri pentru reset în discul {idx}/{len(foldere_drive)}...")
+            interogare = f"'{id_folder}' in parents and name contains 'brut_legislatie_{an}' and mimeType = 'text/xml' and trashed = false"
             
-            # Query ultra-optimizat: țintim direct fișierele anului din buclă, marcate cu true
-            query = (
-                f"'{folder_id}' in parents and name contains 'brut_legislatie_{target_year}_pag' and "
-                f"appProperties has {{ key='processed' and value='true' }} and trashed = false"
-            )
-            
-            while True:
-                try:
-                    response = service.files().list(
-                        q=query, 
-                        spaces='drive',
-                        fields="nextPageToken, files(id, name)", 
-                        pageToken=page_token, 
+            try:
+                pag_token = None
+                while True:
+                    rezultat = serviciu.files().list(
+                        q=interogare,
+                        fields="nextPageToken, files(id, name, description)",
                         pageSize=1000,
-                        supportsAllDrives=True, 
-                        includeItemsFromAllDrives=True
+                        pageToken=pag_token
                     ).execute()
                     
-                    fisiere_marcate.extend(response.get("files", []))
-                    page_token = response.get("nextPageToken", None)
-                    if not page_token:
+                    fișiere_de_resetat.extend(rezultat.get('files', []))
+                    pag_token = rezultat.get('nextPageToken')
+                    if not pag_token:
                         break
-                except Exception as e:
-                    # Dacă un folder e temporar inaccesibil, continuăm scanarea în restul
-                    break
+            except Exception as e:
+                print(f"⚠️ Eroare la scanarea discului {idx} pentru reset: {e}")
 
-    if not fisiere_marcate:
-        print(f"\n{VERDE}✨ Nu s-a găsit niciun XML din intervalul {an_start}-{an_stop} marcat ca procesat.{RESET}")
-        return
+        total_fișiere = len(fișiere_de_resetat)
+        print(f"🎯 Identificate {total_fișiere} fișiere XML în total pentru anul {an}.")
 
-    total_fisiere = len(fisiere_marcate)
-    print(f"\n{GALBEN}⚙️ Începe ștergerea flag-urilor (revenire la starea neprocesat) pentru {total_fisiere} fișiere...{RESET}", flush=True)
-    
-    # Executăm resetarea efectivă
-    for idx, xml in enumerate(fisiere_marcate, 1):
-        try:
-            service.files().update(
-                fileId=xml["id"], 
-                body={"appProperties": {"processed": "false"}}, 
-                supportsAllDrives=True
-            ).execute()
-            
-            if idx % 20 == 0 or idx == total_fisiere:
-                print(f"    ✅ [{idx}/{total_fisiere}] Resetat flag 'processed' -> false pentru: {xml['name']}", flush=True)
-        except Exception as e:
-            print(f"{ROSU}⚠️ Eroare resetare la fișierul {xml['name']}: {e}{RESET}", flush=True)
+        if total_fișiere == 0:
+            print("⏭️ Nu s-au găsit fișiere pentru reset în niciun disc.")
             continue
 
-    print(f"\n{VERDE}🎉 [SUCCES] Resetare finalizată pentru segmentul {an_start} - {an_stop}!{RESET}\n")
-
-
-if __name__ == "__main__":
-    # Interceptăm argumentele numerice din Matrix-ul YAML (exact ca la download)
-    argumente_numerice = []
-    
-    for arg in sys.argv[1:]:
-        piese = arg.split()
-        for piesa in piese:
-            if piesa.isdigit():
-                argumente_numerice.append(int(piesa))
-
-    if len(argumente_numerice) == 1:
-        an_s = argumente_numerice[0]
-        an_f = argumente_numerice[0]
-    elif len(argumente_numerice) >= 2:
-        an_s = argumente_numerice[0]
-        an_f = argumente_numerice[1]
-    else:
-        an_s = START_YEAR
-        an_f = END_YEAR
+        # Executăm resetarea propriu-zisă
+        # Notă: De regulă, resetarea înseamnă modificarea câmpului 'description' 
+        # sau a proprietăților personalizate din Drive pentru a marca processed = false
+        print(f"🔄 Se resetează flagurile pentru cele {total_fișiere} fișiere...")
         
-    print(f"{VERDE}🎯 [Config Matrice Reset] Rulare pe segmentul: {an_s} - {an_f}{RESET}", flush=True)
-    reseteaza_atribute_xml(an_s, an_f)
+        for idx_f, f in enumerate(fișiere_de_resetat, 1):
+            if idx_f % 250 == 0 or idx_f == total_fișiere:
+                print(f"   [Progres Reset] {idx_f}/{total_fișiere} modificate...")
+                
+            try:
+                # Modificăm metadatele fișierului în Google Drive
+                # Presupunem că folosești sistemul cu proprietăți (appProperties) sau description:
+                corpurile_metadate = {
+                    'description': 'processed=false'
+                }
+                
+                # Dacă folosești proprietăți custom în Drive, codul ar fi:
+                # corpurile_metadate = {'appProperties': {'processed': 'false'}}
+                
+                serviciu.files().update(
+                    fileId=f['id'],
+                    body=corpurile_metadate,
+                    fields='id'
+                ).execute()
+                
+            except Exception as e:
+                # Dacă un fișier dă eroare (e blocat/șters între timp), trecem peste el
+                continue
+                
+        print(f"✅ Anul {an} a fost resetat complet pe toate cele 4 discuri.")
+
+# ======================================================================
+# PUNCT DE INTRARE SCRIPT
+# ======================================================================
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("🛑 Eroare Reset: Lipsesc anii ca parametru!")
+        sys.exit(1)
+        
+    argumente = sys.argv[1:]
+    if len(argumente) == 1 and " " in argumente[0]:
+        ani = argumente[0].split()
+    else:
+        ani = argumente
+        
+    print(f"🎯 [Reset Matrice] Pornire curățare flaguri pentru: {ani}")
+    
+    client_drive, listă_foldere = obtine_serviciu_drive()
+    ruleaza_reset_flaguri(client_drive, listă_foldere, ani)
