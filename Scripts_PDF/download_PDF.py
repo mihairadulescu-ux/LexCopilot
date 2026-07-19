@@ -203,7 +203,7 @@ def ruleaza_sincronizare_matriceala(an_start, an_stop):
                         registru_an[nume_pdf] = "descarcat"
                         modificari_detectate = True
                     else:
-                        # --- BLOC DIAGNOSTICARE: CAPTURĂ CONȚINUT HTML ASUNS ---
+                        # --- BLOC DIAGNOSTICARE: CAPTURĂ CONȚINUT HTML MASCAT ---
                         text_primit = response.text.strip()
                         snippet_html = text_primit[:500].replace('\n', ' ').replace('\r', '')
                         print(f"\n🔍 {GALBEN}[DIAGNOSTIC]{RESET} Serverul a trimis status 200 OK dar conținut TEXT/HTML.")
