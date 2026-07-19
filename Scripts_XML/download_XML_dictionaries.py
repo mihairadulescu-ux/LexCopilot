@@ -2,82 +2,92 @@ import os
 import sys
 import csv
 import json
+import re
+import io
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+import xml.etree.ElementTree as ET
 
-def obtine_serviciu_drive():
-    info_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    foldere_brut = os.getenv("DRIVE_FOLDER_XML")
+# Culori pentru consistență cu scriptul tău
+VERDE = "\033[92m"
+GALBEN = "\033[93m"
+ROSU = "\033[91m"
+RESET = "\033[0m"
+
+TARGET_FOLDERS_RAW = os.getenv("DRIVE_FOLDER_XML", "")
+FOLDER_IDS = []
+
+if TARGET_FOLDERS_RAW.strip():
+    clean_raw = TARGET_FOLDERS_RAW.replace('"', '').replace("'", "").replace("\n", "").replace("\r", "").strip()
+    FOLDER_IDS = [fid.strip() for fid in clean_raw.split(",") if fid.strip()]
+
+if not FOLDER_IDS:
+    FOLDER_IDS = [
+        "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m",
+        "1G7CkaoivnTR0O8mZceB0143Q6956C1-1",
+        "1T2N_v81889Y7tyHUbrTSLR073YC7mGk5",
+        "1NWe4JKhhaQ4HxFGs7FfhxnlemE0ZM2E2"
+    ]
+
+def get_drive_service():
+    scopes = ["https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/drive.readonly"]
+    github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     
-    if not info_json or not foldere_brut:
-        print("🛑 [Eroare] Lipsesc credențialele sau folderul XML în mediu!")
-        sys.exit(1)
+    if github_secret:
+        service_account_info = json.loads(github_secret)
+        creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=scopes)
+    else:
+        credentials_path = "service_account.json"
+        if not os.path.exists(credentials_path):
+            raise FileNotFoundError(f"Nu s-a găsit fișierul '{credentials_path}'!")
+        creds = service_account.Credentials.from_service_account_file(credentials_path, scopes=scopes)
         
-    liste_foldere = [f.strip() for f in foldere_brut.split(",") if f.strip()]
-    
-    try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-        credențiale = service_account.Credentials.from_service_account_info(
-            json.loads(info_json),
-            scopes=["https://www.googleapis.com/auth/drive"]
-        )
-        return build("drive", "v3", credentials=credențiale), liste_foldere
-    except Exception as e:
-        print(f"🛑 Eroare autentificare Google Drive: {e}")
-        sys.exit(1)
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
 
-def extrage_taguri_din_matrice(serviciu, foldere_drive, ani_procesare):
-    import xml.etree.ElementTree as ET
-    from googleapiclient.http import MediaIoBaseDownload
-    import io
-
+def extrage_taguri_din_matrice(service, ani_procesare):
     emitenti_gasiti = set()
     tipuri_acte_gasite = set()
 
-    for an in ani_procesare:
-        print(f"\n⚡ Încep scanarea istorică pentru anul: {an}")
+    for target_year in ani_procesare:
+        print(f"\n{GALBEN}⚡ [Dictionare] Colectare si parsare fisiere pentru anul {target_year}...{RESET}")
         fișiere_an = []
-        token_cautare = f"brut_legislatie_{an}_"
 
-        for idx, id_folder in enumerate(foldere_drive, 1):
-            print(f"🔍 Listare brută discul {idx}/{len(foldere_drive)} (ID: {id_folder[:8]}...)...")
-            # Tragem TOT ce există în folder, fără nicio restricție de tip sau nume la nivel de API
-            interogare = f"'{id_folder}' in parents"
-            
+        # Copiat fidel din logica ta de scanare istoric, dar extragem și ID-ul fișierului pentru descărcare
+        for folder_id in FOLDER_IDS:
+            page_token = None
+            query = f"'{folder_id}' in parents and name contains 'brut_legislatie_{target_year}_pag' and trashed = false"
+
             try:
-                pag_token = None
-                contor_total_folder = 0
                 while True:
-                    rezultat = serviciu.files().list(
-                        q=interogare,
-                        fields="nextPageToken, files(id, name)",
+                    response = service.files().list(
+                        q=query, 
+                        spaces='drive', 
+                        fields='nextPageToken, files(id, name)',
                         pageSize=1000,
-                        pageToken=pag_token
+                        pageToken=page_token,
+                        supportsAllDrives=True, 
+                        includeItemsFromAllDrives=True
                     ).execute()
-                    
-                    lista_fisiere = rezultat.get('files', [])
-                    contor_total_folder += len(lista_fisiere)
-                    
-                    for f in lista_fisiere:
-                        nume_f = f.get('name', '')
-                        # Verificăm dacă conține token-ul și se termină în .xml sau .XML
-                        if token_cautare in nume_f and nume_f.lower().endswith('.xml'):
-                            fișiere_an.append(f)
-                            
-                    pag_token = rezultat.get('nextPageToken')
-                    if not pag_token:
+
+                    fișiere_an.extend(response.get('files', []))
+                    page_token = response.get('nextPageToken', None)
+                    if not page_token:
                         break
-                print(f"   ℹ️ Total obiecte detectate în discul {idx}: {contor_total_folder}")
             except Exception as e:
-                print(f"⚠️ Atenție: Nu s-a putut scana discul {idx}: {e}")
+                print(f"{ROSU}⚠️ Eroare scanare folder {folder_id[:8]}...: {e}{RESET}")
+                continue
 
-        print(f"📦 Filtrare Python: Am identificat {len(fișiere_an)} fișiere XML valide pentru anul {an}.")
+        total_gasite = len(fișiere_an)
+        print(f"{VERDE}📦 Am descoperit în total {total_gasite} fișiere XML de procesat pentru anul {target_year}.{RESET}")
 
-        for idx_f, f in enumerate(fișiere_an, 1):
-            if idx_f % 100 == 0 or idx_f == len(fișiere_an):
-                print(f"⚙️ Procesare documente: {idx_f}/{len(fișiere_an)}...")
+        # Procesare și descărcare în memorie
+        for idx_f, file in enumerate(fișiere_an, 1):
+            if idx_f % 100 == 0 or idx_f == total_gasite:
+                print(f"   ⚙️ Parsare progres: {idx_f}/{total_gasite}...")
                 
             try:
-                cerere = serviciu.files().get_media(fileId=f['id'])
+                cerere = service.files().get_media(fileId=file['id'])
                 fh = io.BytesIO()
                 descarcare = MediaIoBaseDownload(fh, cerere)
                 gata = False
@@ -85,21 +95,27 @@ def extrage_taguri_din_matrice(serviciu, foldere_drive, ani_procesare):
                     _, gata = descarcare.next_chunk()
                 
                 conținut_xml = fh.getvalue()
-                radacina = ET.fromstring(conținut_xml)
                 
-                for item in radacina.findall(".//Act"): 
-                    emitent = item.find("Emitent")
-                    tip_act = item.find("TipAct")
+                # Folosim etree pentru compatibilitate cu librăriile folosite de tine
+                from lxml import etree as MET
+                radacina = MET.fromstring(conținut_xml)
+                
+                # Namespace-urile pot fi prezente în envelope-ul SOAP salvat brut
+                # Căutăm elementele flexibil după tag local local-name()
+                for item in radacina.xpath("//*[local-name()='Act']"):
+                    emitent = item.xpath("./*[local-name()='Emitent']")
+                    tip_act = item.xpath("./*[local-name()='TipAct']")
                     
-                    if emitent is not None and emitent.text:
-                        emitenti_gasiti.add(emitent.text.strip())
-                    if tip_act is not None and tip_act.text:
-                        tipuri_acte_gasite.add(tip_act.text.strip())
+                    if emitent and emitent[0].text:
+                        emitenti_gasiti.add(emitent[0].text.strip())
+                    if tip_act and tip_act[0].text:
+                        tipuri_acte_gasite.add(tip_act[0].text.strip())
                         
             except Exception as e:
                 continue
 
-    string_ani = "_".join(ani_procesare)
+    # Export fragmente CSV culese pe acest fir al matricei
+    string_ani = "_".join([str(a) for a in ani_procesare])
     cale_emitenti = f"lista_emitenti_{string_ani}.csv"
     cale_acte = f"lista_tip_acte_{string_ani}.csv"
     
@@ -115,19 +131,19 @@ def extrage_taguri_din_matrice(serviciu, foldere_drive, ani_procesare):
         for t in sorted(list(tipuri_acte_gasite)):
             writer.writerow([t])
             
-    print(f"✅ Fragmente exportate cu succes: {cale_emitenti} și {cale_acte}")
+    print(f"{VERDE}✅ Fragmente exportate cu succes pe acest fir al matricei!{RESET}")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("🛑 Eroare: Lipsesc anii ca parametru!")
+    argumente_numerice = []
+    for arg in sys.argv[1:]:
+        piese = arg.split()
+        for piesa in piese:
+            if piesa.isdigit():
+                argumente_numerice.append(int(piesa))
+
+    if not argumente_numerice:
+        print(f"{ROSU}🛑 Eroare: Lipsesc anii ca parametru!{RESET}")
         sys.exit(1)
         
-    argumente = sys.argv[1:]
-    if len(argumente) == 1 and " " in argumente[0]:
-        ani = argumente[0].split()
-    else:
-        ani = argumente
-        
-    print(f"🎯 [Dictionare] Pornire procesare pentru anii: {ani}")
-    client_drive, listă_foldere = obtine_serviciu_drive()
-    extrage_taguri_din_matrice(client_drive, listă_foldere, ani)
+    drive_service = get_drive_service()
+    extrage_taguri_din_matrice(drive_service, argumente_numerice)
