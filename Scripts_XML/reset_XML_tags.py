@@ -30,13 +30,12 @@ def reseteaza_atribute_xml():
     print(f"📂 Scanare generală folder XML pentru resetare (ID: {TARGET_FOLDER_ID})...")
     
     page_token = None
-    # Interogare curată: doar fișierele valide din folder, fără filtre dubioase pe descriere
-    query = f"'{TARGET_FOLDER_ID}' in parents and mimeType = 'application/xml' and trashed = false"
+    # QUERY ULTRA-SIMPLU: doar părintele, la fel ca la PDF-uri
+    query = f"'{TARGET_FOLDER_ID}' in parents and trashed = false"
     
     fisiere_marcate = []
     contor_total = 0
     
-    # Folosim bucla ta stabilă de paginare
     while True:
         response = service.files().list(
             q=query, 
@@ -48,22 +47,22 @@ def reseteaza_atribute_xml():
             corpora="user"
         ).execute()
         
-        fișiere = response.get("files", [])
-        contor_total += len(fișiere)
+        fisiere = response.get("files", [])
+        contor_total += len(fisiere)
         
-        # Filtrăm local în Python (complet safe, fără erori de API)
-        for f in fișiere:
-            if f.get("description") == "processed_for_tags: true":
+        # Filtrare 100% locală în Python
+        for f in fisiere:
+            if f['name'].lower().endswith('.xml') and f.get("description") == "processed_for_tags: true":
                 fisiere_marcate.append(f)
                 
         page_token = response.get("nextPageToken", None)
         if not page_token:
             break
             
-    print(f"📊 Scanare finalizată. Din totalul de {contor_total} fișiere XML, {len(fisiere_marcate)} sunt marcate ca procesate.")
+    print(f"📊 Scanare finalizată. Din totalul de {contor_total} fișiere detectate, {len(fisiere_marcate)} sunt XML-uri procesate.")
 
     if not fisiere_marcate:
-        print(f"{VERDE}✨ Nu s-a găsit niciun XML marcat cu etichetă. Totul este deja pregătit pentru o căutare fresh!{RESET}")
+        print(f"{VERDE}✨ Nu s-a găsit niciun XML marcat cu etichetă. Totul este pregătit pentru o căutare fresh!{RESET}")
         return
 
     print(f"⚙️ Se începe curățarea metadatelor pentru cele {len(fisiere_marcate)} fișiere...")
@@ -73,7 +72,6 @@ def reseteaza_atribute_xml():
         f_nume = xml["name"]
         
         try:
-            # Ștergem descrierea setând-o ca string gol
             service.files().update(
                 fileId=f_id, 
                 body={"description": ""}, 
@@ -87,7 +85,7 @@ def reseteaza_atribute_xml():
             print(f"{ROSU}    ❌ Eroare la resetarea fișierului {f_nume}: {e}{RESET}")
             continue
 
-    print(f"\n{VERDE}🚀 Resetare completă! Toate marcajele au fost eliminate. Poți porni scanarea fresh de tags!{RESET}")
+    print(f"\n{VERDE}🚀 Resetare completă! Marcajele au fost eliminate.{RESET}")
 
 if __name__ == "__main__":
     reseteaza_atribute_xml()
