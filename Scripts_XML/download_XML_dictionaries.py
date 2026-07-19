@@ -1,213 +1,144 @@
 import os
 import sys
-import io
-import json
 import csv
-import xml.etree.ElementTree as ET
-from google.oauth2.service_account import Credentials
+import json
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
 
-# Culori pentru loguri curate în consolă
-VERDE = "\033[92m"
-GALBEN = "\033[93m"
-ROSU = "\033[91m"
-RESET = "\033[0m"
-
-TARGET_FOLDERS_RAW = os.getenv("DRIVE_FOLDER_XML", "")
-
-# Interval implicit extras din variabilele globale de mediu
-START_YEAR = int(os.getenv("START_YEAR", "2000"))
-END_YEAR = int(os.getenv("END_YEAR", "2026"))
-
-
-def obtine_drive():
-    print("🔑 [Get Tags XML] Conectare Google Drive...")
-    github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+# ======================================================================
+# CONFIGURARE ȘI CONEXIUNE GOOGLE DRIVE
+# ======================================================================
+def obtine_serviciu_drive():
+    """Inițializează clientul API Google Drive."""
+    info_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    foldere_brut = os.getenv("DRIVE_FOLDER_XML")
     
-    if github_secret:
-        info = json.loads(github_secret)
-        creds = Credentials.from_service_account_info(
-            info, scopes=["https://www.googleapis.com/auth/drive"]
-        )
-    else:
-        credentials_path = "service_account.json"
-        if not os.path.exists(credentials_path):
-            raise FileNotFoundError(f"Nu s-a găsit fișierul '{credentials_path}'!")
-        creds = Credentials.from_service_account_file(
-            credentials_path, scopes=["https://www.googleapis.com/auth/drive"]
-        )
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
-
-
-def extrage_taguri_din_xml(continut_xml):
-    emitent = None
-    tip_act = None
+    if not info_json or not foldere_brut:
+        print("🛑 [Eroare] Lipsesc secretele sau variabilele de foldere în mediu!")
+        sys.exit(1)
+        
+    # Spargem lista de foldere prin virgulă (exact ca la download_XML)
+    liste_foldere = [f.strip() for f in foldere_brut.split(",") if f.strip()]
+    
     try:
-        context = ET.iterparse(io.StringIO(continut_xml), events=("end",))
-        for event, elem in context:
-            tag_curat = elem.tag.split('}')[-1].lower()
-            if tag_curat in ["emitent", "autor", "institutie"]:
-                if elem.text and elem.text.strip():
-                    emitent = elem.text.strip()
-            elif tag_curat in ["tipact", "tip_act", "document_type"]:
-                if elem.text and elem.text.strip():
-                    tip_act = elem.text.strip()
-            if emitent and tip_act:
-                break
-    except ET.ParseError:
-        pass
-    return emitent, tip_act
+        credențiale = service_account.Credentials.from_service_account_info(
+            json.loads(info_json),
+            scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        return build("drive", "v3", credentials=credențiale), liste_foldere
+    except Exception as e:
+        print(f"🛑 Eroare autentificare Google Drive: {e}")
+        sys.exit(1)
 
+# ======================================================================
+# EXTRAGERE TAGURI DIN FIȘIERELE UNUI AN
+# ======================================================================
+def extrage_taguri_din_matrice(serviciu, foldere_drive, ani_procesare):
+    import xml.etree.ElementTree as ET
+    from googleapiclient.http import MediaIoBaseDownload
+    import io
 
-def citeste_csv_existent(cale_fisier):
-    elemente = set()
-    if os.path.exists(cale_fisier):
-        try:
-            with open(cale_fisier, mode="r", encoding="utf-8") as f:
-                reader = csv.reader(f)
-                next(reader, None)
-                for rand in reader:
-                    if rand and rand[0].strip():
-                        elemente.add(rand[0].strip())
-        except Exception:
-            pass
-    return elemente
+    emitenti_gasiti = set()
+    tipuri_acte_gasite = set()
 
+    for an in ani_procesare:
+        print(f"\n⚡ Încep scanarea istorică pentru anul: {an}")
+        fișiere_an = []
 
-def salveaza_lista_simpla(cale_fisier, header, set_date):
-    with open(cale_fisier, mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow([header])
-        for item in sorted(list(set_date)):
-            writer.writerow([item])
-
-
-def proceseaza_segment_xml(an_start, an_stop):
-    if not TARGET_FOLDERS_RAW:
-        print(f"{ROSU}❌ Lipseste ID-ul folderului XML (DRIVE_FOLDER_XML).{RESET}")
-        return
-
-    # Extragere curată ierarhie foldere (Folder 1, Folder 2 etc.)
-    clean_raw = TARGET_FOLDERS_RAW.replace('"', '').replace("'", "").replace("\n", "").replace("\r", "").strip()
-    folder_ids = [fid.strip() for fid in clean_raw.split(",") if fid.strip()]
-    
-    if not folder_ids:
-        folder_ids = [
-            "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m",
-            "1G7CkaoivnTR0O8mZceB0143Q6956C1-1",
-            "1T2N_v81889Y7tyHUbrTSLR073YC7mGk5",
-            "1NWe4JKhhaQ4HxFGs7FfhxnlemE0ZM2E2"
-        ]
-
-    service = obtine_drive()
-    
-    # Nume unice bazate pe intervalul matricei ca să evităm coliziunile la rularea paralelă
-    cale_emitenti = f"lista_emitenti_{an_start}_{an_stop}.csv"
-    cale_acte = f"lista_tip_acte_{an_start}_{an_stop}.csv"
-    
-    set_emitenti = citeste_csv_existent(cale_emitenti)
-    set_acte = citeste_csv_existent(cale_acte)
-    
-    print(f"{VERDE}🔍 Pasul 1: Scanare ierarhică fișiere neprocesate pentru intervalul {an_start} - {an_stop}...{RESET}")
-    fisiere_xml = []
-    
-    # Colectăm doar XML-urile asociate anilor din această bucată de matrice
-    for target_year in range(an_start, an_stop + 1):
-        for folder_id in folder_ids:
-            page_token = None
+        # Parcurgem toate cele 4 foldere pentru a aduna fișierele XML ale anului curent
+        for idx, id_folder in enumerate(foldere_drive, 1):
+            print(f"🔍 Căutare în discul {idx}/{len(foldere_drive)} (ID: {id_folder[:8]}...)...")
+            interogare = f"'{id_folder}' in parents and name contains 'brut_legislatie_{an}' and mimeType = 'text/xml' and trashed = false"
             
-            # Query optimizat militar direct pe prefixul anului și flag-ul processed: false
-            query = (
-                f"'{folder_id}' in parents and name contains 'brut_legislatie_{target_year}_pag' and "
-                f"not appProperties has {{ key='processed' and value='true' }} and trashed = false"
-            )
-            
-            while True:
-                try:
-                    response = service.files().list(
-                        q=query, 
-                        spaces='drive', 
+            try:
+                pag_token = None
+                while True:
+                    rezultat = serviciu.files().list(
+                        q=interogare,
                         fields="nextPageToken, files(id, name)",
-                        pageToken=page_token, 
-                        pageSize=1000, 
-                        supportsAllDrives=True,
-                        includeItemsFromAllDrives=True
+                        pageSize=1000,
+                        pageToken=pag_token
                     ).execute()
                     
-                    fisiere_xml.extend(response.get("files", []))
-                    page_token = response.get("nextPageToken", None)
-                    if not page_token:
+                    fișiere_an.extend(rezultat.get('files', []))
+                    pag_token = rezultat.get('nextPageToken')
+                    if not pag_token:
                         break
-                except Exception as e:
-                    break
+            except Exception as e:
+                print(f"⚠️ Atenție: Nu s-a putut scana discul {idx}: {e}")
 
-    total_fisiere = len(fisiere_xml)
-    if total_fisiere == 0:
-        print(f"🎉 All clear! Toate fișierele XML pentru intervalul {an_start}-{an_stop} sunt complet procesate.")
-        return
+        print(f"📦 Am descoperit în total {len(fișiere_an)} fișiere XML pentru anul {an} în toate cele 4 discuri.")
 
-    print(f"📊 Am identificat {total_fisiere} fișiere XML noi de analizat în acest segment paralel.", flush=True)
-
-    # Procesarea secvențială a documentelor găsite în segment
-    for idx, fx in enumerate(fisiere_xml, 1):
-        nume = fx["name"]
-        fid = fx["id"]
-        
-        print(f"⏳ [{idx}/{total_fisiere}] Extragere dictionar: {nume}...", flush=True)
-        try:
-            request = service.files().get_media(fileId=fid)
-            fh = io.BytesIO()
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
-            
-            fh.seek(0)
-            continut_text = fh.getvalue().decode('utf-8', errors='ignore')
-            
-            emitent, tip_act = extrage_taguri_din_xml(continut_text)
-            if emitent:
-                set_emitenti.add(emitent)
-            if tip_act:
-                set_acte.add(tip_act)
+        # Procesăm fiecare XML localizat în memorie
+        for idx_f, f in enumerate(fișiere_an, 1):
+            if idx_f % 100 == 0 or idx_f == len(fișiere_an):
+                print(f"⚙️ Procesare: {idx_f}/{len(fișiere_an)}...")
                 
-            # Adăugăm flag-ul processed: true direct pe fișierul din Google Drive
-            service.files().update(
-                fileId=fid,
-                body={"appProperties": {"processed": "true"}},
-                supportsAllDrives=True
-            ).execute()
-            print(f"    ✅ Valori reținute. Fișier etichetat cu succes.")
-            
-        except Exception as e:
-            print(f"    ❌ {ROSU}[Eroare]{RESET} Imposibil de citit/actualizat {nume}: {str(e)[:60]}")
+            try:
+                # Descărcăm conținutul direct în memorie, fără fișiere temporare pe disc
+                cerere = serviciu.files().get_media(fileId=f['id'])
+                fh = io.BytesIO()
+                descarcare = MediaIoBaseDownload(fh, cerere)
+                gata = False
+                while not gata:
+                    _, gata = descarcare.next_chunk()
+                
+                conținut_xml = fh.getvalue()
+                
+                # Parsare XML rapidă
+                radacina = ET.fromstring(conținut_xml)
+                
+                # Căutăm tagurile de interes în structură
+                # (Ajustează căile/tagurile dacă structura XML diferă în fișierele tale)
+                for item in radacina.findall(".//Act"): 
+                    emitent = item.find("Emitent")
+                    tip_act = item.find("TipAct")
+                    
+                    if emitent is not None and emitent.text:
+                        emitenti_gasiti.add(emitent.text.strip())
+                    if tip_act is not None and tip_act.text:
+                        tipuri_acte_gasite.add(tip_act.text.strip())
+                        
+            except Exception as e:
+                # Sărim peste fișierele corupte sau blocate ca să nu oprim execuția
+                continue
 
-    # Salvarea nomenclatoarelor unice per fir de execuție
-    salveaza_lista_simpla(cale_emitenti, "Emitent", set_emitenti)
-    salveaza_lista_simpla(cale_acte, "Tip_Act", set_acte)
-    print(f"\n🏁 {VERDE}Nomenclatoare finalizate pentru segmentul {an_start} - {an_stop}! Salvare în {cale_emitenti} și {cale_acte}{RESET}")
-
-
-if __name__ == "__main__":
-    # Interceptăm argumentele numerice transmise de Matrix-ul din YAML
-    argumente_numerice = []
+    # Salvăm rezultatele parțiale ale acestui fir în fișiere CSV locale
+    # Ele vor fi colectate automat de jobul final din GitHub Actions
+    string_ani = "_".join(ani_procesare)
     
-    for arg in sys.argv[1:]:
-        piese = arg.split()
-        for piesa in piese:
-            if piesa.isdigit():
-                argumente_numerice.append(int(piesa))
+    cale_emitenti = f"lista_emitenti_{string_ani}.csv"
+    cale_acte = f"lista_tip_acte_{string_ani}.csv"
+    
+    with open(cale_emitenti, mode='w', newline='', encoding='utf-8') as fh:
+        writer = csv.writer(fh)
+        writer.writerow(['Emitent'])
+        for e in sorted(list(emitenti_gasiti)):
+            writer.writerow([e])
+            
+    with open(cale_acte, mode='w', newline='', encoding='utf-8') as fh:
+        writer = csv.writer(fh)
+        writer.writerow(['Tip_Act'])
+        for t in sorted(list(tipuri_acte_gasite)):
+            writer.writerow([t])
+            
+    print(f"✅ Fragmente exportate cu succes: {cale_emitenti} și {cale_acte}")
 
-    if len(argumente_numerice) == 1:
-        an_s = argumente_numerice[0]
-        an_f = argumente_numerice[0]
-    elif len(argumente_numerice) >= 2:
-        an_s = argumente_numerice[0]
-        an_f = argumente_numerice[1]
-    else:
-        an_s = START_YEAR
-        an_f = END_YEAR
+# ======================================================================
+# PUNCTUL DE INTRARE ÎN SCRIPT
+# ======================================================================
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("🛑 Eroare: Lipsesc anii ca parametru!")
+        sys.exit(1)
         
-    print(f"{VERDE}🎯 [Config Matrice Dictionar] Rulare pe segmentul: {an_s} - {an_f}{RESET}", flush=True)
-    proceseaza_segment_xml(an_s, an_f)
+    argumente = sys.argv[1:]
+    if len(argumente) == 1 and " " in argumente[0]:
+        ani = argumente[0].split()
+    else:
+        ani = argumente
+        
+    print(f"🎯 [Dictionare] Pornire procesare pentru anii: {ani}")
+    
+    client_drive, listă_foldere = obtine_serviciu_drive()
+    extrage_taguri_din_matrice(client_drive, listă_foldere, ani)
