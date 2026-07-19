@@ -19,29 +19,24 @@ from zeep import Client
 from zeep.transports import Transport
 from zeep.plugins import HistoryPlugin
 
-# ==========================================
-# CONFIGURĂRI DINAMICE (MEDIU SAU CONFIG.JSON)
-# ==========================================
+# ======================================================================
+# CONFIGURĂRI LISTĂ DIRECTOARE (PĂSTRĂM ȘI MEDIUL, DAR PUNEM ȘI LISTA FIXĂ)
+# ======================================================================
+TARGET_FOLDERS_RAW = os.getenv("DRIVE_FOLDER_XML", "")
 FOLDER_IDS = []
 
-# Încercăm mai întâi variabila din GitHub Actions
-TARGET_FOLDERS_RAW = os.getenv("DRIVE_FOLDER_XML", "")
 if TARGET_FOLDERS_RAW.strip():
     clean_raw = TARGET_FOLDERS_RAW.replace('"', '').replace("'", "").replace("\n", "").replace("\r", "").strip()
     FOLDER_IDS = [fid.strip() for fid in clean_raw.split(",") if fid.strip()]
 
-# Dacă variabila e goală, citim din fișierul local config.json
+# Dacă GitHub Actions lasă variabila goală, codul folosește instant cele 4 ID-uri ale tale bune:
 if not FOLDER_IDS:
-    config_path = os.path.join(os.path.dirname(__file__), "config.json")
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, "r", encoding="utf-8") as cf:
-                config_data = json.load(cf)
-                FOLDER_IDS = config_data.get("DRIVE_FOLDERS", [])
-                if FOLDER_IDS:
-                    print(f"{VERDE}📂 [Config Mode] ID-urile directoarelor au fost încărcate cu succes din config.json.{RESET}")
-        except Exception as e:
-            print(f"{ROSU}⚠️ Eroare la citirea fișierului config.json: {e}{RESET}")
+    FOLDER_IDS = [
+        "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m",
+        "1G7CkaoivnTR0O8mZceB0143Q6956C1-1",
+        "1T2N_v81889Y7tyHUbrTSLR073YC7mGk5",
+        "1NWe4JKhhaQ4HxFGs7FfhxnlemE0ZM2E2"
+    ]
 
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
@@ -69,11 +64,10 @@ def get_drive_service():
 
 
 def get_already_downloaded_pages(service, target_year):
-    """Scanează TOATE directoarele active furnizate și returnează paginile existente."""
+    """Scanează ierarhic folderele și verifică ce pagini sunt deja descărcate."""
     valid_pages = set()
     
     if not FOLDER_IDS:
-        print(f"{ROSU}🛑 Eroare critică: Lipsesc ID-urile directoarelor complet.{RESET}")
         return valid_pages
 
     for folder_id in FOLDER_IDS:
@@ -108,16 +102,16 @@ def get_already_downloaded_pages(service, target_year):
                 if not page_token:
                     break
         except Exception as e:
-            print(f"{ROSU}⚠️ Scanare Drive incompletă pe folderul {folder_id} ({e}).{RESET}")
+            # Dacă primul folder dă 404 sau e plin, continuă liniștit scanarea în restul folderelor
             continue
             
     return valid_pages
 
 
 def upload_to_drive(service, filename, content_bytes):
-    """Încarcă fișierul XML brut în primul folder liber. Comută la următorul dacă e plin."""
+    """Încarcă fișierul în primul folder disponibil. Dacă e plin (403/limite), sare la următorul."""
     if not FOLDER_IDS:
-        print(f"{ROSU}🛑 Eroare upload: Niciun folder setat în mediu sau config!{RESET}")
+        print(f"{ROSU}🛑 Eroare upload: Nicio destinație configurată!{RESET}")
         return False
 
     for folder_id in FOLDER_IDS:
@@ -132,19 +126,19 @@ def upload_to_drive(service, filename, content_bytes):
                 supportsAllDrives=True
             ).execute()
             
-            print(f"{VERDE}✅ Fișier salvat în Drive: {filename} (ID folder curent: {folder_id}){RESET}")
+            print(f"{VERDE}✅ Fișier salvat în Drive: {filename} (Folder Destinație ID: {folder_id}){RESET}")
             return True
             
         except Exception as e:
             eroare_text = str(e).lower()
             if "limit" in eroare_text or "exceeded" in eroare_text or "403" in eroare_text or "storage" in eroare_text:
-                print(f"{GALBEN}⚠️ [Folder Plin] ID: {folder_id} a respins stocarea. Încercăm următorul...{RESET}")
-                continue
+                print(f"{GALBEN}⚠️ [Folder Plin/Limită Atingă] ID: {folder_id} a respins stocarea. Mutăm fluxul...{RESET}")
+                continue  # Comută automat la următorul ID din listă
             else:
                 print(f"{ROSU}❌ Eroare la upload în folderul {folder_id}: {e}{RESET}")
                 continue
 
-    print(f"{ROSU}🛑 EROARE CRITICĂ TOTALĂ: Toate directoarele sunt pline sau inaccesibile!{RESET}")
+    print(f"{ROSU}🛑 EROARE CRITICĂ TOTALĂ: Toate directoarele configurate sunt pline sau inaccesibile!{RESET}")
     return False
 
 
@@ -165,7 +159,7 @@ def download_year(drive_service, composite_type_name, target_year):
     pages_to_process = []
     if downloaded_pages:
         max_page = max(downloaded_pages)
-        print(f"📦 {len(downloaded_pages)} pagini VALIDE în directoare pentru {target_year}. (Ultima sigură: {max_page})")
+        print(f"📦 {len(downloaded_pages)} pagini VALIDE găsite în istoric pentru {target_year}. (Ultima sigură: {max_page})")
         
         all_expected_pages = set(range(1, max_page + 1))
         gaps = sorted(list(all_expected_pages - downloaded_pages))
@@ -301,11 +295,6 @@ def download_laws_main(an_start, an_stop):
     """Funcția principală executată per segment."""
     try:
         print(f"{VERDE}🚀 Pornire segment industrial paralel XML. Interval: {an_start} – {an_stop}...{RESET}")
-        
-        if not FOLDER_IDS:
-            print(f"{ROSU}🛑 CRITIC: Nu s-a putut porni execuția. Niciun ID de folder nu a fost găsit în mediu sau în config.json!{RESET}")
-            sys.exit(1)
-            
         drive_service = get_drive_service()
         composite_type_name = "{http://schemas.datacontract.org/2004/07/FreeWebService}CompositeType"
         total_files_segment = 0
