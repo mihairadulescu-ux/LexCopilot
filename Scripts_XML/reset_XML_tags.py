@@ -39,23 +39,27 @@ def reseteaza_atribute_procesare():
 
     service = get_drive_service()
     
-    # Căutăm STRICT fișierele care au fost deja marcate ca procesate
-    query = f"'{DRIVE_FOLDER_XML}' in parents and name contains '.xml' and description = 'processed_for_tags: true' and trashed = false"
+    # Am corectat query-ul: filtrăm după descriere și mimeType, eliminând "name contains" care strica sintaxa
+    query = f"'{DRIVE_FOLDER_XML}' in parents and description = 'processed_for_tags: true' and mimeType = 'application/xml' and trashed = false"
     
     page_token = None
     fisiere_de_resetat = []
     
     print(f"🔍 Identificăm fișierele marcate în Drive...")
     while True:
-        response = service.files().list(
-            q=query, spaces='drive', fields='nextPageToken, files(id, name)',
-            pageToken=page_token, pageSize=500, supportsAllDrives=True, includeItemsFromAllDrives=True
-        ).execute()
-        
-        fisiere_de_resetat.extend(response.get('files', []))
-        page_token = response.get('nextPageToken', None)
-        if not page_token:
-            break
+        try:
+            response = service.files().list(
+                q=query, spaces='drive', fields='nextPageToken, files(id, name)',
+                pageToken=page_token, pageSize=500, supportsAllDrives=True, includeItemsFromAllDrives=True
+            ).execute()
+            
+            fisiere_de_resetat.extend(response.get('files', []))
+            page_token = response.get('nextPageToken', None)
+            if not page_token:
+                break
+        except Exception as e:
+            print(f"{ROSU}🛑 Eroare la interogarea Drive API: {e}{RESET}")
+            return
 
     if not fisiere_de_resetat:
         print(f"{VERDE}✨ Nu există fișiere marcate. Totul este deja pregătit pentru o căutare fresh!{RESET}")
@@ -68,8 +72,8 @@ def reseteaza_atribute_procesare():
         f_nume = fisier['name']
         
         try:
-            # Trimitem body-ul cu descrierea goală (null/empty string în API-ul Drive)
-            service.files().update(fileId=f_id, body={'description': ''}).execute()
+            # Pentru a șterge complet descrierea în API v3, îi pasăm un string gol
+            service.files().update(fileId=f_id, body={'description': ''}, supportsAllDrives=True).execute()
             
             if idx % 100 == 0 or idx == len(fisiere_de_resetat):
                 print(f"   ⚙️ [{idx}/{len(fisiere_de_resetat)}] Resetat cu succes: {f_nume}")
