@@ -35,8 +35,7 @@ jobs:
           DRIVE_FOLDER_PDF: ${{ vars.DRIVE_FOLDER_PDF }}
           PYTHONUNBUFFERED: "1"
         run: |
-          python -u Scripts_PDF/reset_and_index.py
-
+          python -u Scripts_PDF/inventar_si_reset.py
       - name: PASUL B - Executare Crawler bazat pe CSV
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
