@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       forteaza_resetare:
-        description: "Forțează procesarea tuturor fișierelor (True/False)"
+        description: "Forțează resetarea tag-urilor din Cloud înainte de colectare (True/False)"
         required: false
         type: boolean
         default: false
@@ -28,18 +28,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install google-api-python-client google-auth httpx
 
-      - name: Executare download_XML_dictionaries.py
+      - name: Executare Reset si Colectare Dictionare
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRIVE_FOLDER_XML: ${{ vars.DRIVE_FOLDER_XML }}
           FORTEAZA_RESET: ${{ github.event.inputs.forteaza_resetare }}
           PYTHONUNBUFFERED: "1"
         run: |
-          # Dacă pe viitor vrei să adaugi un script de resetare totală a flag-urilor din Drive, 
-          # poți activa logica de mai jos. Momentan rulăm direct dicționarele stabil.
+          # Pasul 1: Dacă bifa este TRUE, executăm scriptul de resetare a proprietăților din Google Drive
           if [ "$FORTEAZA_RESET" = "true" ]; then
-            echo "🔄 S-a solicitat forțarea procesării..."
+            echo "🔄 [BIFAT] Pornire script curățare și resetare etichete Cloud..."
+            python -u Scripts_XML/reset_XML_tags.py
+          else
+            echo "▶️ [IGNORAT] Se sare peste resetare. Se procesează doar fișierele complet noi."
           fi
           
-          echo "🚀 Pornire analiză ierarhică XML-uri noi..."
+          # Pasul 2: Rularea automată a scriptului de colectare (pentru nomenclatoare)
+          echo "🚀 Pornire analiză ierarhică XML și extragere termeni unici..."
           python -u Scripts_XML/download_XML_dictionaries.py
