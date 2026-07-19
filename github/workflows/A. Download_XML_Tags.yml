@@ -1,0 +1,31 @@
+name: "📊 Descărcare Nomenclatoare XML Tags"
+
+on:
+  workflow_dispatch: # Îl pornești la buton doar când ai nevoie să actualizezi emitenții/tipul de acte
+
+jobs:
+  download_tags:
+    name: "📊 Actualizare Emitenți & Tip Acte"
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Descărcare cod din repository
+        uses: actions/checkout@v4
+
+      - name: Configurare mediu Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Instalare dependențe
+        run: |
+          python -m pip install --upgrade pip
+          pip install zeep google-api-python-client google-auth requests
+
+      - name: Rulează extracția de Tags direct din server
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          METADATA_FOLDER_ID: ${{ vars.METADATA_FOLDER_ID }} # Trimis fix în folderul tău de metadate
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python -u Scripts_XML/download_XML_dictionaries.py
