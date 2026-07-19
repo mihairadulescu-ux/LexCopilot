@@ -44,4 +44,4 @@ jobs:
           END_YEAR: "2026"
           PYTHONUNBUFFERED: "1"
         run: |
-          python -u Scripts_PDF/download_pdfs.py
+          python -u Scripts_PDF/download_pdf.py
