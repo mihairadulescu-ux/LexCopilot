@@ -8,15 +8,14 @@ from googleapiclient.discovery import build
 # CONEXIUNE MULTI-FOLDER GOOGLE DRIVE
 # ======================================================================
 def obtine_serviciu_drive():
-    """Inițializează clientul API Google Drive și extrage lista de discuri."""
+    """Inițializează clientul API Google Drive."""
     info_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     foldere_brut = os.getenv("DRIVE_FOLDER_XML")
     
     if not info_json or not foldere_brut:
-        print("🛑 [Eroare Reset] Lipsesc secretele sau variabilele de foldere în mediu!")
+        print("🛑 [Eroare Reset] Lipsesc credențialele sau folderul XML în mediu!")
         sys.exit(1)
         
-    # Spargem lista de foldere prin virgulă (la fel ca în restul scripturilor)
     liste_foldere = [f.strip() for f in foldere_brut.split(",") if f.strip()]
     
     try:
@@ -30,28 +29,24 @@ def obtine_serviciu_drive():
         sys.exit(1)
 
 # ======================================================================
-# LOGICĂ DE RESETARE PROCESARE (FLAGURI)
+# LOGICĂ DE RESETARE (CONVENȚIE: brut_legislatie_{an}_)
 # ======================================================================
 def ruleaza_reset_flaguri(serviciu, foldere_drive, ani_procesare):
-    """
-    Caută toate fișierele XML din anii selectați în toate cele 4 discuri
-    și le resetează metadatele sau descrierea în caz că vrei o re-parsare.
-    """
     for an in ani_procesare:
         print(f"\n⚙️ [Reset] Inițiere curățare flaguri pentru anul: {an}")
         fișiere_de_resetat = []
 
-        # Interogăm pe rând fiecare dintre cele 4 discuri
+        # Interogăm discurile rând pe rând folosind startsWith
         for idx, id_folder in enumerate(foldere_drive, 1):
             print(f"🔍 Căutare XML-uri pentru reset în discul {idx}/{len(foldere_drive)}...")
-            interogare = f"'{id_folder}' in parents and name contains 'brut_legislatie_{an}' and mimeType = 'text/xml' and trashed = false"
+            interogare = f"'{id_folder}' in parents and name startsWith 'brut_legislatie_{an}_' and mimeType = 'text/xml' and trashed = false"
             
             try:
                 pag_token = None
                 while True:
                     rezultat = serviciu.files().list(
                         q=interogare,
-                        fields="nextPageToken, files(id, name, description)",
+                        fields="nextPageToken, files(id, name)",
                         pageSize=1000,
                         pageToken=pag_token
                     ).execute()
@@ -70,40 +65,26 @@ def ruleaza_reset_flaguri(serviciu, foldere_drive, ani_procesare):
             print("⏭️ Nu s-au găsit fișiere pentru reset în niciun disc.")
             continue
 
-        # Executăm resetarea propriu-zisă
-        # Notă: De regulă, resetarea înseamnă modificarea câmpului 'description' 
-        # sau a proprietăților personalizate din Drive pentru a marca processed = false
-        print(f"🔄 Se resetează flagurile pentru cele {total_fișiere} fișiere...")
-        
+        print(f"🔄 Se resetează metadatele pentru cele {total_fișiere} fișiere...")
         for idx_f, f in enumerate(fișiere_de_resetat, 1):
             if idx_f % 250 == 0 or idx_f == total_fișiere:
                 print(f"   [Progres Reset] {idx_f}/{total_fișiere} modificate...")
                 
             try:
-                # Modificăm metadatele fișierului în Google Drive
-                # Presupunem că folosești sistemul cu proprietăți (appProperties) sau description:
+                # Actualizăm description pentru a forța re-parsarea
                 corpurile_metadate = {
                     'description': 'processed=false'
                 }
-                
-                # Dacă folosești proprietăți custom în Drive, codul ar fi:
-                # corpurile_metadate = {'appProperties': {'processed': 'false'}}
-                
                 serviciu.files().update(
                     fileId=f['id'],
                     body=corpurile_metadate,
                     fields='id'
                 ).execute()
-                
             except Exception as e:
-                # Dacă un fișier dă eroare (e blocat/șters între timp), trecem peste el
                 continue
                 
-        print(f"✅ Anul {an} a fost resetat complet pe toate cele 4 discuri.")
+        print(f"✅ Anul {an} a fost resetat complet pe toate discurile.")
 
-# ======================================================================
-# PUNCT DE INTRARE SCRIPT
-# ======================================================================
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("🛑 Eroare Reset: Lipsesc anii ca parametru!")
@@ -116,6 +97,5 @@ if __name__ == "__main__":
         ani = argumente
         
     print(f"🎯 [Reset Matrice] Pornire curățare flaguri pentru: {ani}")
-    
     client_drive, listă_foldere = obtine_serviciu_drive()
     ruleaza_reset_flaguri(client_drive, listă_foldere, ani)
