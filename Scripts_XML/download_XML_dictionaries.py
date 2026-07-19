@@ -87,7 +87,7 @@ def proceseaza_segment_xml():
     
     for folder_id in folder_ids:
         page_token = None
-        # Sintaxă corectă: selectăm fișierele unde flag-ul processed NU este 'true'
+        # Colectăm doar fișierele unde proprietatea processed NU este 'true'
         query = (
             f"'{folder_id}' in parents and name contains '.xml' and "
             f"not appProperties has {{ key='processed' and value='true' }} and trashed = false"
@@ -96,10 +96,13 @@ def proceseaza_segment_xml():
         while True:
             try:
                 response = service.files().list(
-                    q=query, spaces='drive', 
+                    q=query, 
+                    spaces='drive', 
                     fields="nextPageToken, files(id, name)",
-                    pageToken=page_token, pageSize=1000, supportsAllDrives=True,
-                    includeItemsFromAllDrives=True, corpora="allDrives"
+                    pageToken=page_token, 
+                    pageSize=1000, 
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True
                 ).execute()
                 
                 fisiere_xml.extend(response.get("files", []))
@@ -139,7 +142,7 @@ def proceseaza_segment_xml():
             if tip_act:
                 set_acte.add(tip_act)
                 
-            # Salvăm starea nativ în Google Drive Properties
+            # Setăm nativ starea 'processed: true'
             service.files().update(
                 fileId=fid,
                 body={"appProperties": {"processed": "true"}},
