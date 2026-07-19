@@ -1,4 +1,4 @@
-name: Executie Descarcare Industriala XML
+name: "🏁 Executie Descarcare Industriala XML"
 
 on:
   workflow_dispatch:
