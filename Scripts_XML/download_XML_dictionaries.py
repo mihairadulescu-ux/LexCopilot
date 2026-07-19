@@ -13,7 +13,7 @@ GALBEN = "\033[93m"
 ROSU = "\033[91m"
 RESET = "\033[0m"
 
-FOLDER_XML_ID = os.getenv("DRIVE_FOLDER_XML")
+TARGET_FOLDERS_RAW = os.getenv("DRIVE_FOLDER_XML", "")
 
 
 def obtine_drive():
@@ -29,35 +29,30 @@ def obtine_drive():
 def extrage_taguri_din_xml(continut_xml):
     emitent = None
     tip_act = None
-    
     try:
         context = ET.iterparse(io.StringIO(continut_xml), events=("end",))
         for event, elem in context:
             tag_curat = elem.tag.split('}')[-1].lower()
-            
             if tag_curat in ["emitent", "autor", "institutie"]:
                 if elem.text and elem.text.strip():
                     emitent = elem.text.strip()
             elif tag_curat in ["tipact", "tip_act", "document_type"]:
                 if elem.text and elem.text.strip():
                     tip_act = elem.text.strip()
-                
             if emitent and tip_act:
                 break
     except ET.ParseError:
         pass
-        
     return emitent, tip_act
 
 
 def citeste_csv_existent(cale_fisier):
-    """Încarcă elementele existente din CSV-ul local pentru a preveni duplicatele."""
     elemente = set()
     if os.path.exists(cale_fisier):
         try:
             with open(cale_fisier, mode="r", encoding="utf-8") as f:
                 reader = csv.reader(f)
-                next(reader, None)  # Sărim peste header
+                next(reader, None)
                 for rand in reader:
                     if rand and rand[0].strip():
                         elemente.add(rand[0].strip())
@@ -67,7 +62,6 @@ def citeste_csv_existent(cale_fisier):
 
 
 def salveaza_lista_simpla(cale_fisier, header, set_date):
-    """Salvează un set sortat alfabetic într-un CSV curat cu o singură coloană."""
     with open(cale_fisier, mode="w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([header])
@@ -76,57 +70,59 @@ def salveaza_lista_simpla(cale_fisier, header, set_date):
 
 
 def proceseaza_segment_xml():
-    if not FOLDER_XML_ID:
+    if not TARGET_FOLDERS_RAW:
         print(f"{ROSU}❌ Lipseste ID-ul folderului XML (DRIVE_FOLDER_XML).{RESET}")
         return
 
+    folder_ids = [fid.strip() for fid in TARGET_FOLDERS_RAW.split(",") if fid.strip()]
     service = obtine_drive()
     
-    # Încărcăm listele curente pentru a funcționa incremental
     cale_emitenti = "lista_emitenti.csv"
     cale_acte = "lista_tip_acte.csv"
-    
     set_emitenti = citeste_csv_existent(cale_emitenti)
     set_acte = citeste_csv_existent(cale_acte)
     
-    print(f"{VERDE}🔍 Pasul 1: Scanare fișiere neprocesate în Drive...{RESET}")
-    # Filtrare nativă API: colectăm doar fișierele fără proprietatea processed=true
-    query = (
-        f"'{FOLDER_XML_ID}' in parents and name contains '.xml' "
-        f"and appProperties/processed != 'true' and trashed = false"
-    )
-    
+    print(f"{VERDE}🔍 Pasul 1: Scanare fișiere neprocesate în cele {len(folder_ids)} locații...{RESET}")
     fisiere_xml = []
-    page_token = None
     
-    while True:
-        response = service.files().list(
-            q=query, spaces='drive', 
-            fields="nextPageToken, files(id, name)",
-            pageToken=page_token, pageSize=1000, supportsAllDrives=True,
-            includeItemsFromAllDrives=True, corpora="allDrives"
-        ).execute()
+    for folder_id in folder_ids:
+        page_token = None
+        # Sintaxă corectă: selectăm fișierele unde flag-ul processed NU este 'true'
+        query = (
+            f"'{folder_id}' in parents and name contains '.xml' and "
+            f"not appProperties has {{ key='processed' and value='true' }} and trashed = false"
+        )
         
-        fisiere_xml.extend(response.get("files", []))
-        page_token = response.get("nextPageToken", None)
-        if not page_token:
-            break
+        while True:
+            try:
+                response = service.files().list(
+                    q=query, spaces='drive', 
+                    fields="nextPageToken, files(id, name)",
+                    pageToken=page_token, pageSize=1000, supportsAllDrives=True,
+                    includeItemsFromAllDrives=True, corpora="allDrives"
+                ).execute()
+                
+                fisiere_xml.extend(response.get("files", []))
+                page_token = response.get("nextPageToken", None)
+                if not page_token:
+                    break
+            except Exception as e:
+                print(f"{ROSU}⚠️ Eroare scanare folder {folder_id}: {e}{RESET}")
+                break
 
     total_fisiere = len(fisiere_xml)
     if total_fisiere == 0:
-        print("🎉 Toate fișierele XML din folder sunt complet procesate!")
+        print("🎉 Toate fișierele XML sunt complet procesate!")
         return
 
-    print(f"📊 Am găsit {total_fisiere} fișiere XML noi de scanat.", flush=True)
+    print(f"📊 Am găsit {total_fisiere} fișiere XML noi de analizat.", flush=True)
 
     for idx, fx in enumerate(fisiere_xml, 1):
         nume = fx["name"]
         fid = fx["id"]
         
         print(f"⏳ [{idx}/{total_fisiere}] Extragere dicționar: {nume}...", flush=True)
-        
         try:
-            # 1. Descărcare eficientă în stream memorie
             request = service.files().get_media(fileId=fid)
             fh = io.BytesIO()
             downloader = MediaIoBaseDownload(fh, request)
@@ -137,31 +133,25 @@ def proceseaza_segment_xml():
             fh.seek(0)
             continut_text = fh.getvalue().decode('utf-8', errors='ignore')
             
-            # 2. Extracție etichete
             emitent, tip_act = extrage_taguri_din_xml(continut_text)
-            
             if emitent:
                 set_emitenti.add(emitent)
             if tip_act:
                 set_acte.add(tip_act)
                 
-            # 3. Aplicare flag 'processed' direct în metadatele Google Drive
+            # Salvăm starea nativ în Google Drive Properties
             service.files().update(
                 fileId=fid,
                 body={"appProperties": {"processed": "true"}},
                 supportsAllDrives=True
             ).execute()
-            
-            print(f"    ✅ Valori reținute. Fișier marcat ca procesat în Cloud.")
-            
+            print(f"    ✅ Valori reținute. Fișier etichetat.")
         except Exception as e:
             print(f"    ❌ {ROSU}[Eroare]{RESET} Imposibil de citit {nume}: {str(e)[:60]}")
 
-    # 4. Actualizare nomenclatoare locale (unice, sortate alfabetic)
     salveaza_lista_simpla(cale_emitenti, "Emitent", set_emitenti)
     salveaza_lista_simpla(cale_acte, "Tip_Act", set_acte)
-
-    print(f"\n🏁 {VERDE}Nomenclatoarele din [{cale_emitenti}] și [{cale_acte}] au fost aduse la zi!{RESET}")
+    print(f"\n🏁 {VERDE}Nomenclatoare actualizate cu succes!{RESET}")
 
 
 if __name__ == "__main__":
