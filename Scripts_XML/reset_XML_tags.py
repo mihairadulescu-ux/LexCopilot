@@ -39,7 +39,7 @@ def reseteaza_atribute_procesare():
 
     service = get_drive_service()
     
-    # Am corectat query-ul: filtrăm după descriere și mimeType, eliminând "name contains" care strica sintaxa
+    # QUERY CORECTAT: Filtrăm exclusiv după descriere și mimeType, ocolind eroarea de 'name contains'
     query = f"'{DRIVE_FOLDER_XML}' in parents and description = 'processed_for_tags: true' and mimeType = 'application/xml' and trashed = false"
     
     page_token = None
@@ -82,7 +82,7 @@ def reseteaza_atribute_procesare():
             print(f"{ROSU}⚠️ Nu s-a putut reseta metadata pentru {f_nume}: {e}{RESET}")
             continue
 
-    print(f"\n{VERDE}🎉 Resetare completă! Toate cele {len(fisiere_de_resetat)} XML-uri sunt acum libere pentru scanarea de tags.{RESET}")
+    print(f"\n{VERDE}🎉 Resetare completă! Toate cele {len(fisiere_de_resetat)} XML-uri sunt libere acum.{RESET}")
 
 
 if __name__ == "__main__":
