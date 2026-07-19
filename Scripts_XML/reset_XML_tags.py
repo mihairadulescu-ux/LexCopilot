@@ -30,7 +30,6 @@ def reseteaza_atribute_xml():
     print(f"📂 Scanare generală folder XML pentru resetare (ID: {TARGET_FOLDER_ID})...")
     
     page_token = None
-    # QUERY ULTRA-SIMPLU: doar părintele, la fel ca la PDF-uri
     query = f"'{TARGET_FOLDER_ID}' in parents and trashed = false"
     
     fisiere_marcate = []
@@ -43,15 +42,15 @@ def reseteaza_atribute_xml():
             pageToken=page_token, 
             pageSize=1000,
             supportsAllDrives=True, 
-            includeItemsFromAllDrives=True, 
-            corpora="user"
+            includeItemsFromAllDrives=True
+            # Am eliminat corpora="user" pentru a evita eroarea 404 pe Shared Drives
         ).execute()
         
-        fisiere = response.get("files", [])
-        contor_total += len(fisiere)
+        fișiere = response.get("files", [])
+        contor_total += len(fișiere)
         
         # Filtrare 100% locală în Python
-        for f in fisiere:
+        for f in fișiere:
             if f['name'].lower().endswith('.xml') and f.get("description") == "processed_for_tags: true":
                 fisiere_marcate.append(f)
                 
