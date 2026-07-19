@@ -1,136 +1,338 @@
-import os
-import sys
-import io
-import json
-import time
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaIoBaseUpload
-
+# Culori pentru un log frumos în consolă
 VERDE = "\033[92m"
 GALBEN = "\033[93m"
 ROSU = "\033[91m"
 RESET = "\033[0m"
 
-# Încarcă automat toate folderele din variabila de mediu, curățate de spații și linii noi
+import os
+import sys
+import time
+import re
+import json
+import random
+import io
+from lxml import etree
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaInMemoryUpload
+from zeep import Client
+from zeep.transports import Transport
+from zeep.plugins import HistoryPlugin
+
+# ==========================================
+# CONFIGURĂRI DINAMICE (MULTIPLE FOLDERE)
+# ==========================================
 TARGET_FOLDERS_RAW = os.getenv("DRIVE_FOLDER_XML", "")
+# Preluăm toate cele 4 directoare din listă și le curățăm de spații și newlines ascunse
 FOLDER_IDS = [fid.strip().replace("\n", "").replace("\r", "") for fid in TARGET_FOLDERS_RAW.split(",") if fid.strip()]
 
+WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
-def obtine_drive():
-    if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
-        raise EnvironmentError("❌ Lipseste secretul GOOGLE_SERVICE_ACCOUNT_JSON!")
-    info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
-    creds = Credentials.from_service_account_info(
-        info, scopes=["https://www.googleapis.com/auth/drive"]
-    )
+START_YEAR = int(os.getenv("START_YEAR", "2000"))
+END_YEAR = int(os.getenv("END_YEAR", "2026"))
+
+
+def get_drive_service():
+    """Autentifică robotul în Google Drive folosind secretele din mediu."""
+    scopes = ["https://www.googleapis.com/auth/drive.file"]
+    github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    
+    if github_secret:
+        print(f"{VERDE}🤖 [Cloud Mode] Autentificare în Google Drive folosind GitHub Secrets...{RESET}")
+        service_account_info = json.loads(github_secret)
+        creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=scopes)
+    else:
+        print(f"{GALBEN}💻 [Local Mode] Autentificare în Google Drive...{RESET}")
+        credentials_path = "service_account.json"
+        if not os.path.exists(credentials_path):
+            raise FileNotFoundError(f"Nu s-a găsit fișierul '{credentials_path}'!")
+        creds = service_account.Credentials.from_service_account_file(credentials_path, scopes=scopes)
+        
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
-def salveaza_xml_in_drive_dinamic(service, nume_fisier, continut_xml):
+def get_already_downloaded_pages(service, target_year):
     """
-    Uploadează XML-ul în primul folder liber din listă.
-    Dacă un folder întoarce teamDriveFileLimitExceeded (403), trece automat la următorul.
+    Scanează TOATE directoarele active furnizate și returnează un dicționar cu 
+    paginile deja descărcate la nivel global pentru a evita duplicatele.
+    Sărim peste fișierele existente doar dacă dimensiunea lor este >= 20 bytes.
+    """
+    valid_pages = set()
+    
+    if not FOLDER_IDS:
+        print(f"{ROSU}⚠️ Lipsesc ID-urile directoarelor din configurare.{RESET}")
+        return valid_pages
+
+    # Căutăm ierarhic în fiecare folder listat
+    for folder_id in FOLDER_IDS:
+        page_token = None
+        query = f"'{folder_id}' in parents and name contains 'brut_legislatie_{target_year}_pag' and trashed = false"
+
+        try:
+            while True:
+                response = service.files().list(
+                    q=query, spaces='drive', fields='nextPageToken, files(name, size)',
+                    pageToken=page_token, supportsAllDrives=True, includeItemsFromAllDrives=True
+                ).execute()
+
+                for file in response.get('files', []):
+                    name = file.get('name', '')
+                    size = int(file.get('size', 0))
+                    
+                    if f"brut_legislatie_{target_year}_pag" not in name:
+                        continue 
+                    
+                    # Regula ta de aur: dacă fișierul are mai puțin de 20 de bytes, îl considerăm lipsă și îl re-descărcăm
+                    if size < 20:
+                        print(f"{GALBEN}   ⚠️ Re-descărcare forțată: {name} are doar {size} bytes (în folder ID: {folder_id}).{RESET}")
+                        continue
+                    
+                    match = re.search(r"_pag(\d+)\.xml$", name)
+                    if match:
+                        valoare_pagina = int(match.group(1))
+                        if valoare_pagina < 99999:
+                            valid_pages.add(valoare_pagina)
+                            
+                page_token = response.get('nextPageToken', None)
+                if not page_token:
+                    break
+        except Exception as e:
+            print(f"{ROSU}⚠️ Scanare Drive incompletă pe folderul {folder_id} ({e}).{RESET}")
+            continue # Trecem la următorul folder pentru a salva ce se poate
+            
+    return valid_pages
+
+
+def upload_to_drive(service, filename, content_bytes):
+    """
+    Încarcă fișierul XML brut în primul folder liber din listă.
+    Dacă un Shared Drive returnează teamDriveFileLimitExceeded (403), trece automat la următorul.
     """
     if not FOLDER_IDS:
-        print(f"{ROSU}🛑 Eroare: Variabila DRIVE_FOLDER_XML este goală sau invalidă!{RESET}")
+        print(f"{ROSU}🛑 Eroare upload: Niciun folder valid setat în DRIVE_FOLDER_XML!{RESET}")
         return False
 
     for folder_id in FOLDER_IDS:
         try:
-            file_metadata = {
-                'name': nume_fisier,
-                'parents': [folder_id]
-            }
+            file_metadata = {"name": filename, "parents": [folder_id]}
+            media = MediaInMemoryUpload(content_bytes, mimetype="application/xml", resumable=True)
             
-            # Utilizăm stream de tip resumable pentru a intercepta corect erorile Google de volum în bucăți (chunks)
-            media = MediaIoBaseUpload(
-                io.BytesIO(continut_xml.encode('utf-8')), 
-                mimetype='text/xml',
-                resumable=True
-            )
-            
-            file_uploaded = service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields='id',
+            file = service.files().create(
+                body=file_metadata, 
+                media_body=media, 
+                fields="id", 
                 supportsAllDrives=True
             ).execute()
             
-            return file_uploaded.get('id')
+            print(f"{VERDE}✅ Fișier salvat în Drive: {filename} (ID local folder: {folder_id}) -> (File ID: {file.get('id')}){RESET}")
+            return True
             
         except Exception as e:
             eroare_text = str(e).lower()
-            # Interceptare specifică pentru limita de 400k obiecte sau spațiu saturat
+            # Interceptare specifică pentru pragul de volum de 400.000 obiecte sau spațiu Shared Drive blocat
             if "limit" in eroare_text or "exceeded" in eroare_text or "403" in eroare_text or "storage" in eroare_text:
-                print(f"{GALBEN}⚠️ [Folder Plin/Limită Depășită] ID-ul {folder_id} a blocat fișierul.{RESET}")
-                print(f"{VERDE}▶️ Se sare automat la următorul folder disponibil în variabila ta...{RESET}")
-                continue  # Încearcă imediat următorul ID de folder din listă
+                print(f"{GALBEN}⚠️ [Folder Plin / Limită Shared Drive Atingă] ID: {folder_id} a respins stocarea.{RESET}")
+                print(f"{VERDE}▶️ Comutare automată și invizibilă către următorul folder disponibil din matrice...{RESET}")
+                continue # Reia bucla 'for' cu următorul ID de folder
             else:
-                print(f"{ROSU}❌ Eroare neprevăzută la folderul {folder_id}: {e}{RESET}")
+                print(f"{ROSU}❌ Eroare neprevăzută la upload în folderul {folder_id}: {e}{RESET}")
                 continue
-                
-    print(f"{ROSU}🛑 EROARE CRITICĂ: Toate folderele din listă sunt pline sau inaccesibile!{RESET}")
+
+    print(f"{ROSU}🛑 EROARE CRITICĂ TOTALĂ: Toate cele {len(FOLDER_IDS)} Shared Drive-uri din listă sunt pline!{RESET}")
     return False
 
 
-def simuleaza_si_descarca_pagina(an, pagina):
-    """
-    Funcție simulată care generează structura de text XML pentru legislație.
-    În codul tău real, aici ai logica de request/scrapping HTTP (de exemplu cu httpx sau requests).
-    """
-    # Această structură păstrează consistența datelor tale brute originale
-    return f"""<?xml version="1.0" encoding="utf-8"?>
-<document>
-    <an>{an}</an>
-    <pagina>{pagina}</pagina>
-    <emitent>Ministerul Finantelor</emitent>
-    <tip_act>Ordin</tip_act>
-    <text_brut>Continut legislativ extras din pagina {pagina} a anului {an}...</text_brut>
-</document>"""
+def create_fresh_soap_client():
+    """Creează o instanță curată de client SOAP pentru a evita blocajele intermediare."""
+    history = HistoryPlugin()
+    transport = Transport(timeout=90, operation_timeout=120)  
+    client = Client(WSDL_URL, transport=transport, plugins=[history])
+    return client, history
 
 
-def ruleaza_descarcare_industriala():
-    service = obtine_drive()
+def download_year(drive_service, composite_type_name, target_year):
+    """Descarcă toate paginile lipsă sau invalide pentru un singur an."""
+    print(f"\n{GALBEN}{'='*70}\n📅 AN INDUSTRIAL XML: {target_year}\n{'='*70}{RESET}")
+
+    downloaded_pages = get_already_downloaded_pages(drive_service, target_year)
     
-    # --- RESTAURARE LOGICĂ DE ITERARE DIN ISTORIC ---
-    # Definim anul curent de lucru detectat din logurile tale
-    an_lucru = 1990
-    print(f"📅 AN INDUSTRIAL XML: {an_lucru}")
-    print("======================================================================")
-    
-    # 1. Mapare pagini existente (Aici scriptul tău interoga Drive pentru a vedea ce are deja)
-    # Recreăm starea exactă din logul trimis: 6383 pagini valide, ultima sigură fiind 6385
-    pagini_valide_in_drive = 6383
-    ultima_scana_in_siguranta = 6385
-    print(f"📦 {pagini_valide_in_drive} pagini VALIDE în Drive pentru {an_lucru}. (Ultima scanată în siguranță: {ultima_scana_in_siguranta})")
-    
-    # 2. Identificare și reparare automată a lacunelor istorice din logul tău
-    lacune = [4343, 5425]
-    print(f"🛠️ Detectat {len(lacune)} lacune/fișiere alterate în istoric: {lacune}. Începem repararea.")
-    
-    for pag_lacuna in lacune:
-        nume_xml = f"brut_legislatie_{an_lucru}_pag{pag_lacuna}.xml"
-        print(f"--- [REPARARE] An {an_lucru} / Pagina {pag_lacuna} ---")
+    pages_to_process = []
+    if downloaded_pages:
+        max_page = max(downloaded_pages)
+        print(f"📦 {len(downloaded_pages)} pagini VALIDE în Drive pentru {target_year}. (Ultima scanată în siguranță: {max_page})")
         
-        continut_xml = simuleaza_descarca_pagina(an_lucru, pag_lacuna)
-        succes = salveaza_xml_in_drive_dinamic(service, nume_xml, continut_xml)
-        if succes:
-            print(f"    ✅ [Reparat] Fișierul {nume_xml} a fost salvat cu succes în folderul alternativ.")
-            
-    # 3. Reluarea avansului normal de unde rămăsese mașinăria (de la 6386 în sus)
-    pagini_avans = [6386, 6387, 6388, 6389, 6390]
-    
-    for pag_noua in pagini_avans:
-        nume_xml = f"brut_legislatie_{an_lucru}_pag{pag_noua}.xml"
-        print(f"--- [AVANS] An {an_lucru} / Pagina {pag_noua} ---")
+        all_expected_pages = set(range(1, max_page + 1))
+        gaps = sorted(list(all_expected_pages - downloaded_pages))
         
-        continut_xml = simuleaza_descarca_pagina(an_lucru, pag_noua)
-        succes = salveaza_xml_in_drive_dinamic(service, nume_xml, continut_xml)
-        if succes:
-            print(f"    ✅ [Avansat] Adăugat {nume_xml} în stoc.")
+        if gaps:
+            print(f"{GALBEN}🛠️ Detectat {len(gaps)} lacune/fișiere alterate în istoric: {gaps}. Începem repararea.{RESET}")
+            pages_to_process.extend(gaps)
+        next_new_page = max_page + 1
+    else:
+        print(f"🆕 An complet nou în acest segment. Începem de la pagina 1.")
+        next_new_page = 1
+
+    results_per_page = 50
+    files_saved = 0
+    consecutive_empty_pages = 0
+    LIMITE_GOLURI_FINAL_AN = 10
+
+    client = None
+    history = None
+    token_key = None
+    
+    for init_attempt in range(1, 6):
+        try:
+            client, history = create_fresh_soap_client()
+            token_key = client.service.GetToken()
+            break
+        except Exception as e:
+            print(f"{ROSU}🚨 [Init Err] Just.ro nu răspunde (Tentativa {init_attempt}/5): {e}{RESET}")
+            if init_attempt == 5:
+                return 0
+            time.sleep(30 * init_attempt)
+
+    while True:
+        if pages_to_process:
+            current_page = pages_to_process.pop(0)
+            is_gap_repair = True
+        else:
+            current_page = next_new_page
+            next_new_page += 1
+            is_gap_repair = False
+
+        if current_page in downloaded_pages and not is_gap_repair:
+            continue
+
+        prefix_log = "[REPARARE]" if is_gap_repair else "[AVANS]"
+        print(f"--- {prefix_log} An {target_year} / Pagina {current_page} ---")
+
+        retry_success = False
+        a_avut_eroare_tehnica = False
+        max_retries = 3
+        contor_raspunsuri_goale_curate = 0
+
+        for attempt in range(0, max_retries + 1):
+            try:
+                if attempt > 0:
+                    time.sleep(15 * attempt)
+                    client, history = create_fresh_soap_client()
+                    token_key = client.service.GetToken()
+
+                if not token_key:
+                    token_key = client.service.GetToken()
+
+                composite_type = client.get_type(composite_type_name)
+                search_model = composite_type(
+                    NumarPagina=current_page,
+                    RezultatePagina=results_per_page,
+                    SearchAn=str(target_year),
+                )
+
+                client.service.Search(SearchModel=search_model, tokenKey=token_key)
+                
+                last_response_envelope = history.last_received["envelope"]
+                raw_xml_bytes = etree.tostring(last_response_envelope, pretty_print=True, encoding="utf-8")
+                raw_xml_string = raw_xml_bytes.decode("utf-8")
+
+                if "<a:Legi>" not in raw_xml_string and "<Legi>" not in raw_xml_string:
+                    contor_raspunsuri_goale_curate += 1
+                    if is_gap_repair and contor_raspunsuri_goale_curate <= max_retries:
+                        print(f"{GALBEN}   ⚠️ Pagina {current_page} e goală pe server (Verificarea {contor_raspunsuri_goale_curate}/{max_retries+1}). Reîncercăm...{RESET}")
+                        continue
+                
+                retry_success = True
+                break
+            except Exception as soap_error:
+                print(f"{GALBEN}   ⚠️ Notificare tehnică la pagina {current_page}: {soap_error}{RESET}")
+                token_key = None
+                a_avut_eroare_tehnica = True
+                if is_gap_repair:
+                    break 
+
+        if is_gap_repair and a_avut_eroare_tehnica:
+            print(f"{ROSU}🛑 [LĂSAT LIPSA] Pagina {current_page} are probleme de rețea. O sărim acum.{RESET}")
+            continue
+
+        if not retry_success and not is_gap_repair:
+            consecutive_empty_pages = 0
+            continue
+
+        last_response_envelope = history.last_received["envelope"]
+        raw_xml_bytes = etree.tostring(last_response_envelope, pretty_print=True, encoding="utf-8")
+        raw_xml_string = raw_xml_bytes.decode("utf-8")
+
+        filename = f"brut_legislatie_{target_year}_pag{current_page}.xml"
+
+        if "<a:Legi>" not in raw_xml_string and "<Legi>" not in raw_xml_string:
+            if not is_gap_repair:
+                consecutive_empty_pages += 1
+                print(f"{GALBEN}   ℹ️ Pagină goală detectată. Goluri consecutive: {consecutive_empty_pages}/{LIMITE_GOLURI_FINAL_AN}{RESET}")
+                if consecutive_empty_pages >= LIMITE_GOLURI_FINAL_AN:
+                    print(f"\n{VERDE}✅ Anul {target_year} finalizat (S-a confirmat capătul după {LIMITE_GOLURI_FINAL_AN} pagini goale!){RESET}")
+                    break
+            else:
+                print(f"{ROSU}🚨 [GAURĂ CONFIRMATĂ] Pagina de reparație {current_page} este definitiv goală pe server.{RESET}")
+                print(f"   ✍️ Generăm fișier XML martor minimal pentru a opri scanarea repetată.")
+                xml_martor = b"<GrupLegi><Info>PaginaGoalaConfirmataJustRo</Info></GrupLegi>"
+                success = upload_to_drive(drive_service, filename, xml_martor)
+                if success:
+                    files_saved += 1
+        else:
+            if not is_gap_repair:
+                consecutive_empty_pages = 0
+                
+            success = upload_to_drive(drive_service, filename, raw_xml_bytes)
+            if success:
+                files_saved += 1
+
+        time.sleep(2.0)
+
+    return files_saved
 
 
+def download_laws_main(an_start, an_stop):
+    """Funcția principală executată per segment."""
+    try:
+        print(f"{VERDE}🚀 Pornire segment industrial paralel XML. Interval: {an_start} – {an_stop}...{RESET}")
+        drive_service = get_drive_service()
+        composite_type_name = "{http://schemas.datacontract.org/2004/07/FreeWebService}CompositeType"
+        total_files_segment = 0
+        
+        for year in range(an_start, an_stop + 1):
+            try:
+                files_saved = download_year(drive_service, composite_type_name, year)
+                total_files_segment += files_saved
+            except Exception as year_error:
+                print(f"{ROSU}💥 Eroare pentru anul {year}: {year_error}.{RESET}")
+                time.sleep(10)
+
+        print(f"\n{VERDE}🎉🎉 SEGMENT XML FINALIZAT COMPLET ({an_start}-{an_stop}). Noi fișiere salvate: {total_files_segment}{RESET}")
+    except Exception as e:
+        print(f"{ROSU}💥 Eroare critică: {str(e)}{RESET}")
+
+
+# ======================================================================
+# PARSER ROBUST PENTRU MATRIX YAML (INTERVALE DETECTATE AUTOMAT)
+# ======================================================================
 if __name__ == "__main__":
-    ruleaza_descarcare_industriala()
+    argumente_numerice = []
+    
+    for arg in sys.argv[1:]:
+        piese = arg.split()
+        for piesa in piese:
+            if piesa.isdigit():
+                argumente_numerice.append(int(piesa))
+
+    if len(argumente_numerice) == 1:
+        an_s = argumente_numerice[0]
+        an_f = argumente_numerice[0]
+    elif len(argumente_numerice) >= 2:
+        an_s = argumente_numerice[0]
+        an_f = argumente_numerice[1]
+    else:
+        an_s = START_YEAR
+        an_f = END_YEAR
+        
+    print(f"{VERDE}🎯 [Config Matrice XML] Interceptat interval din Matrix YAML: {an_s} - {an_f}{RESET}", flush=True)
+    download_laws_main(an_s, an_f)
