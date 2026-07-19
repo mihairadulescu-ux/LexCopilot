@@ -48,7 +48,7 @@ def extrage_taguri_din_matrice(serviciu, foldere_drive, ani_procesare):
         # Parcurgem cele 4 foldere folosind startsWith (antiglonț pe underscore)
         for idx, id_folder in enumerate(foldere_drive, 1):
             print(f"🔍 Căutare în discul {idx}/{len(foldere_drive)} (ID: {id_folder[:8]}...)...")
-            interogare = f"'{id_folder}' in parents and name startsWith 'brut_legislatie_{an}_' and mimeType = 'text/xml' and trashed = false"
+            interogare = f"'{id_folder}' in parents and name contains 'brut_legislatie_{an}_' and mimeType = 'text/xml' and trashed = false"
             
             try:
                 pag_token = None
