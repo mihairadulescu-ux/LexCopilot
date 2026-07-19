@@ -53,14 +53,13 @@ def extrage_taguri_din_matrice(service, ani_procesare):
     CHUNK_SIZE = 100
 
     for target_year in ani_procesare:
-        print(f"\n{GALBEN}⚡ [Dictionare] Pornire procesare pentru anul {target_year}...{RESET}")
+        print(f"\n{GALBEN}⚡ [Dictionare] Pornire procesare pentru anul {target_year}...{RESET}", flush=True)
         
         for folder_id in FOLDER_IDS:
             page_token = None
-            # Interogare de baza: eliminam filtrul textual greu ca sa raspunda serverul instant
             query = f"'{folder_id}' in parents and trashed = false"
             
-            print(f"📡 Trimit cerere către Google API pentru folderul {folder_id[:8]}... Se așteaptă indexarea.")
+            print(f"📡 Trimit cerere către Google API pentru folderul {folder_id[:8]}... Se așteaptă indexarea.", flush=True)
             
             contor_total_procesat = 0
             try:
@@ -79,7 +78,6 @@ def extrage_taguri_din_matrice(service, ani_procesare):
                     if not all_files:
                         break
 
-                    # Filtrare exactă în Python (numele conține anul și structura corectă, iar starea nu e processed)
                     token_an = f"brut_legislatie_{target_year}_pag"
                     micro_task_files = [
                         f for f in all_files 
@@ -87,7 +85,7 @@ def extrage_taguri_din_matrice(service, ani_procesare):
                     ]
 
                     if micro_task_files:
-                        print(f"   📦 [Micro-Task] Am primit {len(micro_task_files)} fișiere proaspete din indexul curent.")
+                        print(f"   📦 [Micro-Task] Am primit {len(micro_task_files)} fișiere proaspete din indexul curent.", flush=True)
 
                         for file in micro_task_files:
                             try:
@@ -108,7 +106,6 @@ def extrage_taguri_din_matrice(service, ani_procesare):
                                     val = ta.strip()
                                     if val: tipuri_acte_gasite.add(val)
 
-                                # Marcare instanta ca procesat
                                 service.files().update(
                                     fileId=file['id'],
                                     body={'description': 'processed=true'},
@@ -121,17 +118,16 @@ def extrage_taguri_din_matrice(service, ani_procesare):
                             except Exception:
                                 continue
                                 
-                        print(f"   📊 [Progres] Total salvat și etichetat în acest folder: {contor_total_procesat}")
+                        print(f"   📊 [Progres] Total salvat și etichetat în acest folder: {contor_total_procesat}", flush=True)
                     
                     page_token = response.get('nextPageToken', None)
                     if not page_token:
                         break
 
             except Exception as e:
-                print(f"{ROSU}⚠️ Eroare pe folderul {folder_id[:8]}: {e}{RESET}")
+                print(f"{ROSU}⚠️ Eroare pe folderul {folder_id[:8]}: {e}{RESET}", flush=True)
                 continue
 
-    # Export CSV
     string_ani = "_".join([str(a) for a in ani_procesare])
     cale_emitenti = f"lista_emitenti_{string_ani}.csv"
     cale_acte = f"lista_tip_acte_{string_ani}.csv"
@@ -148,19 +144,30 @@ def extrage_taguri_din_matrice(service, ani_procesare):
         for t in sorted(list(tipuri_acte_gasite)):
             writer.writerow([t])
             
-    print(f"{VERDE}✅ [Gata] Toate fragmentele pentru {string_ani} au fost finalizate!{RESET}")
+    print(f"{VERDE}✅ [Gata] Toate fragmentele pentru {string_ani} au fost finalizate!{RESET}", flush=True)
 
 if __name__ == "__main__":
+    # COPIAT FIDEL DIN download_XML.py PENTRU PARSARE IDENTICĂ A ARGUMENTELOR
     argumente_numerice = []
+    
     for arg in sys.argv[1:]:
         piese = arg.split()
         for piesa in piese:
             if piesa.isdigit():
                 argumente_numerice.append(int(piesa))
 
-    if not argumente_numerice:
-        print(f"{ROSU}🛑 Eroare: Lipsesc anii ca parametru!{RESET}")
-        sys.exit(1)
+    if len(argumente_numerice) == 1:
+        an_s = argumente_numerice[0]
+        an_f = argumente_numerice[0]
+        ani_finali = [an_s]
+    elif len(argumente_numerice) >= 2:
+        an_s = argumente_numerice[0]
+        an_f = argumente_numerice[1]
+        ani_finali = list(range(an_s, an_f + 1))
+    else:
+        # Fallback industrial dacă tot nu prinde nimic
+        ani_finali = [1990, 1991]
         
+    print(f"{VERDE}🎯 [Dictionare] Pornire fir industrial pentru anii: {ani_finali}{RESET}", flush=True)
     drive_service = get_drive_service()
-    extrage_taguri_din_matrice(drive_service, argumente_numerice)
+    extrage_taguri_din_matrice(drive_service, ani_finali)
