@@ -203,13 +203,15 @@ def ruleaza_sincronizare_matriceala(an_start, an_stop):
                         registru_an[nume_pdf] = "descarcat"
                         modificari_detectate = True
                     else:
-                        # --- BLOC DIAGNOSTICARE: CAPTURĂ CONȚINUT HTML MASCAT ---
-                        text_primit = response.text.strip()
-                        snippet_html = text_primit[:500].replace('\n', ' ').replace('\r', '')
-                        print(f"\n🔍 {GALBEN}[DIAGNOSTIC]{RESET} Serverul a trimis status 200 OK dar conținut TEXT/HTML.")
-                        print(f"💾 Conținut detectat (primele 500 caractere):\n{GALBEN}{snippet_html}{RESET}\n")
+                        # --- CAPTURĂ EXTINSĂ DUMUMP HTML (3000 CARACTERE) ---
+                        text_primit = response.text
+                        snippet_extins = text_primit[:3000]
                         
-                        print(f"🛑 {ROSU}Oprire automată controlată. Trimite snippet-ul de mai sus pentru analiză!{RESET}")
+                        print(f"\n🔍 {GALBEN}[DIAGNOSTIC EXTINS - COD HTTP 200 DAR CONȚINUT TEXT]{RESET}")
+                        print(f"💾 Structura brută primită de la server (primele 3000 de caractere):\n")
+                        print(f"{GALBEN}{snippet_extins}{RESET}\n")
+                        print(f"----------------------------------------------------------------------")
+                        print(f"🛑 {ROSU}Oprire automată pentru analiză completă. Trimite textul de mai sus!{RESET}")
                         sys.exit(0)
                         
             except Exception as e:
