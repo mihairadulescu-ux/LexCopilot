@@ -1,7 +1,6 @@
 import os
 import sys
 import json
-import csv
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
@@ -42,7 +41,7 @@ def get_drive_service():
 
 def ruleaza_reset_flaguri(service, ani_procesare):
     for target_year in ani_procesare:
-        print(f"\n{GALBEN}⚙️ [Reset] Scanare fișiere de curățat pentru anul {target_year}...{RESET}")
+        print(f"\n{GALBEN}⚙️ [Reset] Căutare fișiere de curățat pentru anul {target_year}...{RESET}")
         fișiere_de_resetat = []
 
         for folder_id in FOLDER_IDS:
@@ -66,10 +65,11 @@ def ruleaza_reset_flaguri(service, ani_procesare):
                     if not page_token:
                         break
             except Exception as e:
+                print(f"{ROSU}⚠️ Eroare scanare folder {folder_id[:8]}... la reset: {e}{RESET}")
                 continue
 
         total_fișiere = len(fișiere_de_resetat)
-        print(f"{VERDE}🎯 Identificate {total_fișiere} fișiere XML în total pentru anul {target_year}.{RESET}")
+        print(f"{VERDE}🎯 Identificate {total_fișiere} fișiere XML pentru reset la anul {target_year}.{RESET}")
 
         if total_fișiere == 0:
             continue
@@ -86,10 +86,10 @@ def ruleaza_reset_flaguri(service, ani_procesare):
                     fields='id',
                     supportsAllDrives=True
                 ).execute()
-            except Exception as e:
+            except Exception:
                 continue
                 
-        print(f"{VERDE}✅ Anul {target_year} a fost resetat complet pe toate cele 4 discuri.{RESET}")
+        print(f"{VERDE}✅ Anul {target_year} a fost resetat complet pe toate directoarele.{RESET}")
 
 if __name__ == "__main__":
     argumente_numerice = []
