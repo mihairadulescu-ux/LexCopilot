@@ -1,5 +1,4 @@
-name: Pipeline Industrial Legislatie XML (Matrice Paralela)
-
+name: Creare dictionare
 on:
   workflow_dispatch:
     inputs:
@@ -30,7 +29,7 @@ jobs:
       - name: Configurare Mediu Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.13'
 
       - name: Instalare Dependinte Industriale
         run: |
