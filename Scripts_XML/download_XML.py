@@ -102,19 +102,25 @@ def get_already_downloaded_pages(service, target_year):
                 if not page_token:
                     break
         except Exception as e:
-            # Dacă primul folder dă 404 sau e plin, continuă liniștit scanarea în restul folderelor
+            # Dacă un folder dă eroare la listare, trecem mai departe
             continue
             
     return valid_pages
 
 
 def upload_to_drive(service, filename, content_bytes):
-    """Încarcă fișierul în primul folder disponibil. Dacă e plin (403/limite), sare la următorul."""
+    """
+    Încarcă fișierul în primul folder disponibil.
+    Dacă un folder este plin, îl elimină DEFINITIV din listă pentru restul rulării.
+    """
+    global FOLDER_IDS
+    
     if not FOLDER_IDS:
         print(f"{ROSU}🛑 Eroare upload: Nicio destinație configurată!{RESET}")
         return False
 
-    for folder_id in FOLDER_IDS:
+    # Iterăm peste o copie a listei pentru a o putea modifica în siguranță în interiorul buclei
+    for folder_id in list(FOLDER_IDS):
         try:
             file_metadata = {"name": filename, "parents": [folder_id]}
             media = MediaInMemoryUpload(content_bytes, mimetype="application/xml", resumable=True)
@@ -132,8 +138,10 @@ def upload_to_drive(service, filename, content_bytes):
         except Exception as e:
             eroare_text = str(e).lower()
             if "limit" in eroare_text or "exceeded" in eroare_text or "403" in eroare_text or "storage" in eroare_text:
-                print(f"{GALBEN}⚠️ [Folder Plin/Limită Atingă] ID: {folder_id} a respins stocarea. Mutăm fluxul...{RESET}")
-                continue  # Comută automat la următorul ID din listă
+                print(f"{GALBEN}⚠️ [Folder Plin] ID: {folder_id} e saturat. Îl scoatem definitiv din flux...{RESET}")
+                if folder_id in FOLDER_IDS:
+                    FOLDER_IDS.remove(folder_id) # Eliminare globală instantanee
+                continue  
             else:
                 print(f"{ROSU}❌ Eroare la upload în folderul {folder_id}: {e}{RESET}")
                 continue
