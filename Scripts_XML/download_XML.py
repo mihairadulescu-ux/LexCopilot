@@ -20,11 +20,13 @@ from zeep.transports import Transport
 from zeep.plugins import HistoryPlugin
 
 # ==========================================
-# CONFIGURĂRI DINAMICE (MULTIPLE FOLDERE)
+# CONFIGURĂRI DINAMICE (EXTRAGERE STRICTĂ DIN MEDIU)
 # ==========================================
 TARGET_FOLDERS_RAW = os.getenv("DRIVE_FOLDER_XML", "")
-# Preluăm toate cele 4 directoare din listă și le curățăm de spații și newlines ascunse
-FOLDER_IDS = [fid.strip().replace("\n", "").replace("\r", "") for fid in TARGET_FOLDERS_RAW.split(",") if fid.strip()]
+
+# Curățăm string-ul de ghilimele accidentale, spații, carriage returns sau linii noi
+clean_raw = TARGET_FOLDERS_RAW.replace('"', '').replace("'", "").replace("\n", "").replace("\r", "").strip()
+FOLDER_IDS = [fid.strip() for fid in clean_raw.split(",") if fid.strip()]
 
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
@@ -55,15 +57,13 @@ def get_already_downloaded_pages(service, target_year):
     """
     Scanează TOATE directoarele active furnizate și returnează un dicționar cu 
     paginile deja descărcate la nivel global pentru a evita duplicatele.
-    Sărim peste fișierele existente doar dacă dimensiunea lor este >= 20 bytes.
     """
     valid_pages = set()
     
     if not FOLDER_IDS:
-        print(f"{ROSU}⚠️ Lipsesc ID-urile directoarelor din configurare.{RESET}")
+        print(f"{ROSU}🛑 Eroare critică: Lipsesc ID-urile directoarelor (DRIVE_FOLDER_XML este goală în mediu).{RESET}")
         return valid_pages
 
-    # Căutăm ierarhic în fiecare folder listat
     for folder_id in FOLDER_IDS:
         page_token = None
         query = f"'{folder_id}' in parents and name contains 'brut_legislatie_{target_year}_pag' and trashed = false"
@@ -82,7 +82,6 @@ def get_already_downloaded_pages(service, target_year):
                     if f"brut_legislatie_{target_year}_pag" not in name:
                         continue 
                     
-                    # Regula ta de aur: dacă fișierul are mai puțin de 20 de bytes, îl considerăm lipsă și îl re-descărcăm
                     if size < 20:
                         print(f"{GALBEN}   ⚠️ Re-descărcare forțată: {name} are doar {size} bytes (în folder ID: {folder_id}).{RESET}")
                         continue
@@ -98,7 +97,7 @@ def get_already_downloaded_pages(service, target_year):
                     break
         except Exception as e:
             print(f"{ROSU}⚠️ Scanare Drive incompletă pe folderul {folder_id} ({e}).{RESET}")
-            continue # Trecem la următorul folder pentru a salva ce se poate
+            continue
             
     return valid_pages
 
@@ -109,7 +108,7 @@ def upload_to_drive(service, filename, content_bytes):
     Dacă un Shared Drive returnează teamDriveFileLimitExceeded (403), trece automat la următorul.
     """
     if not FOLDER_IDS:
-        print(f"{ROSU}🛑 Eroare upload: Niciun folder valid setat în DRIVE_FOLDER_XML!{RESET}")
+        print(f"{ROSU}🛑 Eroare upload: Niciun folder setat în mediu!{RESET}")
         return False
 
     for folder_id in FOLDER_IDS:
@@ -124,21 +123,19 @@ def upload_to_drive(service, filename, content_bytes):
                 supportsAllDrives=True
             ).execute()
             
-            print(f"{VERDE}✅ Fișier salvat în Drive: {filename} (ID local folder: {folder_id}) -> (File ID: {file.get('id')}){RESET}")
+            print(f"{VERDE}✅ Fișier salvat în Drive: {filename} (ID folder curent: {folder_id}){RESET}")
             return True
             
         except Exception as e:
             eroare_text = str(e).lower()
-            # Interceptare specifică pentru pragul de volum de 400.000 obiecte sau spațiu Shared Drive blocat
             if "limit" in eroare_text or "exceeded" in eroare_text or "403" in eroare_text or "storage" in eroare_text:
-                print(f"{GALBEN}⚠️ [Folder Plin / Limită Shared Drive Atingă] ID: {folder_id} a respins stocarea.{RESET}")
-                print(f"{VERDE}▶️ Comutare automată și invizibilă către următorul folder disponibil din matrice...{RESET}")
-                continue # Reia bucla 'for' cu următorul ID de folder
+                print(f"{GALBEN}⚠️ [Folder Plin] ID: {folder_id} a respins stocarea. Încercăm următorul...{RESET}")
+                continue
             else:
-                print(f"{ROSU}❌ Eroare neprevăzută la upload în folderul {folder_id}: {e}{RESET}")
+                print(f"{ROSU}❌ Eroare la upload în folderul {folder_id}: {e}{RESET}")
                 continue
 
-    print(f"{ROSU}🛑 EROARE CRITICĂ TOTALĂ: Toate cele {len(FOLDER_IDS)} Shared Drive-uri din listă sunt pline!{RESET}")
+    print(f"{ROSU}🛑 EROARE CRITICĂ TOTALĂ: Toate Shared Drive-urile din listă sunt pline sau inaccesibile!{RESET}")
     return False
 
 
@@ -159,13 +156,13 @@ def download_year(drive_service, composite_type_name, target_year):
     pages_to_process = []
     if downloaded_pages:
         max_page = max(downloaded_pages)
-        print(f"📦 {len(downloaded_pages)} pagini VALIDE în Drive pentru {target_year}. (Ultima scanată în siguranță: {max_page})")
+        print(f"📦 {len(downloaded_pages)} pagini VALIDE în directoare pentru {target_year}. (Ultima sigură: {max_page})")
         
         all_expected_pages = set(range(1, max_page + 1))
         gaps = sorted(list(all_expected_pages - downloaded_pages))
         
         if gaps:
-            print(f"{GALBEN}🛠️ Detectat {len(gaps)} lacune/fișiere alterate în istoric: {gaps}. Începem repararea.{RESET}")
+            print(f"{GALBEN}🛠️ Detectat {len(gaps)} lacune în istoric: {gaps}. Începem repararea.{RESET}")
             pages_to_process.extend(gaps)
         next_new_page = max_page + 1
     else:
@@ -295,6 +292,12 @@ def download_laws_main(an_start, an_stop):
     """Funcția principală executată per segment."""
     try:
         print(f"{VERDE}🚀 Pornire segment industrial paralel XML. Interval: {an_start} – {an_stop}...{RESET}")
+        
+        # Oprim execuția din timp dacă variabila nu a fost deloc injectată din GitHub Actions
+        if not FOLDER_IDS:
+            print(f"{ROSU}🛑 CRITIC: Nu s-a putut porni execuția. Variabila DRIVE_FOLDER_XML nu este definită sau accesibilă în mediu!{RESET}")
+            sys.exit(1)
+            
         drive_service = get_drive_service()
         composite_type_name = "{http://schemas.datacontract.org/2004/07/FreeWebService}CompositeType"
         total_files_segment = 0
@@ -312,9 +315,6 @@ def download_laws_main(an_start, an_stop):
         print(f"{ROSU}💥 Eroare critică: {str(e)}{RESET}")
 
 
-# ======================================================================
-# PARSER ROBUST PENTRU MATRIX YAML (INTERVALE DETECTATE AUTOMAT)
-# ======================================================================
 if __name__ == "__main__":
     argumente_numerice = []
     
