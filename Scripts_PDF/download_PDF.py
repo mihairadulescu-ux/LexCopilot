@@ -89,7 +89,7 @@ def incarc_registru_an(service, folder_id, an):
 
 def salveaza_registru_an(service, folder_id, an, registru_local):
     nume_csv = f"status_{an}.csv"
-    print(f"💾 Sincronizare index zonal [{nume_csv}]...", flush=True)
+    print(f"💾 Sincronizare automată index zonal [{nume_csv}] în Cloud...", flush=True)
     
     randuri_csv = []
     for nume_fisier, status in sorted(registru_local.items()):
@@ -118,7 +118,7 @@ def salveaza_registru_an(service, folder_id, an, registru_local):
             service.files().create(body={"name": nume_csv, "parents": [folder_id]}, media_body=media, supportsAllDrives=True).execute()
         if os.path.exists(cale_temp):
             os.remove(cale_temp)
-        print(f"    ✅ Indexul [{nume_csv}] salvat.", flush=True)
+        print(f"    ✅ Punct de salvare securizat pentru registrul [{nume_csv}].", flush=True)
     except Exception as e:
         print(f"{ROSU}❌ Eroare salvare CSV {nume_csv}: {e}{RESET}", flush=True)
 
@@ -131,7 +131,7 @@ def ruleaza_sincronizare_an_specific(an):
     director_temp.mkdir(exist_ok=True)
     timeout_resilient = httpx.Timeout(timeout=120.0, connect=20.0)
     
-    MAX_NUMERE_AN = 1350
+    MAX_NUMERE_AN = 1600
 
     print(f"\n{VERDE}🔄 Pasul 1: Incarcare date pentru anul {an}...{RESET}", flush=True)
     registru_an = incarc_registru_an(service, TARGET_FOLDER_ID, an)
@@ -142,7 +142,6 @@ def ruleaza_sincronizare_an_specific(an):
         registru_an[nume_f] = "descarcat"
         
     coada_an = []
-    modificari_detectate = False
     
     for n in range(1, MAX_NUMERE_AN + 1):
         f_simplu = f"MO_PI_{an}_{n}.pdf"
@@ -173,6 +172,10 @@ def ruleaza_sincronizare_an_specific(an):
         
     print(f"🚀 Incepe verificarea ierarhica a {total_an} fișiere lipsa pe anul {an}...", flush=True)
     
+    # Contor pentru salvare parțială în caz de crash / întrerupere rețea
+    modificari_nesalvate = 0
+    modificari_detectate = False
+    
     for idx, item in enumerate(coada_an, 1):
         nume_pdf = item["nume"]
         url = url_template.format(numar=item["numar"], an=an)
@@ -194,34 +197,44 @@ def ruleaza_sincronizare_an_specific(an):
                     print(f"    ❌ [404] Neexistent sigur.", flush=True)
                     registru_an[nume_pdf] = "neexistent"
                     modificari_detectate = True
-                    continue
-                if response.status_code != 200: continue
-                    
-                content_type = response.headers.get("Content-Type", "").lower()
-                if "application/pdf" in content_type or len(response.content) > 30000:
-                    cale_l = director_temp / nume_pdf
-                    with open(cale_l, "wb") as f_out:
-                        f_out.write(response.content)
-                        
-                    media = MediaFileUpload(str(cale_l), mimetype='application/pdf', resumable=True)
-                    meta_drive = {'name': nume_pdf, 'parents': [TARGET_FOLDER_ID]}
-                    service.files().create(body=meta_drive, media_body=media, supportsAllDrives=True).execute()
-                    cale_l.unlink()
-                    print(f"    📥 {VERDE}[DESCARCAT]{RESET} PDF salvat oficial in Cloud. ✅", flush=True)
-                    registru_an[nume_pdf] = "descarcat"
-                    modificari_detectate = True
-                else:
-                    text_primit = response.text
-                    if "flowpaper_viewer" in text_primit or "flowpaper" in text_primit or "<title>Monitorul Oficial" in text_primit:
-                        print(f"    ❌ [HTML Empty Viewer] Notat ca neexistent.", flush=True)
-                        registru_an[nume_pdf] = "neexistent"
+                    modificari_nesalvate += 1
+                elif response.status_code == 200:
+                    content_type = response.headers.get("Content-Type", "").lower()
+                    if "application/pdf" in content_type or len(response.content) > 30000:
+                        cale_l = director_temp / nume_pdf
+                        with open(cale_l, "wb") as f_out:
+                            f_out.write(response.content)
+                            
+                        media = MediaFileUpload(str(cale_l), mimetype='application/pdf', resumable=True)
+                        meta_drive = {'name': nume_pdf, 'parents': [TARGET_FOLDER_ID]}
+                        service.files().create(body=meta_drive, media_body=media, supportsAllDrives=True).execute()
+                        cale_l.unlink()
+                        print(f"    📥 {VERDE}[DESCARCAT]{RESET} PDF salvat oficial in Cloud. ✅", flush=True)
+                        registru_an[nume_pdf] = "descarcat"
                         modificari_detectate = True
+                        modificari_nesalvate += 1
                     else:
-                        continue
+                        text_primit = response.text
+                        if "flowpaper_viewer" in text_primit or "flowpaper" in text_primit or "<title>Monitorul Oficial" in text_primit:
+                            print(f"    ❌ [HTML Empty Viewer] Notat ca neexistent.", flush=True)
+                            registru_an[nume_pdf] = "neexistent"
+                            modificari_detectate = True
+                            modificari_nesalvate += 1
+                        else:
+                            continue
+                else:
+                    continue
+                    
+            # --- SALVARE CHIRURGICALĂ PE PARCURS ---
+            # Salvează automat în cloud la fiecare 20 de modificări ca să nu pierdem progresul dacă dă timeout acțiunea!
+            if modificari_nesalvate >= 10:
+                salveaza_registru_an(service, TARGET_FOLDER_ID, an, registru_an)
+                modificari_nesalvate = 0
+                
         except Exception as e:
             continue
             
-    if modificari_detectate:
+    if modificari_detectate and modificari_nesalvate > 0:
         salveaza_registru_an(service, TARGET_FOLDER_ID, an, registru_an)
 
 if __name__ == "__main__":
