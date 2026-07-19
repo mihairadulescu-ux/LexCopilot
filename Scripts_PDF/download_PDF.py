@@ -110,6 +110,8 @@ def salveaza_registru_an(service, folder_id, an, registru_local):
         
     try:
         media = MediaFileUpload(cale_temp, mimetype="text/csv")
+        query = f"'{folder_id}' in parents window name = '{nume_csv}' and trashed = false"
+        # Curățăm variantele vechi ca să nu se adune fișiere orfane în Drive
         query = f"'{folder_id}' in parents and name = '{nume_csv}' and trashed = false"
         existing = service.files().list(q=query, spaces='drive', fields='files(id)', supportsAllDrives=True, includeItemsFromAllDrives=True, corpora="allDrives").execute().get('files', [])
         if existing:
@@ -118,7 +120,7 @@ def salveaza_registru_an(service, folder_id, an, registru_local):
             service.files().create(body={"name": nume_csv, "parents": [folder_id]}, media_body=media, supportsAllDrives=True).execute()
         if os.path.exists(cale_temp):
             os.remove(cale_temp)
-        print(f"    ✅ Punct de salvare securizat pentru registrul [{nume_registru if 'nume_registru' in locals() else nume_csv}].", flush=True)
+        print(f"    ✅ Punct de salvare securizat executat.", flush=True)
     except Exception as e:
         print(f"{ROSU}❌ Eroare salvare CSV {nume_csv}: {e}{RESET}", flush=True)
 
@@ -129,7 +131,7 @@ def ruleaza_sincronizare_an_specific(an):
     service = obtine_drive()
     director_temp = Path("./temp_pdf")
     director_temp.mkdir(exist_ok=True)
-    timeout_resilient = httpx.Timeout(timeout=120.0, connect=20.0)
+    timeout_resilient = httpx.Timeout(timeout=45.0, connect=15.0)
     
     MAX_NUMERE_AN = 1350
 
@@ -139,7 +141,8 @@ def ruleaza_sincronizare_an_specific(an):
     print(f"📊 Detecție: {len(fisiere_existente_drive)} PDF-uri fizice gasite in Shared Drive.", flush=True)
     
     for nume_f in fisiere_existente_drive:
-        registru_an[nume_f] = "descarcat"
+        if registru_an.get(nume_f) != "descarcat":
+            registru_an[nume_f] = "descarcat"
         
     coada_an = []
     
@@ -174,6 +177,7 @@ def ruleaza_sincronizare_an_specific(an):
     
     modificari_nesalvate = 0
     modificari_detectate = False
+    erori_consecutive_retea = 0
     
     for idx, item in enumerate(coada_an, 1):
         nume_pdf = item["nume"]
@@ -185,12 +189,17 @@ def ruleaza_sincronizare_an_specific(an):
             continue
             
         print(f"⏳ [{idx}/{total_an}] Solicitare server ({an}): {nume_pdf}...", flush=True)
-        time.sleep(random.uniform(0.6, 1.3))
+        
+        # Pauză strategică variabilă, mărită ușor pentru a reduce presiunea pe firewall
+        time.sleep(random.uniform(1.0, 2.2))
         
         try:
             headers = {"User-Agent": random.choice(USER_AGENTS), "Referer": "https://monitoruloficial.ro/"}
             with httpx.Client(headers=headers, timeout=timeout_resilient, follow_redirects=True) as client:
                 response = client.get(url)
+                
+                # Resetam contorul de erori retea daca request-ul s-a incheiat cu un cod HTTP valid
+                erori_consecutive_retea = 0
                 
                 if response.status_code == 404:
                     print(f"    ❌ [404] Neexistent sigur.", flush=True)
@@ -220,19 +229,32 @@ def ruleaza_sincronizare_an_specific(an):
                             modificari_detectate = True
                             modificari_nesalvate += 1
                         else:
-                            print(f"    ⚠️ [HTML Atipic] Conținut nerecunoscut de viewer. Skip.", flush=True)
+                            print(f"    ⚠️ [HTML Atipic] Structura necunoscuta. Skip.", flush=True)
                             continue
                 else:
-                    print(f"    ⚠️ [Cod Status Aparte: {response.status_code}] Skip.", flush=True)
+                    print(f"    ⚠️ [Cod Status: {response.status_code}] Skip.", flush=True)
                     continue
                     
-            # Salvează parțial în cloud la fiecare 10 modificări confirmate
             if modificari_nesalvate >= 10:
                 salveaza_registru_an(service, TARGET_FOLDER_ID, an, registru_an)
                 modificari_nesalvate = 0
                 
         except Exception as e:
-            print(f"    ❌ {ROSU}[Eroare Rețea / Conexiune Sever]{RESET} Detalii: {str(e)[:100]}", flush=True)
+            erori_consecutive_retea += 1
+            print(f"    ❌ {ROSU}[Eroare Rețea / Conexiune Sever]{RESET} Detalii: {str(e)[:90]}", flush=True)
+            
+            # --- STRATEGIE DE SALVARE DE URGENȚĂ LA CĂDEREA CONEXIUNII ---
+            if modificari_nesalvate > 0:
+                print(f"🚨 Conexiune instabilă! Forțăm salvarea datelor strânse până acum...", flush=True)
+                salveaza_registru_an(service, TARGET_FOLDER_ID, an, registru_an)
+                modificari_nesalvate = 0
+            
+            if erori_consecutive_retea >= 3:
+                print(f"🛑 {ROSU}Serverul ne blochează agresiv conexiunea (3 erori consecutive). Protejăm IP-ul și oprim execuția controlat.{RESET}", flush=True)
+                sys.exit(0)
+                
+            print(f"⏳ Back-off defensiv: Așteptăm 15 secunde înainte de reîncercare...", flush=True)
+            time.sleep(15)
             continue
             
     if modificari_detectate and modificari_nesalvate > 0:
