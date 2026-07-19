@@ -36,7 +36,7 @@ def extrage_contor_bis(status_string):
 
 def obtine_creds():
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
-        raise EnvironmentError("❌ Lipseste secretul GOOGLE_SERVICE_ACCOUNT_JSON!")
+        raise EnvironmentError("❌ Lipsește secretul GOOGLE_SERVICE_ACCOUNT_JSON!")
     info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
     return Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
 
@@ -75,11 +75,13 @@ def adu_fisiere_existente_in_drive(drive_service, folder_id, an_start, an_stop):
     while True:
         response = drive_service.files().list(
             q=query, 
+            spaces='drive',  # Forțează corelarea în indexul global
             fields="nextPageToken, files(id, name, size)", 
             pageToken=page_token, 
             pageSize=1000,
             supportsAllDrives=True, 
-            includeItemsFromAllDrives=True
+            includeItemsFromAllDrives=True,
+            corpora="allDrives"  # CRUCIAL: Caută nativ în Shared Drives fără 404 sau rezultate vide
         ).execute()
         
         for f in response.get("files", []):
@@ -187,7 +189,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                 limata_scanare = 100
         
         for n in range(1, limata_scanare + 1):
-            # 1. Variantele standard și independente (Simplu, Bis, S) - se verifică MEREU
             for sufix, tip_var in [("", "simplu"), ("Bis", "bis"), ("S", "special")]:
                 numar_complet = f"{n}{sufix}" if sufix else str(n)
                 nume_pdf = f"MO_PI_{an}_{numar_complet}.pdf"
@@ -215,7 +216,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                         "status_actual": status_actual
                     })
             
-            # 2. Variantele ierarhice (Tris, Quater) - se caută DOAR dacă Bis-ul există deja și e valid ok în Drive
             nume_bis_martor = f"MO_PI_{an}_{n}Bis.pdf"
             if nume_bis_martor in inventar_drive and inventar_drive[nume_bis_martor]["status"] == "ok":
                 for sufix_rar, tip_rar in [("Tris", "tris"), ("Quater", "quater")]:
