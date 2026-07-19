@@ -20,13 +20,28 @@ from zeep.transports import Transport
 from zeep.plugins import HistoryPlugin
 
 # ==========================================
-# CONFIGURĂRI DINAMICE (EXTRAGERE STRICTĂ DIN MEDIU)
+# CONFIGURĂRI DINAMICE (MEDIU SAU CONFIG.JSON)
 # ==========================================
-TARGET_FOLDERS_RAW = os.getenv("DRIVE_FOLDER_XML", "")
+FOLDER_IDS = []
 
-# Curățăm string-ul de ghilimele accidentale, spații, carriage returns sau linii noi
-clean_raw = TARGET_FOLDERS_RAW.replace('"', '').replace("'", "").replace("\n", "").replace("\r", "").strip()
-FOLDER_IDS = [fid.strip() for fid in clean_raw.split(",") if fid.strip()]
+# Încercăm mai întâi variabila din GitHub Actions
+TARGET_FOLDERS_RAW = os.getenv("DRIVE_FOLDER_XML", "")
+if TARGET_FOLDERS_RAW.strip():
+    clean_raw = TARGET_FOLDERS_RAW.replace('"', '').replace("'", "").replace("\n", "").replace("\r", "").strip()
+    FOLDER_IDS = [fid.strip() for fid in clean_raw.split(",") if fid.strip()]
+
+# Dacă variabila e goală, citim din fișierul local config.json
+if not FOLDER_IDS:
+    config_path = os.path.join(os.path.dirname(__file__), "config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as cf:
+                config_data = json.load(cf)
+                FOLDER_IDS = config_data.get("DRIVE_FOLDERS", [])
+                if FOLDER_IDS:
+                    print(f"{VERDE}📂 [Config Mode] ID-urile directoarelor au fost încărcate cu succes din config.json.{RESET}")
+        except Exception as e:
+            print(f"{ROSU}⚠️ Eroare la citirea fișierului config.json: {e}{RESET}")
 
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
@@ -54,14 +69,11 @@ def get_drive_service():
 
 
 def get_already_downloaded_pages(service, target_year):
-    """
-    Scanează TOATE directoarele active furnizate în variabilă și adună
-    paginile deja descărcate la nivel global pentru a evita duplicatele.
-    """
+    """Scanează TOATE directoarele active furnizate și returnează paginile existente."""
     valid_pages = set()
     
     if not FOLDER_IDS:
-        print(f"{ROSU}🛑 Eroare critică: Lipsesc ID-urile directoarelor (DRIVE_FOLDER_XML este goală în mediu).{RESET}")
+        print(f"{ROSU}🛑 Eroare critică: Lipsesc ID-urile directoarelor complet.{RESET}")
         return valid_pages
 
     for folder_id in FOLDER_IDS:
@@ -103,12 +115,9 @@ def get_already_downloaded_pages(service, target_year):
 
 
 def upload_to_drive(service, filename, content_bytes):
-    """
-    Încarcă fișierul XML brut în primul folder liber din listă.
-    Dacă un Shared Drive returnează limita de fișiere depășită, trece automat la următorul.
-    """
+    """Încarcă fișierul XML brut în primul folder liber. Comută la următorul dacă e plin."""
     if not FOLDER_IDS:
-        print(f"{ROSU}🛑 Eroare upload: Niciun folder setat în mediu!{RESET}")
+        print(f"{ROSU}🛑 Eroare upload: Niciun folder setat în mediu sau config!{RESET}")
         return False
 
     for folder_id in FOLDER_IDS:
@@ -129,13 +138,13 @@ def upload_to_drive(service, filename, content_bytes):
         except Exception as e:
             eroare_text = str(e).lower()
             if "limit" in eroare_text or "exceeded" in eroare_text or "403" in eroare_text or "storage" in eroare_text:
-                print(f"{GALBEN}⚠️ [Folder Plin/Limită] ID: {folder_id} a respins stocarea. Încercăm următorul...{RESET}")
+                print(f"{GALBEN}⚠️ [Folder Plin] ID: {folder_id} a respins stocarea. Încercăm următorul...{RESET}")
                 continue
             else:
                 print(f"{ROSU}❌ Eroare la upload în folderul {folder_id}: {e}{RESET}")
                 continue
 
-    print(f"{ROSU}🛑 EROARE CRITICĂ TOTALĂ: Toate Shared Drive-urile din listă sunt pline sau inaccesibile!{RESET}")
+    print(f"{ROSU}🛑 EROARE CRITICĂ TOTALĂ: Toate directoarele sunt pline sau inaccesibile!{RESET}")
     return False
 
 
@@ -294,7 +303,7 @@ def download_laws_main(an_start, an_stop):
         print(f"{VERDE}🚀 Pornire segment industrial paralel XML. Interval: {an_start} – {an_stop}...{RESET}")
         
         if not FOLDER_IDS:
-            print(f"{ROSU}🛑 CRITIC: Nu s-a putut porni execuția. Variabila DRIVE_FOLDER_XML nu este definită în mediu!{RESET}")
+            print(f"{ROSU}🛑 CRITIC: Nu s-a putut porni execuția. Niciun ID de folder nu a fost găsit în mediu sau în config.json!{RESET}")
             sys.exit(1)
             
         drive_service = get_drive_service()
