@@ -40,7 +40,7 @@ def get_drive_service():
     github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     
     if github_secret:
-        print(f"{VERDE}🤖 [Cloud Mode] Autentificare în Google Drive folosind GitHub Secrets...{RESET}")
+        print(f"{VERDE}🤖 [Cloud Mode] Autentificare în Google Drive...{RESET}")
         service_account_info = json.loads(github_secret)
         creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=scopes)
     else:
@@ -55,7 +55,7 @@ def get_drive_service():
 
 def get_already_downloaded_pages(service, target_year):
     """
-    Scanează TOATE directoarele active furnizate și returnează un dicționar cu 
+    Scanează TOATE directoarele active furnizate în variabilă și adună
     paginile deja descărcate la nivel global pentru a evita duplicatele.
     """
     valid_pages = set()
@@ -105,7 +105,7 @@ def get_already_downloaded_pages(service, target_year):
 def upload_to_drive(service, filename, content_bytes):
     """
     Încarcă fișierul XML brut în primul folder liber din listă.
-    Dacă un Shared Drive returnează teamDriveFileLimitExceeded (403), trece automat la următorul.
+    Dacă un Shared Drive returnează limita de fișiere depășită, trece automat la următorul.
     """
     if not FOLDER_IDS:
         print(f"{ROSU}🛑 Eroare upload: Niciun folder setat în mediu!{RESET}")
@@ -129,7 +129,7 @@ def upload_to_drive(service, filename, content_bytes):
         except Exception as e:
             eroare_text = str(e).lower()
             if "limit" in eroare_text or "exceeded" in eroare_text or "403" in eroare_text or "storage" in eroare_text:
-                print(f"{GALBEN}⚠️ [Folder Plin] ID: {folder_id} a respins stocarea. Încercăm următorul...{RESET}")
+                print(f"{GALBEN}⚠️ [Folder Plin/Limită] ID: {folder_id} a respins stocarea. Încercăm următorul...{RESET}")
                 continue
             else:
                 print(f"{ROSU}❌ Eroare la upload în folderul {folder_id}: {e}{RESET}")
@@ -293,9 +293,8 @@ def download_laws_main(an_start, an_stop):
     try:
         print(f"{VERDE}🚀 Pornire segment industrial paralel XML. Interval: {an_start} – {an_stop}...{RESET}")
         
-        # Oprim execuția din timp dacă variabila nu a fost deloc injectată din GitHub Actions
         if not FOLDER_IDS:
-            print(f"{ROSU}🛑 CRITIC: Nu s-a putut porni execuția. Variabila DRIVE_FOLDER_XML nu este definită sau accesibilă în mediu!{RESET}")
+            print(f"{ROSU}🛑 CRITIC: Nu s-a putut porni execuția. Variabila DRIVE_FOLDER_XML nu este definită în mediu!{RESET}")
             sys.exit(1)
             
         drive_service = get_drive_service()
