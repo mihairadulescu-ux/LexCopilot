@@ -1,11 +1,11 @@
 name: "📊 Descărcare Nomenclatoare XML Tags"
 
 on:
-  workflow_dispatch: # Îl pornești la buton doar când ai nevoie să actualizezi emitenții/tipul de acte
+  workflow_dispatch: # Îl pornești manual din interfața GitHub Actions când vrei să scanezi etichetele noi
 
 jobs:
   download_tags:
-    name: "📊 Actualizare Emitenți & Tip Acte"
+    name: "📊 Extragere Emitenți & Tip Acte din XML"
     runs-on: ubuntu-latest
     
     steps:
@@ -15,17 +15,18 @@ jobs:
       - name: Configurare mediu Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.11"
 
       - name: Instalare dependențe
         run: |
           python -m pip install --upgrade pip
-          pip install zeep google-api-python-client google-auth requests
+          pip install lxml google-api-python-client google-auth requests
 
-      - name: Rulează extracția de Tags direct din server
+      - name: Executare scanare și agregare Tags
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          METADATA_FOLDER_ID: ${{ vars.METADATA_FOLDER_ID }} # Trimis fix în folderul tău de metadate
+          DRIVE_FOLDER_XML: ${{ vars.DRIVE_FOLDER_XML }}       # Folderul sursă cu XML-urile brute
+          METADATA_FOLDER_ID: ${{ vars.METADATA_FOLDER_ID }}   # Folderul destinație pentru CSV-uri
           PYTHONUNBUFFERED: "1"
         run: |
           python -u Scripts_XML/download_XML_dictionaries.py
