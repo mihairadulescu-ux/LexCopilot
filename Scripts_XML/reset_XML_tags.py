@@ -5,85 +5,89 @@ ROSU = "\033[91m"
 RESET = "\033[0m"
 
 import os
+import sys
 import json
-from google.oauth2 import service_account
+from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
-# CONFIGURARE DIN MEDIU
-DRIVE_FOLDER_XML = os.getenv("DRIVE_FOLDER_XML")
+# Sursa pentru folderele de XML brute
+TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_XML")
 
-
-def get_drive_service():
-    """Autentifică robotul în Google Drive."""
-    scopes = ["https://www.googleapis.com/auth/drive"]
-    github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    
-    if github_secret:
-        service_account_info = json.loads(github_secret)
-        creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=scopes)
-    else:
-        credentials_path = "service_account.json"
-        if not os.path.exists(credentials_path):
-            raise FileNotFoundError(f"Nu s-a găsit fișierul '{credentials_path}'!")
-        creds = service_account.Credentials.from_service_account_file(credentials_path, scopes=scopes)
-        
+def obtine_drive():
+    print(f"{VERDE}🔑 [Reset XML] Conectare Google Drive...{RESET}")
+    if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
+        raise EnvironmentError("❌ Lipsește secretul GOOGLE_SERVICE_ACCOUNT_JSON!")
+    info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+    creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
-
-def reseteaza_atribute_procesare():
-    print(f"{GALBEN}🔄 Inițiere resetare atribute de procesare pentru XML-uri...{RESET}")
-    
-    if not DRIVE_FOLDER_XML:
-        print(f"{ROSU}🛑 Eroare configurare: DRIVE_FOLDER_XML lipsește!{RESET}")
+def reseteaza_atribute_xml():
+    if not TARGET_FOLDER_ID:
+        print(f"{ROSU}🛑 Eroare configurare: DRIVE_FOLDER_XML nu este definit în mediu!{RESET}")
         return
 
-    service = get_drive_service()
-    
-    # QUERY CORECTAT: Filtrăm exclusiv după descriere și mimeType, ocolind eroarea de 'name contains'
-    query = f"'{DRIVE_FOLDER_XML}' in parents and description = 'processed_for_tags: true' and mimeType = 'application/xml' and trashed = false"
+    service = obtine_drive()
+    print(f"📂 Scanare generală folder XML pentru resetare (ID: {TARGET_FOLDER_ID})...")
     
     page_token = None
-    fisiere_de_resetat = []
+    # Interogare curată: doar fișierele valide din folder, fără filtre dubioase pe descriere
+    query = f"'{TARGET_FOLDER_ID}' in parents and mimeType = 'application/xml' and trashed = false"
     
-    print(f"🔍 Identificăm fișierele marcate în Drive...")
+    fisiere_marcate = []
+    contor_total = 0
+    
+    # Folosim bucla ta stabilă de paginare
     while True:
-        try:
-            response = service.files().list(
-                q=query, spaces='drive', fields='nextPageToken, files(id, name)',
-                pageToken=page_token, pageSize=500, supportsAllDrives=True, includeItemsFromAllDrives=True
-            ).execute()
+        response = service.files().list(
+            q=query, 
+            fields="nextPageToken, files(id, name, description)", 
+            pageToken=page_token, 
+            pageSize=1000,
+            supportsAllDrives=True, 
+            includeItemsFromAllDrives=True, 
+            corpora="user"
+        ).execute()
+        
+        fișiere = response.get("files", [])
+        contor_total += len(fișiere)
+        
+        # Filtrăm local în Python (complet safe, fără erori de API)
+        for f in fișiere:
+            if f.get("description") == "processed_for_tags: true":
+                fisiere_marcate.append(f)
+                
+        page_token = response.get("nextPageToken", None)
+        if not page_token:
+            break
             
-            fisiere_de_resetat.extend(response.get('files', []))
-            page_token = response.get('nextPageToken', None)
-            if not page_token:
-                break
-        except Exception as e:
-            print(f"{ROSU}🛑 Eroare la interogarea Drive API: {e}{RESET}")
-            return
+    print(f"📊 Scanare finalizată. Din totalul de {contor_total} fișiere XML, {len(fisiere_marcate)} sunt marcate ca procesate.")
 
-    if not fisiere_de_resetat:
-        print(f"{VERDE}✨ Nu există fișiere marcate. Totul este deja pregătit pentru o căutare fresh!{RESET}")
+    if not fisiere_marcate:
+        print(f"{VERDE}✨ Nu s-a găsit niciun XML marcat cu etichetă. Totul este deja pregătit pentru o căutare fresh!{RESET}")
         return
 
-    print(f"🧠 Am găsit {len(fisiere_de_resetat)} fișiere de resetat. Începem curățarea metadatelor...")
+    print(f"⚙️ Se începe curățarea metadatelor pentru cele {len(fisiere_marcate)} fișiere...")
     
-    for idx, fisier in enumerate(fisiere_de_resetat, 1):
-        f_id = fisier['id']
-        f_nume = fisier['name']
+    for idx, xml in enumerate(fisiere_marcate, 1):
+        f_id = xml["id"]
+        f_nume = xml["name"]
         
         try:
-            # Pentru a șterge complet descrierea în API v3, îi pasăm un string gol
-            service.files().update(fileId=f_id, body={'description': ''}, supportsAllDrives=True).execute()
+            # Ștergem descrierea setând-o ca string gol
+            service.files().update(
+                fileId=f_id, 
+                body={"description": ""}, 
+                supportsAllDrives=True
+            ).execute()
             
-            if idx % 100 == 0 or idx == len(fisiere_de_resetat):
-                print(f"   ⚙️ [{idx}/{len(fisiere_de_resetat)}] Resetat cu succes: {f_nume}")
+            if idx % 100 == 0 or idx == len(fisiere_marcate):
+                print(f"    ✅ [{idx}/{len(fisiere_marcate)}] Resetat cu succes: {f_nume}")
                 
         except Exception as e:
-            print(f"{ROSU}⚠️ Nu s-a putut reseta metadata pentru {f_nume}: {e}{RESET}")
+            print(f"{ROSU}    ❌ Eroare la resetarea fișierului {f_nume}: {e}{RESET}")
             continue
 
-    print(f"\n{VERDE}🎉 Resetare completă! Toate cele {len(fisiere_de_resetat)} XML-uri sunt libere acum.{RESET}")
-
+    print(f"\n{VERDE}🚀 Resetare completă! Toate marcajele au fost eliminate. Poți porni scanarea fresh de tags!{RESET}")
 
 if __name__ == "__main__":
-    reseteaza_atribute_procesare()
+    reseteaza_atribute_xml()
