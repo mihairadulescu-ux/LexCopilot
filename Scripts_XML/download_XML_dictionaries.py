@@ -42,7 +42,7 @@ def descarca_si_incarca_dictionare_existente(service):
     
     for nume_fisier, dictionar in [("dictionar_emitenti.csv", emitenti), ("dictionar_tip_acte.csv", tip_acte)]:
         query = f"'{METADATA_FOLDER_ID}' in parents and name = '{nume_fisier}' and trashed = false"
-        files = service.files().list(q=query, spaces='drive', fields='files(id)').execute().get('files', [])
+        files = service.files().list(q=query, spaces='drive', fields='files(id)', supportsAllDrives=True, includeItemsFromAllDrives=True).execute().get('files', [])
         
         if files:
             try:
@@ -81,14 +81,14 @@ def salveaza_dictionare_in_drive(service, emitenti, tip_acte):
             
         content_bytes = output.getvalue().encode('utf-8')
         query = f"'{METADATA_FOLDER_ID}' in parents and name = '{nume_fisier}' and trashed = false"
-        existing = service.files().list(q=query, spaces='drive', fields='files(id)').execute().get('files', [])
+        existing = service.files().list(q=query, spaces='drive', fields='files(id)', supportsAllDrives=True, includeItemsFromAllDrives=True).execute().get('files', [])
         
         media = MediaInMemoryUpload(content_bytes, mimetype="text/csv", resumable=True)
         if existing:
-            service.files().update(fileId=existing[0]['id'], media_body=media).execute()
+            service.files().update(fileId=existing[0]['id'], media_body=media, supportsAllDrives=True).execute()
         else:
             meta = {"name": nume_fisier, "parents": [METADATA_FOLDER_ID]}
-            service.files().create(body=meta, media_body=media).execute()
+            service.files().create(body=meta, media_body=media, supportsAllDrives=True).execute()
 
 
 def proceseaza_xml_brut():
@@ -105,8 +105,8 @@ def proceseaza_xml_brut():
     print(f"📊 Bază inițială încărcată: {len(emitenti)} emitenți cunoscuți, {len(tip_acte)} tipuri de acte.")
 
     # Pasul 2: Căutăm fișiere XML din folderul sursă care NU au descrierea "processed_for_tags: true"
-    # Interogăm fără limită de ani!
-    query = f"'{DRIVE_FOLDER_XML}' in parents and name contains '.xml' and description != 'processed_for_tags: true' and trashed = false"
+    # Corectat: Filtrăm după mimeType valid de XML, eliminând clauza invalidă "name contains"
+    query = f"'{DRIVE_FOLDER_XML}' in parents and description != 'processed_for_tags: true' and mimeType = 'application/xml' and trashed = false"
     
     page_token = None
     fisiere_de_procesat = []
@@ -168,7 +168,7 @@ def proceseaza_xml_brut():
                 elem.clear() # Eliberăm nodul din RAM imediat
             
             # Pasul 3: Marcăm fișierul ca PROCESAT în metadatele Drive ca să nu-l mai citim niciodată
-            service.files().update(fileId=f_id, body={'description': 'processed_for_tags: true'}).execute()
+            service.files().update(fileId=f_id, body={'description': 'processed_for_tags: true'}, supportsAllDrives=True).execute()
             
             if idx % 100 == 0 or idx == len(fisiere_de_procesat):
                 print(f"   ↳ [{idx}/{len(fisiere_de_procesat)}] Parsat și marcat ca procesat: {f_nume}")
