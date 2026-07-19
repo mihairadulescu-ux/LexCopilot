@@ -33,7 +33,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install google-api-python-client google-auth httpx
 
-      - name: PASUL UNIC - Executare Refacere Index si Download Ierarhic
+      - name: Executare Reset si Download Ierarhic
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRIVE_FOLDER_PDF: ${{ vars.DRIVE_FOLDER_PDF }}
@@ -41,11 +41,13 @@ jobs:
           STRATEGIE_RESET: ${{ github.event.inputs.ruleaza_reset }}
           PYTHONUNBUFFERED: "1"
         run: |
-          # Verificăm variabila mapată în mediu securizat pentru a evita crash-ul de sintaxă YAML
+          # Verificăm variabila din env pentru a rula scriptul de inventar/reset
           if [ "$STRATEGIE_RESET" = "true" ]; then
-            printenv
+            echo "🔄 Pornire inventar și resetare registru pentru anul $AN_TINTA..."
             python -u Scripts_PDF/inventar_si_reset.py $AN_TINTA
+          else
+            echo "▶️ Se sare peste reset. Se folosește registrul existent."
           fi
           
-          # Executare crawler cu noua barieră ierarhică iute
+          # Executare crawler cu noua barieră ierarhică rapidă
           python -u Scripts_PDF/download_PDF.py $AN_TINTA
