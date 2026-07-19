@@ -1,19 +1,25 @@
-name: REGELE PDF - Sincronizare Unificata
+name: REGELE PDF - Sincronizare Matriceala in Paralel
 
 on:
   workflow_dispatch:
     inputs:
       ruleaza_reset:
-        description: "Curatare totala dummy-uri si reconstructie registre CSV"
+        description: "Curatare totala si reconstructie registru CSV (True/False)"
         required: false
         type: boolean
         default: false
 
 jobs:
-  sync_pdfs:
-    name: Procesare Matriceala PDF
+  procesare_an:
+    name: Sincronizare An ${{ matrix.an }}
     runs-on: ubuntu-latest
-    
+    strategy:
+      # max-parallel previne blocarea serverului Monitorului Oficial (rulează maximum 3 ani în paralel simultan)
+      max-parallel: 3
+      fail-fast: false
+      matrix:
+        an: [2000, 2001, 2002, 2003, 2004, 2005, 2006]
+
     steps:
       - name: Descărcare cod din repository
         uses: actions/checkout@v4
@@ -28,21 +34,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install google-api-python-client google-auth httpx
 
-      - name: PASUL A - Reset si Indexare Istorica
-        if: ${{ github.event.inputs.ruleaza_reset == 'true' }}
+      - name: PASUL UNIC - Executare Refacere Index si Download Ierarhic
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRIVE_FOLDER_PDF: ${{ vars.DRIVE_FOLDER_PDF }}
+          AN_TINTA: ${{ matrix.an }}
+          RULEAZA_RESET: ${{ github.event.inputs.ruleaza_reset }}
           PYTHONUNBUFFERED: "1"
         run: |
-          python -u Scripts_PDF/inventar_si_reset.py
-
-      - name: PASUL B - Executare Crawler bazat pe CSV
-        env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_PDF: ${{ vars.DRIVE_FOLDER_PDF }}
-          START_YEAR: "2000"
-          END_YEAR: "2026"
-          PYTHONUNBUFFERED: "1"
-        run: |
-          python -u Scripts_PDF/download_PDF.py
+          # 1. Dacă bifa de reset e activă, reface integral CSV-ul doar pentru anul curent din matrice
+          if [ "${{ github.event.inputs.ruleaza_reset }}" = "true" ]; then
+            python -u Scripts_PDF/inventar_si_reset.py $AN_TINTA
+          fi
+          
+          # 2. Pornește descărcarea ierarhică strict pe anul curent din matrice
+          python -u Scripts_PDF/download_PDF.py $AN_TINTA
