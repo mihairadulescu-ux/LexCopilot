@@ -19,7 +19,7 @@ jobs:
       - name: Configurare Mediu Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11" # Am scos linia de cache care bloca rularea
+          python-version: "3.11"
 
       - name: Instalare Dependinte Necesare
         run: |
