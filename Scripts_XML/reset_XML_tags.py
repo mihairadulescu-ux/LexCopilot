@@ -3,7 +3,6 @@ import json
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
-# Suportă string cu ID-uri separate prin virgulă
 TARGET_FOLDERS_RAW = os.getenv("DRIVE_FOLDER_XML", "")
 
 def obtine_drive():
@@ -21,26 +20,27 @@ def reseteaza_atribute_xml():
 
     folder_ids = [fid.strip() for fid in TARGET_FOLDERS_RAW.split(",") if fid.strip()]
     service = obtine_drive()
-    print(f"📂 Inițiere resetare pe {len(folder_ids)} Shared Drive-uri mapate...")
+    print(f"📂 Inițiere resetare pe {len(folder_ids)} locații...")
 
     fisiere_marcate = []
     
     for folder_id in folder_ids:
         print(f"🔍 Scanare folder XML (ID: {folder_id})...")
         page_token = None
+        
+        # Păstrăm doar query-ul de bază fără restricții de corpora
         query = f"'{folder_id}' in parents and trashed = false"
         
         while True:
             try:
-                # corpora="allDrives" este obligatoriu când interogăm parents pe Shared Drive fără driveId dedicat
+                # Folosim fix parametrii din scriptul tău de succes, dar fără corpora="user"
                 response = service.files().list(
                     q=query, 
                     fields="nextPageToken, files(id, name, description)", 
                     pageToken=page_token, 
                     pageSize=1000,
                     supportsAllDrives=True, 
-                    includeItemsFromAllDrives=True,
-                    corpora="allDrives"
+                    includeItemsFromAllDrives=True
                 ).execute()
                 
                 fișiere = response.get("files", [])
@@ -55,14 +55,31 @@ def reseteaza_atribute_xml():
                 if not page_token:
                     break
             except Exception as e:
-                print(f"⚠️ Nu s-a putut scana folderul {folder_id}: {e}")
-                break
+                # Dacă pică cu 404 pe listare, încercăm planul B: căutare directă după proprietate
+                try:
+                    query_alt = f"name contains '.xml' and trashed = false"
+                    response = service.files().list(
+                        q=query_alt,
+                        fields="nextPageToken, files(id, name, description)",
+                        pageToken=page_token,
+                        pageSize=1000,
+                        supportsAllDrives=True,
+                        includeItemsFromAllDrives=True
+                    ).execute()
+                    
+                    for f in response.get("files", []):
+                        if f.get("description") == "processed_for_tags: true":
+                            fisiere_marcate.append(f)
+                    break
+                except Exception as e_alt:
+                    print(f"⚠️ Eroare scanare: {e_alt}")
+                    break
 
     if not fisiere_marcate:
         print("✨ Nu s-a găsit niciun XML marcat în locațiile verificate. Totul este pregătit fresh!")
         return
 
-    print(f"⚙️ Am găsit în total {len(fisiere_marcate)} fișiere marcate. Începe curățarea metadatelor...")
+    print(f"⚙️ Am găsit în total {len(fisiere_marcate)} fișiere marcate. Începe curățarea...")
     for idx, xml in enumerate(fisiere_marcate, 1):
         try:
             service.files().update(
