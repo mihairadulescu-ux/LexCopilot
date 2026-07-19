@@ -1,0 +1,80 @@
+name: "Descărcare Legislație Paralelă PDF"
+
+on:
+  workflow_dispatch: # Permite pornirea manuală din interfața GitHub
+  schedule:
+    - cron: '0 0 * * *' # Rulează automat în fiecare noapte la ora 00:00 AM UTC (02:00 / 03:00 ora României)
+
+jobs:
+  download_pdf:
+    name: "PDF Segment: ${{ matrix.nume }}"
+    runs-on: ubuntu-latest
+    
+    strategy:
+      fail-fast: false # Dacă un interval eșuează, restul continuă să descarce!
+      matrix:
+        include:
+          - nume: "2000 - 2002"
+            start: 2000
+            end: 2002
+          - nume: "2003 - 2004"
+            start: 2003
+            end: 2004
+          - nume: "2005 - 2006"
+            start: 2005
+            end: 2006
+          - nume: "2007 - 2008"
+            start: 2007
+            end: 2008
+          - nume: "2009 - 2010"
+            start: 2009
+            end: 2010
+          - nume: "2011 - 2012"
+            start: 2011
+            end: 2012
+          - nume: "2013 - 2014"
+            start: 2013
+            end: 2014
+          - nume: "2015 - 2016"
+            start: 2015
+            end: 2016
+          - nume: "2017 - 2018"
+            start: 2017
+            end: 2018
+          - nume: "2019 - 2020"
+            start: 2019
+            end: 2020
+          - nume: "2021 - 2022"
+            start: 2021
+            end: 2022
+          - nume: "2023 - 2024"
+            start: 2023
+            end: 2024
+          - nume: "2025 - 2026"
+            start: 2025
+            end: 2026
+
+    steps:
+      - name: Descărcare cod din repository
+        uses: actions/checkout@v4
+
+      - name: Configurare mediu Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11" # Versiune stabilă pentru httpx și google client
+
+      - name: Instalare librării necesare
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-api-python-client google-auth httpx
+
+      - name: Executare Sincronizare Totală
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          START_YEAR: ${{ matrix.start }}
+          END_YEAR: ${{ matrix.end }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          # Pasăm parametrii direct în linia de comandă. 
+          # Noul nostru parser din download_PDF.py îi va citi corect ca interval izolat!
+          python -u Scripts_PDF/download_PDF.py ${{ matrix.start }} ${{ matrix.end }}
