@@ -35,13 +35,13 @@ def reseteaza_atribute_xml():
     fisiere_marcate = []
     
     for folder_id in folder_ids:
-        print(f"🔍 Scanare fișiere deja procesate în folderul XML (ID: {folder_id})...")
+        print(f"🔍 Scanare folder XML (ID: {folder_id})...")
         page_token = None
         
-        # Căutăm direct fișierele care au proprietatea processed setată pe 'true'
+        # Sintaxa corectă Google Drive pentru appProperties
         query = (
             f"'{folder_id}' in parents and name contains '.xml' and "
-            f"appProperties/processed = 'true' and trashed = false"
+            f"appProperties has {{ key='processed' and value='true' }} and trashed = false"
         )
         
         while True:
@@ -58,7 +58,6 @@ def reseteaza_atribute_xml():
                 ).execute()
                 
                 fisiere_marcate.extend(response.get("files", []))
-                
                 page_token = response.get("nextPageToken", None)
                 if not page_token:
                     break
@@ -75,22 +74,20 @@ def reseteaza_atribute_xml():
     
     for idx, xml in enumerate(fisiere_marcate, 1):
         try:
-            # Resetăm proprietatea setând processed pe 'false' (sau eliminând-o prin re-scriere)
+            # Actualizăm flag-ul pe 'false'
             service.files().update(
                 fileId=xml["id"], 
                 body={"appProperties": {"processed": "false"}}, 
                 supportsAllDrives=True
             ).execute()
             
-            # Afișăm progresul din 10 în 10 fișiere ca să știm că mașinăria lucrează
             if idx % 10 == 0 or idx == total_fisiere:
                 print(f"    ✅ [{idx}/{total_fisiere}] Resetat flag processed pentru: {xml['name']}", flush=True)
         except Exception as e:
             print(f"{ROSU}⚠️ Eroare resetare la fișierul {xml['name']}: {e}{RESET}", flush=True)
             continue
 
-    print(f"\n{VERDE}🎉 [SUCCES] Curățarea proprietăților s-a finalizat complet pentru toate cele {total_fisiere} fișiere!{RESET}\n")
-    print("---------------------------------------------------------------------------------", flush=True)
+    print(f"\n{VERDE}🎉 [SUCCES] Resetare finalizată!{RESET}\n")
 
 
 if __name__ == "__main__":
