@@ -1,4 +1,4 @@
-name: Creare dictionare
+name: Descarcare dictionare
 
 on:
   workflow_dispatch:
@@ -13,19 +13,14 @@ jobs:
   procesare_paralela:
     runs-on: ubuntu-latest
     
-    # Secretele sunt injectate global la nivel de job pentru vizibilitate maximă în pași
-    env:
-      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-      DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
-
     strategy:
-      fail-fast: false # Nu oprește celelalte fire dacă un an are probleme izolate
+      fail-fast: false
       matrix:
         ani: [
           "1990 1991", "1992 1993", "1994 1995", "1996 1997", "1998 1999",
           "2000 2001", "2002 2003", "2004 2005", "2006 2007", "2008 2009",
           "2010 2011", "2012 2013", "2014 2015", "2016 2017", "2018 2019",
-          "2020 2021", "2022 2023", "2024 2025","2026"
+          "2020 2021", "2022 2023", "2024 2026"
         ]
 
     steps:
@@ -43,31 +38,29 @@ jobs:
           pip install lxml google-auth google-api-python-client zeep
 
       # ======================================================================
-      # PASUL 1: RESETARE FLAGURI OPTIONALA (Rulează doar dacă bifezi manual)
+      # PASUL 1: RESETARE FLAGURI OPTIONALA
       # ======================================================================
-      - name: ⚙️ Rulare Reset XML Tags (Matrice)
+      - name: ⚙️ Resetare flaguri XML
         if: ${{ github.event.inputs.ruleaza_reset == 'true' }}
         continue-on-error: true
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
         run: |
           if [ -f Scripts_XML/reset_XML_tags.py ]; then
             python Scripts_XML/reset_XML_tags.py ${{ matrix.ani }}
-          else
-            echo "⚠️ Scriptul reset_XML_tags.py nu a fost gasit in folderul Scripts_XML!"
           fi
 
       # ======================================================================
-      # PASUL 2: EXTRAGERE DICTIONARE (Citire directă text din Google Drive)
+      # PASUL 2: EXTRAGERE DICTIONARE
       # ======================================================================
-      - name: 🔍 Rulare Extragere Dictionare (Matrice)
+      - name: 🔍 Descarcare dictionare
         continue-on-error: true
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
         run: |
-          if [ -f Scripts_XML/download_dictionaries.py ]; then
-            python Scripts_XML/download_dictionaries.py ${{ matrix.ani }}
-          elif [ -f Scripts_XML/get_XML_tags.py ]; then
-            python Scripts_XML/get_XML_tags.py ${{ matrix.ani }}
-          else
-            echo "⚠️ Scriptul de extragere dictionare nu a fost gasit in folderul Scripts_XML!"
-          fi
+          python Scripts_XML/download_XML_dictionaries.py ${{ matrix.ani }}
 
       # ======================================================================
       # PASUL 3: SALVARE FRAGMENTE PER FIR
@@ -92,7 +85,6 @@ jobs:
           pattern: nomenclatoare-*
           merge-multiple: true
 
-      # Script inline care adună bucățile de la cele 18 fire și elimină duplicatele
       - name: 🛠️ Consolidare si Eliminare Duplicate Nomenclator Global
         run: |
           python -c "
@@ -106,7 +98,7 @@ jobs:
                   try:
                       with open(f, mode='r', encoding='utf-8') as fh:
                           reader = csv.reader(fh)
-                          next(reader, None) # Sarim peste header
+                          next(reader, None)
                           for rand in reader:
                               if rand and rand[0].strip():
                                   total_set.add(rand[0].strip())
@@ -124,7 +116,6 @@ jobs:
           unifica('lista_tip_acte', 'Tip_Act', 'nomenclator_global_tip_acte.csv')
           "
 
-      # Rezultatul final, curățat și gata de descărcat din interfața GitHub
       - name: 🏆 Publicare Nomenclatoare Globale Finale
         uses: actions/upload-artifact@v4
         with:
