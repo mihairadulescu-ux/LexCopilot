@@ -20,7 +20,7 @@ METADATA_FOLDER_ID = os.getenv("METADATA_FOLDER_ID")
 
 
 def get_drive_service():
-    """Autentifică robotul în Google Drive folosinf GitHub Secrets sau local."""
+    """Autentifică robotul în Google Drive folosind GitHub Secrets sau local."""
     scopes = ["https://www.googleapis.com/auth/drive.file"]
     github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     
@@ -88,10 +88,26 @@ def descarca_nomenclatoare_xml_to_drive():
         return
 
     # ======================================================================
+    # 🔍 DIAGNOSTIC: Listăm operațiunile reale expuse de Just.ro
+    # ======================================================================
+    print(f"\n{GALBEN}🔍 [DIAGNOSTIC] Inspectăm operațiunile disponibile în serviciul SOAP...{RESET}")
+    try:
+        for service in soap_client.wsdl.services.values():
+            for port in service.ports.values():
+                operations = port.binding._operations.keys()
+                print(f"{VERDE}   -> Funcții disponibile pe portul '{port.name}':{RESET}")
+                for op in sorted(operations):
+                    print(f"      • {op}")
+    except Exception as diag_err:
+        print(f"{ROSU}⚠️ Nu am putut lista funcțiile: {diag_err}{RESET}")
+    print(f"{GALBEN}{'='*70}{RESET}\n")
+
+    # ======================================================================
     # 1. GENERARE & UPLOAD NOMENCLATOR EMITENȚI
     # ======================================================================
     print(f"\n⏳ Se interoghează serverul Just.ro pentru Emitenți...")
     try:
+        # Încercăm apelul nativ. Dacă crapă, diagnosticul de mai sus ne va spune de ce.
         raspuns_emitenti = soap_client.service.GetEmitenti(tokenKey=token_key)
         
         if raspuns_emitenti and hasattr(raspuns_emitenti, 'Emitent'):
@@ -144,8 +160,9 @@ def descarca_nomenclatoare_xml_to_drive():
     except Exception as e:
         print(f"{ROSU}❌ Eroare la procesarea dicționarului de Tip Acte: {e}{RESET}")
 
-    print(f"\n{VERDE}🎉 Procesul s-a încheiat! Fișierele sunt actualizate în Drive.{RESET}")
+    print(f"\n{VERDE}🎉 Procesul s-a încheiat! Verifică logurile de mai sus pentru lista de funcții.{RESET}")
 
 
 if __name__ == "__main__":
+    os.environ["PYTHONUNBUFFERED"] = "1"
     descarca_nomenclatoare_xml_to_drive()
