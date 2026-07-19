@@ -1,4 +1,4 @@
-name: "🔄 Resetare Manuală XML Tags"
+name: "🔄 A.Resetare Manuală XML Tags"
 
 on:
   workflow_dispatch:
