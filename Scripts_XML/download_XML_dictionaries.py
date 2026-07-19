@@ -5,11 +5,7 @@ import json
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
-# ======================================================================
-# CONFIGURARE ȘI CONEXIUNE GOOGLE DRIVE
-# ======================================================================
 def obtine_serviciu_drive():
-    """Inițializează clientul API Google Drive."""
     info_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     foldere_brut = os.getenv("DRIVE_FOLDER_XML")
     
@@ -17,7 +13,6 @@ def obtine_serviciu_drive():
         print("🛑 [Eroare] Lipsesc credențialele sau folderul XML în mediu!")
         sys.exit(1)
         
-    # Spargem lista de foldere prin virgulă
     liste_foldere = [f.strip() for f in foldere_brut.split(",") if f.strip()]
     
     try:
@@ -30,9 +25,6 @@ def obtine_serviciu_drive():
         print(f"🛑 Eroare autentificare Google Drive: {e}")
         sys.exit(1)
 
-# ======================================================================
-# EXTRAGERE TAGURI DIN FIȘIERELE XML (CONVENȚIE: brut_legislatie_{an}_)
-# ======================================================================
 def extrage_taguri_din_matrice(serviciu, foldere_drive, ani_procesare):
     import xml.etree.ElementTree as ET
     from googleapiclient.http import MediaIoBaseDownload
@@ -44,11 +36,13 @@ def extrage_taguri_din_matrice(serviciu, foldere_drive, ani_procesare):
     for an in ani_procesare:
         print(f"\n⚡ Încep scanarea istorică pentru anul: {an}")
         fișiere_an = []
+        token_cautare = f"brut_legislatie_{an}_"
 
-        # Parcurgem cele 4 foldere folosind startsWith (antiglonț pe underscore)
+        # Listăm tot din cele 4 foldere și filtrăm manual în Python
         for idx, id_folder in enumerate(foldere_drive, 1):
-            print(f"🔍 Căutare în discul {idx}/{len(foldere_drive)} (ID: {id_folder[:8]}...)...")
-            interogare = f"'{id_folder}' in parents and name contains 'brut_legislatie_{an}_' and mimeType = 'text/xml' and trashed = false"
+            print(f"🔍 Listare completă discul {idx}/{len(foldere_drive)} (ID: {id_folder[:8]}...)...")
+            # Interogare de bază: doar să fie în folder și să fie XML, fără filtre pe nume text
+            interogare = f"'{id_folder}' in parents and mimeType = 'text/xml' and trashed = false"
             
             try:
                 pag_token = None
@@ -60,7 +54,11 @@ def extrage_taguri_din_matrice(serviciu, foldere_drive, ani_procesare):
                         pageToken=pag_token
                     ).execute()
                     
-                    fișiere_an.extend(rezultat.get('files', []))
+                    # Filtrare brutală și sigură în Python
+                    for f in rezultat.get('files', []):
+                        if token_cautare in f.get('name', ''):
+                            fișiere_an.append(f)
+                            
                     pag_token = rezultat.get('nextPageToken')
                     if not pag_token:
                         break
@@ -85,7 +83,6 @@ def extrage_taguri_din_matrice(serviciu, foldere_drive, ani_procesare):
                 conținut_xml = fh.getvalue()
                 radacina = ET.fromstring(conținut_xml)
                 
-                # Colectăm Emitent și TipAct din structura XML a actului
                 for item in radacina.findall(".//Act"): 
                     emitent = item.find("Emitent")
                     tip_act = item.find("TipAct")
@@ -98,7 +95,6 @@ def extrage_taguri_din_matrice(serviciu, foldere_drive, ani_procesare):
             except Exception as e:
                 continue
 
-    # Salvare fragmente locale în CSV-uri
     string_ani = "_".join(ani_procesare)
     cale_emitenti = f"lista_emitenti_{string_ani}.csv"
     cale_acte = f"lista_tip_acte_{string_ani}.csv"
