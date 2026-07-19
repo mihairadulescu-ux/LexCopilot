@@ -35,6 +35,37 @@ def obtine_drive():
     creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
+def scaneaza_fisiere_fizice_drive(service, folder_id, an):
+    """Scanează Shared Drive-ul și identifică fișierele exclusiv pe baza tipului oficial PDF înregistrat de Google"""
+    gasesc_fizic = set()
+    query = f"'{folder_id}' in parents and name contains 'MO_PI_{an}_' and trashed = false"
+    page_token = None
+    
+    while True:
+        try:
+            response = service.files().list(
+                q=query, spaces='drive', fields="nextPageToken, files(name, mimeType)",
+                pageToken=page_token, pageSize=1000, supportsAllDrives=True,
+                includeItemsFromAllDrives=True, corpora="allDrives"
+            ).execute()
+            
+            for f in response.get("files", []):
+                nume = f.get("name", "")
+                mime_type = f.get("mimeType", "")
+                
+                # VERIFICARE STRICTĂ PE FORMATUL PDF AL FIȘIERULUI
+                if nume.lower().endswith('.pdf') and mime_type == 'application/pdf':
+                    gasesc_fizic.add(nume)
+                    
+            page_token = response.get("nextPageToken", None)
+            if not page_token:
+                break
+        except Exception as e:
+            print(f"{ROSU}⚠️ Eroare pre-scanare fizică Shared Drive: {e}{RESET}", flush=True)
+            break
+            
+    return gasesc_fizic
+
 def incarc_registru_an(service, folder_id, an):
     registru_local = {}
     nume_csv = f"status_{an}.csv"
@@ -55,7 +86,7 @@ def incarc_registru_an(service, folder_id, an):
                 _, done = downloader.next_chunk()
             fh.seek(0)
             
-            reader = csv.reader(io.StringIO(fh.getvalue().decode('utf-8')))
+            reader = csv.reader(io.StringIO(fh.getvalue().decode('utf-8')), delimiter=",")
             header = next(reader, None)
             
             for rand in reader:
@@ -66,7 +97,7 @@ def incarc_registru_an(service, folder_id, an):
                     cheie = f"MO_PI_{an}_{nr_baza}{sufix}.pdf" if sufix else f"MO_PI_{an}_{nr_baza}.pdf"
                     registru_local[cheie] = status
     except Exception as e:
-        print(f"{GALBEN}⚠️ Nu s-a putut citi registrul {nume_csv} ({e}). Pornim la rece pe acest an.{RESET}", flush=True)
+        pass
     
     return registru_local
 
@@ -87,7 +118,7 @@ def salveaza_registru_an(service, folder_id, an, registru_local):
 
     cale_temp = f"temp_sync_{nume_csv}"
     with open(cale_temp, mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
+        writer = csv.writer(f, delimiter=",")
         writer.writerow(["numar_baza", "sufix", "status", "dimensiune_kb", "drive_file_id"])
         writer.writerows(randuri_csv)
         
@@ -126,10 +157,15 @@ def ruleaza_sincronizare_matriceala(an_start, an_stop):
     MAX_NUMERE_AN = 1350
 
     for an in range(an_start, an_stop + 1):
-        print(f"\n{VERDE}🔄 Pasul 1: Încărcare registru anexat pentru anul {an}...{RESET}", flush=True)
-        registru_an = incarc_registru_an(service, TARGET_FOLDER_ID, an)
-        print(f"📊 Înregistrări găsite în indexul anului {an}: {len(registru_an)}", flush=True)
+        print(f"\n{VERDE}🔄 Pasul 1: Indexare memorie și scanare fizică Shared Drive pentru anul {an}...{RESET}", flush=True)
         
+        registru_an = incarc_registru_an(service, TARGET_FOLDER_ID, an)
+        fisiere_existente_drive = scaneaza_fisiere_fizice_drive(service, TARGET_FOLDER_ID, an)
+        print(f"📊 Detecție: {len(fisiere_existente_drive)} PDF-uri legitime găsite direct în stocarea Cloud.", flush=True)
+        
+        for nume_f in fisiere_existente_drive:
+            registru_an[nume_f] = "descarcat"
+            
         coada_an = []
         modificari_detectate = False
         
@@ -169,6 +205,12 @@ def ruleaza_sincronizare_matriceala(an_start, an_stop):
             nume_pdf = item["nume"]
             url = url_template.format(numar=item["numar"], an=an)
             
+            if nume_pdf in fisiere_existente_drive:
+                print(f"⏭️ [{idx}/{total_an}] {nume_pdf} este deja prezent oficial ca PDF în Shared Drive. Skip.", flush=True)
+                registru_an[nume_pdf] = "descarcat"
+                modificari_detectate = True
+                continue
+                
             print(f"⏳ [{idx}/{total_an}] Solicitare server: {nume_pdf}...", flush=True)
             time.sleep(random.uniform(0.5, 1.2))
             
@@ -189,22 +231,16 @@ def ruleaza_sincronizare_matriceala(an_start, an_stop):
                         
                     content_type = response.headers.get("Content-Type", "").lower()
                     
-                    # Verificare binară
                     if "application/pdf" in content_type or len(response.content) > 30000:
-                        # --- BLOC DE EXAMINARE OCTEȚI PDF REAL ---
                         total_bytes = len(response.content)
-                        # Extragem primii 5 bytes în format text brut și hexazecimal
                         magic_bytes_brut = response.content[:5]
                         magic_bytes_hex = " ".join(f"{b:02x}" for b in magic_bytes_brut)
                         magic_bytes_text = magic_bytes_brut.decode('utf-8', errors='ignore')
-                        
-                        # Prindem un mic extras din header (primele 150 de caractere text)
                         header_snippet = response.content[:150].decode('utf-8', errors='ignore').replace('\n', ' ').replace('\r', '')
                         
                         print(f"    🔬 [ANATOMIE PDF] Mărime: {total_bytes} bytes ({total_bytes/1024/1024:.2f} MB)")
                         print(f"    ↳ Magic Bytes (Hex): {VERDE}{magic_bytes_hex}{RESET} | Text: {VERDE}{magic_bytes_text}{RESET}")
                         print(f"    ↳ Extras Header: {GALBEN}{header_snippet}...{RESET}", flush=True)
-                        # ----------------------------------------
                         
                         cale_l = director_temp / nume_pdf
                         with open(cale_l, "wb") as f_out:
