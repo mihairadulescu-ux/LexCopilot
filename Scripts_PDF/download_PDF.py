@@ -118,7 +118,7 @@ def salveaza_registru_an(service, folder_id, an, registru_local):
             service.files().create(body={"name": nume_csv, "parents": [folder_id]}, media_body=media, supportsAllDrives=True).execute()
         if os.path.exists(cale_temp):
             os.remove(cale_temp)
-        print(f"    ✅ Punct de salvare securizat pentru registrul [{nume_csv}].", flush=True)
+        print(f"    ✅ Punct de salvare securizat pentru registrul [{nume_registru if 'nume_registru' in locals() else nume_csv}].", flush=True)
     except Exception as e:
         print(f"{ROSU}❌ Eroare salvare CSV {nume_csv}: {e}{RESET}", flush=True)
 
@@ -131,7 +131,7 @@ def ruleaza_sincronizare_an_specific(an):
     director_temp.mkdir(exist_ok=True)
     timeout_resilient = httpx.Timeout(timeout=120.0, connect=20.0)
     
-    MAX_NUMERE_AN = 1600
+    MAX_NUMERE_AN = 1350
 
     print(f"\n{VERDE}🔄 Pasul 1: Incarcare date pentru anul {an}...{RESET}", flush=True)
     registru_an = incarc_registru_an(service, TARGET_FOLDER_ID, an)
@@ -172,7 +172,6 @@ def ruleaza_sincronizare_an_specific(an):
         
     print(f"🚀 Incepe verificarea ierarhica a {total_an} fișiere lipsa pe anul {an}...", flush=True)
     
-    # Contor pentru salvare parțială în caz de crash / întrerupere rețea
     modificari_nesalvate = 0
     modificari_detectate = False
     
@@ -221,17 +220,19 @@ def ruleaza_sincronizare_an_specific(an):
                             modificari_detectate = True
                             modificari_nesalvate += 1
                         else:
+                            print(f"    ⚠️ [HTML Atipic] Conținut nerecunoscut de viewer. Skip.", flush=True)
                             continue
                 else:
+                    print(f"    ⚠️ [Cod Status Aparte: {response.status_code}] Skip.", flush=True)
                     continue
                     
-            # --- SALVARE CHIRURGICALĂ PE PARCURS ---
-            # Salvează automat în cloud la fiecare 20 de modificări ca să nu pierdem progresul dacă dă timeout acțiunea!
+            # Salvează parțial în cloud la fiecare 10 modificări confirmate
             if modificari_nesalvate >= 10:
                 salveaza_registru_an(service, TARGET_FOLDER_ID, an, registru_an)
                 modificari_nesalvate = 0
                 
         except Exception as e:
+            print(f"    ❌ {ROSU}[Eroare Rețea / Conexiune Sever]{RESET} Detalii: {str(e)[:100]}", flush=True)
             continue
             
     if modificari_detectate and modificari_nesalvate > 0:
