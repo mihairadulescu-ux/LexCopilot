@@ -13,7 +13,8 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaInMemoryUpload, MediaIoBaseDownload
 
-DRIVE_FOLDER_XML = os.getenv("DRIVE_FOLDER_XML")      
+# Citim variabila care poate conține mai multe ID-uri separate prin virgulă
+TARGET_FOLDERS_RAW = os.getenv("DRIVE_FOLDER_XML", "")
 METADATA_FOLDER_ID = os.getenv("METADATA_FOLDER_ID")  
 
 def obtine_drive():
@@ -28,9 +29,16 @@ def descarca_si_incarca_dictionare_existente(service):
     tip_acte = {}
     for nume_fisier, dictionar in [("dictionar_emitenti.csv", emitenti), ("dictionar_tip_acte.csv", tip_acte)]:
         query = f"'{METADATA_FOLDER_ID}' in parents and name = '{nume_fisier}' and trashed = false"
-        files = service.files().list(q=query, spaces='drive', fields='files(id)', supportsAllDrives=True, includeItemsFromAllDrives=True).execute().get('files', [])
-        if files:
-            try:
+        try:
+            files = service.files().list(
+                q=query, 
+                spaces='drive', 
+                fields='files(id)', 
+                supportsAllDrives=True, 
+                includeItemsFromAllDrives=True
+            ).execute().get('files', [])
+            
+            if files:
                 request = service.files().get_media(fileId=files[0]['id'])
                 fh = io.BytesIO()
                 downloader = MediaIoBaseDownload(fh, request)
@@ -43,8 +51,8 @@ def descarca_si_incarca_dictionare_existente(service):
                 for rand in reader:
                     if len(rand) >= 2:
                         dictionar[rand[0]] = rand[1]
-            except Exception as e:
-                print(f"{GALBEN}⚠️ Nu s-a putut citi istoricul pentru {nume_fisier}: {e}{RESET}")
+        except Exception as e:
+            print(f"{GALBEN}⚠️ Nu s-a putut citi istoricul pentru {nume_fisier}: {e}{RESET}")
     return emitenti, tip_acte
 
 def salveaza_dictionare_in_drive(service, emitenti, tip_acte):
@@ -59,51 +67,94 @@ def salveaza_dictionare_in_drive(service, emitenti, tip_acte):
             writer.writerow([k, v])
         content_bytes = output.getvalue().encode('utf-8')
         query = f"'{METADATA_FOLDER_ID}' in parents and name = '{nume_fisier}' and trashed = false"
-        existing = service.files().list(q=query, spaces='drive', fields='files(id)', supportsAllDrives=True, includeItemsFromAllDrives=True).execute().get('files', [])
-        media = MediaInMemoryUpload(content_bytes, mimetype="text/csv", resumable=True)
-        if existing:
-            service.files().update(fileId=existing[0]['id'], media_body=media, supportsAllDrives=True).execute()
-        else:
-            meta = {"name": nume_fisier, "parents": [METADATA_FOLDER_ID]}
-            service.files().create(body=meta, media_body=media, supportsAllDrives=True).execute()
+        
+        try:
+            existing = service.files().list(
+                q=query, 
+                spaces='drive', 
+                fields='files(id)', 
+                supportsAllDrives=True, 
+                includeItemsFromAllDrives=True
+            ).execute().get('files', [])
+            
+            media = MediaInMemoryUpload(content_bytes, mimetype="text/csv", resumable=True)
+            if existing:
+                service.files().update(fileId=existing[0]['id'], media_body=media, supportsAllDrives=True).execute()
+            else:
+                meta = {"name": nume_fisier, "parents": [METADATA_FOLDER_ID]}
+                service.files().create(body=meta, media_body=media, supportsAllDrives=True).execute()
+        except Exception as e:
+            print(f"{ROSU}❌ Eroare salvare dicționar {nume_fisier}: {e}{RESET}")
 
 def proceseaza_xml_brut():
     print(f"{VERDE}🚀 Inițiere scanare matriceală XML pentru extragere metadate...{RESET}")
-    if not DRIVE_FOLDER_XML or not METADATA_FOLDER_ID:
+    if not TARGET_FOLDERS_RAW or not METADATA_FOLDER_ID:
         print(f"{ROSU}🛑 Erori configurare: DRIVE_FOLDER_XML sau METADATA_FOLDER_ID lipsesc!{RESET}")
         return
 
+    # Extragem lista de ID-uri din variabila globală
+    folder_ids = [fid.strip() for fid in TARGET_FOLDERS_RAW.split(",") if fid.strip()]
+    
     service = obtine_drive()
     emitenti, tip_acte = descarca_si_incarca_dictionare_existente(service)
     print(f"📊 Bază inițială încărcată: {len(emitenti)} emitenți cunoscuți, {len(tip_acte)} tipuri de acte.")
 
-    # QUERY ULTRA-SIMPLU: Fără filtre pe description care să crape API-ul
-    query = f"'{DRIVE_FOLDER_XML}' in parents and trashed = false"
-    page_token = None
     toate_fisierele = []
+    print(f"🔍 Identificăm fișiere din cele {len(folder_ids)} locații mapate...")
     
-    print(f"🔍 Identificăm fișiere din Drive...")
-    while True:
-        response = service.files().list(
-            q=query, spaces='drive', fields='nextPageToken, files(id, name, description)',
-            pageToken=page_token, pageSize=1000, supportsAllDrives=True, includeItemsFromAllDrives=True
-        ).execute()
-        toate_fisierele.extend(response.get('files', []))
-        page_token = response.get('nextPageToken', None)
-        if not page_token:
-            break
+    # Parcurgem fiecare Shared Drive definit
+    for folder_id in folder_ids:
+        page_token = None
+        query = f"'{folder_id}' in parents and trashed = false"
+        
+        while True:
+            try:
+                # Încercare standard pe bază de structură ierarhică
+                response = service.files().list(
+                    q=query, 
+                    spaces='drive', 
+                    fields='nextPageToken, files(id, name, description)',
+                    pageToken=page_token, 
+                    pageSize=1000, 
+                    supportsAllDrives=True, 
+                    includeItemsFromAllDrives=True
+                ).execute()
+                toate_fisierele.extend(response.get('files', []))
+                page_token = response.get('nextPageToken', None)
+                if not page_token:
+                    break
+            except Exception:
+                # PLANUL B: Dacă dă 404, facem căutarea imună la structura folderului rădăcină
+                try:
+                    query_alt = "name contains '.xml' and trashed = false"
+                    response_alt = service.files().list(
+                        q=query_alt,
+                        spaces='drive',
+                        fields='nextPageToken, files(id, name, description)',
+                        pageToken=page_token,
+                        pageSize=1000,
+                        supportsAllDrives=True,
+                        includeItemsFromAllDrives=True
+                    ).execute()
+                    toate_fisierele.extend(response_alt.get('files', []))
+                    page_token = response_alt.get('nextPageToken', None)
+                    if not page_token:
+                        break
+                except Exception as e_alt:
+                    print(f"{ROSU}⚠️ Nu s-a putut scana locația {folder_id}: {e_alt}{RESET}")
+                    break
 
-    # Filtrare locală Python: luăm doar XML-urile neprocesate
+    # Filtrare locală Python: extragem STRICT XML-urile care sunt neprocesate
     fisiere_de_procesat = [
         f for f in toate_fisierele 
-        if f['name'].lower().endswith('.xml') and f.get('description') != 'processed_for_tags: true'
+        if f.get('name', '').lower().endswith('.xml') and f.get('description') != 'processed_for_tags: true'
     ][:1500] 
 
     if not fisiere_de_procesat:
-        print(f"{VERDE}🎉 Toate XML-urile din Drive au fost deja procesate! Dicționarele sunt la zi.{RESET}")
+        print(f"{VERDE}🎉 Toate XML-urile din Shared Drives au fost deja procesate! Dicționarele sunt la zi.{RESET}")
         return
 
-    print(f"🧠 Am găsit {len(fisiere_de_procesat)} XML-uri noi. Începem parsarea de taguri...")
+    print(f"🧠 Am găsit {len(fisiere_de_procesat)} XML-uri UNPROCESSED. Începem parsarea de taguri...")
     modificari_detectate = False
     
     for idx, fisier in enumerate(fisiere_de_procesat, 1):
@@ -135,6 +186,7 @@ def proceseaza_xml_brut():
                         modificari_detectate = True
                 elem.clear()
             
+            # Marcăm fișierul ca procesat direct în metadate
             service.files().update(fileId=f_id, body={'description': 'processed_for_tags: true'}, supportsAllDrives=True).execute()
             if idx % 100 == 0 or idx == len(fisiere_de_procesat):
                 print(f"   ↳ [{idx}/{len(fisiere_de_procesat)}] Parsat și marcat: {f_nume}")
@@ -143,8 +195,9 @@ def proceseaza_xml_brut():
             continue
 
     if modificari_detectate:
-        print(f"\n💾 S-au găsit taguri noi! Salvăm dicționarele...")
+        print(f"\n💾 S-au găsit taguri noi! Salvăm dicționarele în folderul de metadate...")
         salveaza_dictionare_in_drive(service, emitenti, tip_acte)
+        
     print(f"{VERDE}🎉 Finalizat! Total curent: {len(emitenti)} emitenți și {len(tip_acte)} tipuri acte.{RESET}")
 
 if __name__ == "__main__":
