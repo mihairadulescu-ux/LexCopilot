@@ -1,4 +1,4 @@
-name: Pipeline Industrial Legislatie XML (Matrice Paralela)
+name: Creare dictionare
 
 on:
   workflow_dispatch:
@@ -38,14 +38,14 @@ jobs:
           pip install lxml google-auth google-api-python-client zeep
 
       # ======================================================================
-      # PASUL 1: RESETARE FLAGURI OPTIONALA
+      # PASUL 1: RESETARE FLAGURI XML (Dacă este activată manual)
       # ======================================================================
       - name: ⚙️ Resetare flaguri XML
         if: ${{ github.event.inputs.ruleaza_reset == 'true' }}
         continue-on-error: true
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_XML: ${{ vars.DRIVE_FOLDER_XML }} # Citire directă din variabila unificată
+          DRIVE_FOLDER_XML: ${{ vars.DRIVE_FOLDER_XML }} # Citire corectă din Variables (Public)
         run: |
           if [ -f Scripts_XML/reset_XML_tags.py ]; then
             python Scripts_XML/reset_XML_tags.py ${{ matrix.ani }}
@@ -58,7 +58,7 @@ jobs:
         continue-on-error: true
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_XML: ${{ vars.DRIVE_FOLDER_XML }} # Citire directă din variabila unificată
+          DRIVE_FOLDER_XML: ${{ vars.DRIVE_FOLDER_XML }} # Citire corectă din Variables (Public)
         run: |
           python Scripts_XML/download_XML_dictionaries.py ${{ matrix.ani }}
 
