@@ -40,15 +40,14 @@ def get_drive_service():
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 def ruleaza_reset_flaguri(service, ani_procesare):
-    CHUNK_SIZE = 250  # Procesăm în calupuri mici pentru a nu bloca API-ul
+    CHUNK_SIZE = 250
 
     for target_year in ani_procesare:
         print(f"\n{GALBEN}⚙️ [Reset] Pornire curățare controlată pentru anul {target_year}...{RESET}")
         
         for folder_id in FOLDER_IDS:
             page_token = None
-            # Optimizare majoră: Cerem DOAR fișierele care sunt marcate ca fiind deja procesate
-            query = f"'{folder_id}' in parents and name contains 'brut_legislatie_{target_year}_pag' and description = 'processed=true' and trashed = false"
+            query = f"'{folder_id}' in parents and name contains 'brut_legislatie_{target_year}_pag' and trashed = false"
             
             contor_reset_folder = 0
             try:
@@ -56,50 +55,49 @@ def ruleaza_reset_flaguri(service, ani_procesare):
                     response = service.files().list(
                         q=query, 
                         spaces='drive', 
-                        fields='nextPageToken, files(id, name)',
+                        fields='nextPageToken, files(id, name, description)',
                         pageSize=CHUNK_SIZE,
                         pageToken=page_token,
                         supportsAllDrives=True, 
                         includeItemsFromAllDrives=True
                     ).execute()
 
-                    micro_task_files = response.get('files', [])
-                    if not micro_task_files:
+                    all_files = response.get('files', [])
+                    if not all_files:
                         page_token = response.get('nextPageToken', None)
                         if not page_token:
                             break
                         continue
 
-                    # Executăm resetarea pe calupul curent
-                    for f in micro_task_files:
-                        try:
-                            service.files().update(
-                                fileId=f['id'],
-                                body={'description': 'processed=false'},
-                                fields='id',
-                                supportsAllDrives=True
-                            ).execute()
-                            contor_reset_folder += 1
-                        except Exception:
-                            continue
-                    
-                    # Print în consolă pentru update în timp real per calup
-                    print(f"   🔄 [Progres Reset] Am curățat {contor_reset_folder} fișiere în folderul {folder_id[:8]}...")
+                    # Filtrare în Python: resetăm DOAR pe cele care au deja processed=true
+                    micro_task_files = [f for f in all_files if f.get('description', '') == 'processed=true']
 
+                    if micro_task_files:
+                        for f in micro_task_files:
+                            try:
+                                service.files().update(
+                                    fileId=f['id'],
+                                    body={'description': 'processed=false'},
+                                    fields='id',
+                                    supportsAllDrives=True
+                                ).execute()
+                                contor_reset_folder += 1
+                            except Exception:
+                                continue
+                        
+                        print(f"   🔄 [Progres Reset] Am curățat {contor_reset_folder} fișiere în folderul {folder_id[:8]}...")
+                    
                     page_token = response.get('nextPageToken', None)
                     if not page_token:
                         break
                         
-                if contor_reset_folder > 0:
-                    print(f"✅ [Folder Gata] Total fișiere resetate în {folder_id[:8]}: {contor_reset_folder}")
-                else:
-                    print(f"⏭️ [Folder Ignorat] Nu existau fișiere cu 'processed=true' în {folder_id[:8]}")
+                print(f"✅ [Folder Gata] Total fișiere resetate în {folder_id[:8]}: {contor_reset_folder}")
 
             except Exception as e:
                 print(f"{ROSU}⚠️ Eroare critică la reset pe folderul {folder_id[:8]}: {e}{RESET}")
                 continue
 
-        print(f"{VERDE}🏁 Resetarea tagurilor pentru anul {target_year} a fost finalizată pe toate discurile!{RESET}")
+        print(f"{VERDE}🏁 Resetarea tagurilor pentru anul {target_year} a fost finalizată!{RESET}")
 
 if __name__ == "__main__":
     argumente_numerice = []
