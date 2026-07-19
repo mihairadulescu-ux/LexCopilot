@@ -2,10 +2,16 @@ name: "📊 Descărcare Nomenclatoare XML Tags"
 
 on:
   workflow_dispatch:
+    inputs:
+      ruleaza_reset:
+        description: "🔄 Bifează aici dacă vrei să RESETEZI toate tagurile înainte de scanare"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   download_tags:
-    name: "📊 Extragere Emitenți & Tip Acte din XML"
+    name: "📊 Extragere Emitenți & Tip Acte"
     runs-on: ubuntu-latest
     
     steps:
@@ -22,7 +28,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install lxml google-api-python-client google-auth requests
 
-      - name: Executare scanare și agregare Tags (Unprocessed)
+      - name: Pasul 1 - Reset XML Tags (Rulează DOAR dacă ai bifat căsuța)
+        if: ${{ github.event.inputs.ruleaza_reset == 'true' }}
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DRIVE_FOLDER_XML: ${{ vars.DRIVE_FOLDER_XML }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python -u Scripts_XML/reset_XML_tags.py
+
+      - name: Pasul 2 - Executare scanare și agregare Tags (Unprocessed)
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRIVE_FOLDER_XML: ${{ vars.DRIVE_FOLDER_XML }}       
