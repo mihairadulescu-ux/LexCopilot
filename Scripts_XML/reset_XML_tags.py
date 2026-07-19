@@ -4,11 +4,7 @@ import json
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
-# ======================================================================
-# CONEXIUNE MULTI-FOLDER GOOGLE DRIVE
-# ======================================================================
 def obtine_serviciu_drive():
-    """Inițializează clientul API Google Drive."""
     info_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     foldere_brut = os.getenv("DRIVE_FOLDER_XML")
     
@@ -28,18 +24,16 @@ def obtine_serviciu_drive():
         print(f"🛑 Eroare autentificare Google Drive la reset: {e}")
         sys.exit(1)
 
-# ======================================================================
-# LOGICĂ DE RESETARE (CONVENȚIE: brut_legislatie_{an}_)
-# ======================================================================
 def ruleaza_reset_flaguri(serviciu, foldere_drive, ani_procesare):
     for an in ani_procesare:
         print(f"\n⚙️ [Reset] Inițiere curățare flaguri pentru anul: {an}")
         fișiere_de_resetat = []
+        token_cautare = f"brut_legislatie_{an}_"
 
-        # Interogăm discurile rând pe rând folosind startsWith
+        # Listăm tot din discuri și filtrăm în Python
         for idx, id_folder in enumerate(foldere_drive, 1):
-            print(f"🔍 Căutare XML-uri pentru reset în discul {idx}/{len(foldere_drive)}...")
-            interogare = f"'{id_folder}' in parents and name contains 'brut_legislatie_{an}_' and mimeType = 'text/xml' and trashed = false"
+            print(f"🔍 Listare completă pentru reset în discul {idx}/{len(foldere_drive)}...")
+            interogare = f"'{id_folder}' in parents and mimeType = 'text/xml' and trashed = false"
             
             try:
                 pag_token = None
@@ -51,7 +45,10 @@ def ruleaza_reset_flaguri(serviciu, foldere_drive, ani_procesare):
                         pageToken=pag_token
                     ).execute()
                     
-                    fișiere_de_resetat.extend(rezultat.get('files', []))
+                    for f in rezultat.get('files', []):
+                        if token_cautare in f.get('name', ''):
+                            fișiere_de_resetat.append(f)
+                            
                     pag_token = rezultat.get('nextPageToken')
                     if not pag_token:
                         break
@@ -71,7 +68,6 @@ def ruleaza_reset_flaguri(serviciu, foldere_drive, ani_procesare):
                 print(f"   [Progres Reset] {idx_f}/{total_fișiere} modificate...")
                 
             try:
-                # Actualizăm description pentru a forța re-parsarea
                 corpurile_metadate = {
                     'description': 'processed=false'
                 }
