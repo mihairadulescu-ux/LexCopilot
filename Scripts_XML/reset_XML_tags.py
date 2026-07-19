@@ -38,7 +38,7 @@ def reseteaza_atribute_xml():
         print(f"🔍 Scanare folder XML (ID: {folder_id})...")
         page_token = None
         
-        # Sintaxa corectă Google Drive pentru appProperties
+        # Sintaxa nativă stabilă pentru proprietățile aplicației
         query = (
             f"'{folder_id}' in parents and name contains '.xml' and "
             f"appProperties has {{ key='processed' and value='true' }} and trashed = false"
@@ -53,8 +53,7 @@ def reseteaza_atribute_xml():
                     pageToken=page_token, 
                     pageSize=1000,
                     supportsAllDrives=True, 
-                    includeItemsFromAllDrives=True,
-                    corpora="allDrives"
+                    includeItemsFromAllDrives=True
                 ).execute()
                 
                 fisiere_marcate.extend(response.get("files", []))
@@ -74,7 +73,7 @@ def reseteaza_atribute_xml():
     
     for idx, xml in enumerate(fisiere_marcate, 1):
         try:
-            # Actualizăm flag-ul pe 'false'
+            # Trecem proprietatea pe 'false' ca să poată fi re-procesat
             service.files().update(
                 fileId=xml["id"], 
                 body={"appProperties": {"processed": "false"}}, 
