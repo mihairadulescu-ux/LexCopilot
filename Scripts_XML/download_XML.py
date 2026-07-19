@@ -11,6 +11,7 @@ import re
 import json
 import random
 import io
+import socket  # Protecție la nivel de kernel împotriva conexiunilor „înghețate”
 from lxml import etree
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -64,24 +65,22 @@ def get_drive_service():
 
 def get_already_downloaded_pages(service, target_year):
     """
-    Corectat 100%: Căutare sigură bazată pe parsare numerică reală.
-    Scanăm fișierele din toate folderele, dar cerem doar câmpul 'name' pentru viteză maximă.
+    Căutare sigură bazată pe parsare numerică reală a fișierelor existente.
+    Scanăm paginat pentru a fi imuni la capcanele sortării alfabetice a Google Drive.
     """
     valid_pages = set()
     
     if not FOLDER_IDS:
         return valid_pages
 
-    print(f"⚡ [Scanare Sigură] Colectare istoric pagini existente pentru anul {target_year}...")
+    print(f"⚡ [Scanare Istoric] Colectare pagini existente pentru anul {target_year}...")
 
     for folder_id in FOLDER_IDS:
         page_token = None
-        # Filtrăm direct la nivel de server după prefixul exact al anului
         query = f"'{folder_id}' in parents and name contains 'brut_legislatie_{target_year}_pag' and trashed = false"
 
         try:
             while True:
-                # Folosim un pageSize mare (1000) ca să terminăm interogarea din foarte puține iterații
                 response = service.files().list(
                     q=query, 
                     spaces='drive', 
@@ -95,7 +94,6 @@ def get_already_downloaded_pages(service, target_year):
                 for file in response.get('files', []):
                     name = file.get('name', '')
                     
-                    # Parsare numerică robustă cu Regex
                     match = re.search(r"_pag(\d+)\.xml$", name)
                     if match:
                         valoare_pagina = int(match.group(1))
@@ -105,7 +103,6 @@ def get_already_downloaded_pages(service, target_year):
                 if not page_token:
                     break
         except Exception as e:
-            # Dacă un folder dă eroare sau este plin, trecem direct la următorul
             continue
             
     return valid_pages
@@ -150,9 +147,14 @@ def upload_to_drive(service, filename, content_bytes):
 
 
 def create_fresh_soap_client():
-    """Creează o instanță curată de client SOAP pentru a evita blocajele intermediare."""
+    """
+    Creează o instanță curată de client SOAP cu protecție anti-freeze.
+    Forțează întreruperea rețelei la 45 secunde dacă serverul lasă canalul deschis fără să trimită date.
+    """
+    socket.setDefaulttimeout(45.0)  # Protecție globală la nivel de socket Python
+    
     history = HistoryPlugin()
-    transport = Transport(timeout=90, operation_timeout=120)  
+    transport = Transport(timeout=45, operation_timeout=45)
     client = Client(WSDL_URL, transport=transport, plugins=[history])
     return client, history
 
@@ -168,9 +170,7 @@ def download_year(drive_service, composite_type_name, target_year):
         max_page = max(downloaded_pages)
         print(f"📦 {len(downloaded_pages)} pagini REALE identificate în istoric pentru {target_year}. (Ultima salvată: {max_page})")
         
-        # Generăm lista completă teoretică până la ultima pagină cunoscută
         all_expected_pages = set(range(1, max_page + 1))
-        # Identificăm dacă există goluri reale de reparație în spate
         gaps = sorted(list(all_expected_pages - downloaded_pages))
         
         if gaps:
@@ -203,7 +203,6 @@ def download_year(drive_service, composite_type_name, target_year):
             time.sleep(30 * init_attempt)
 
     while True:
-        # Prioritizăm reparațiile, apoi avansăm natural
         if pages_to_process:
             current_page = pages_to_process.pop(0)
             is_gap_repair = True
@@ -224,6 +223,7 @@ def download_year(drive_service, composite_type_name, target_year):
         for attempt in range(0, max_retries + 1):
             try:
                 if attempt > 0:
+                    print(f"{GALBEN}   🔄 Reîncercare {attempt}/{max_retries} pentru pagina {current_page} (Resetare client SOAP)...{RESET}")
                     time.sleep(15 * attempt)
                     client, history = create_fresh_soap_client()
                     token_key = client.service.GetToken()
@@ -246,10 +246,11 @@ def download_year(drive_service, composite_type_name, target_year):
                 retry_success = True
                 break
             except Exception as soap_error:
-                print(f"{GALBEN}   ⚠️ Notificare tehnică la pagina {current_page}: {soap_error}{RESET}")
+                print(f"{GALBEN}   ⚠️ Problemă tehnică/Timeout la pagina {current_page}: {soap_error}{RESET}")
                 token_key = None
 
         if not retry_success:
+            print(f"{ROSU}   ❌ Pagina {current_page} abandonată după eșuarea tuturor tentativelor de reîncercare.{RESET}")
             continue
 
         last_response_envelope = history.last_received["envelope"]
