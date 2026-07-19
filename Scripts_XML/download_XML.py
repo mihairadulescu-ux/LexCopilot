@@ -20,7 +20,7 @@ from zeep.transports import Transport
 from zeep.plugins import HistoryPlugin
 
 # ======================================================================
-# CONFIGURĂRI LISTĂ DIRECTOARE (PĂSTRĂM ȘI MEDIUL, DAR PUNEM ȘI LISTA FIXĂ)
+# CONFIGURĂRI LISTĂ DIRECTOARE
 # ======================================================================
 TARGET_FOLDERS_RAW = os.getenv("DRIVE_FOLDER_XML", "")
 FOLDER_IDS = []
@@ -29,7 +29,6 @@ if TARGET_FOLDERS_RAW.strip():
     clean_raw = TARGET_FOLDERS_RAW.replace('"', '').replace("'", "").replace("\n", "").replace("\r", "").strip()
     FOLDER_IDS = [fid.strip() for fid in clean_raw.split(",") if fid.strip()]
 
-# Dacă GitHub Actions lasă variabila goală, codul folosește instant cele 4 ID-uri ale tale bune:
 if not FOLDER_IDS:
     FOLDER_IDS = [
         "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m",
@@ -65,61 +64,55 @@ def get_drive_service():
 
 def get_already_downloaded_pages(service, target_year):
     """
-    OPTIMIZAT RADICAL (< 0.2 secunde): Folosește indexarea alfabetică B-Tree nativă Google Drive.
-    Evită complet operatorul lent 'contains'. Cere direct vârful intervalului numeric ordonat invers.
+    Corectat 100%: Căutare sigură bazată pe parsare numerică reală.
+    Scanăm fișierele din toate folderele, dar cerem doar câmpul 'name' pentru viteză maximă.
     """
     valid_pages = set()
     
     if not FOLDER_IDS:
         return valid_pages
 
-    print(f"⚡ [Indexare Instant] Interogare index alfabetic nativ pentru anul {target_year}...")
+    print(f"⚡ [Scanare Sigură] Colectare istoric pagini existente pentru anul {target_year}...")
 
     for folder_id in FOLDER_IDS:
-        # Căutăm direct fișiere care încep cu prefixul exact, ordonate descrescător după NUME
-        # Asta aduce instant fișierele cele mai mari (ex: pag999, pag998) în topul listei direct din index
-        query = f"'{folder_id}' in parents and name >= 'brut_legislatie_{target_year}_pag0000' and name <= 'brut_legislatie_{target_year}_pag9999' and trashed = false"
+        page_token = None
+        # Filtrăm direct la nivel de server după prefixul exact al anului
+        query = f"'{folder_id}' in parents and name contains 'brut_legislatie_{target_year}_pag' and trashed = false"
 
         try:
-            # Cerem un eșantion mic dar suficient din vârful alfabetic inversat
-            response = service.files().list(
-                q=query, 
-                spaces='drive', 
-                fields='files(name, size)',
-                orderBy='name desc',
-                pageSize=40,
-                supportsAllDrives=True, 
-                includeItemsFromAllDrives=True
-            ).execute()
+            while True:
+                # Folosim un pageSize mare (1000) ca să terminăm interogarea din foarte puține iterații
+                response = service.files().list(
+                    q=query, 
+                    spaces='drive', 
+                    fields='nextPageToken, files(name)',
+                    pageSize=1000,
+                    pageToken=page_token,
+                    supportsAllDrives=True, 
+                    includeItemsFromAllDrives=True
+                ).execute()
 
-            for file in response.get('files', []):
-                name = file.get('name', '')
-                size = int(file.get('size', 0))
-                
-                if size < 20:
-                    continue  
-                
-                match = re.search(r"_pag(\d+)\.xml$", name)
-                if match:
-                    valoare_pagina = int(match.group(1))
-                    if valoare_pagina < 99999:
+                for file in response.get('files', []):
+                    name = file.get('name', '')
+                    
+                    # Parsare numerică robustă cu Regex
+                    match = re.search(r"_pag(\d+)\.xml$", name)
+                    if match:
+                        valoare_pagina = int(match.group(1))
                         valid_pages.add(valoare_pagina)
-                        
+                            
+                page_token = response.get('nextPageToken', None)
+                if not page_token:
+                    break
         except Exception as e:
+            # Dacă un folder dă eroare sau este plin, trecem direct la următorul
             continue
             
-    if valid_pages:
-        max_p = max(valid_pages)
-        return set(range(1, max_p + 1))
-        
     return valid_pages
 
 
 def upload_to_drive(service, filename, content_bytes):
-    """
-    Încarcă fișierul în primul folder disponibil.
-    Dacă un folder este plin, îl elimină DEFINITIV din listă pentru restul rulării.
-    """
+    """Încarcă fișierul XML brut în primul folder disponibil."""
     global FOLDER_IDS
     
     if not FOLDER_IDS:
@@ -165,14 +158,25 @@ def create_fresh_soap_client():
 
 
 def download_year(drive_service, composite_type_name, target_year):
-    """Descarcă toate paginile lipsă sau invalide pentru un singur an."""
+    """Descarcă toate paginile lipsă sau noi pentru un singur an."""
     print(f"\n{GALBEN}{'='*70}\n📅 AN INDUSTRIAL XML: {target_year}\n{'='*70}{RESET}")
 
     downloaded_pages = get_already_downloaded_pages(drive_service, target_year)
     
+    pages_to_process = []
     if downloaded_pages:
         max_page = max(downloaded_pages)
-        print(f"📦 Detecție rapidă: Ultima pagină existentă pentru {target_year} este {max_page}. Reluăm de la {max_page + 1}.")
+        print(f"📦 {len(downloaded_pages)} pagini REALE identificate în istoric pentru {target_year}. (Ultima salvată: {max_page})")
+        
+        # Generăm lista completă teoretică până la ultima pagină cunoscută
+        all_expected_pages = set(range(1, max_page + 1))
+        # Identificăm dacă există goluri reale de reparație în spate
+        gaps = sorted(list(all_expected_pages - downloaded_pages))
+        
+        if gaps:
+            print(f"{GALBEN}🛠️ Detectat {len(gaps)} lacune reale în istoric. Începem repararea lor.{RESET}")
+            pages_to_process.extend(gaps)
+            
         next_new_page = max_page + 1
     else:
         print(f"🆕 An complet nou în acest segment. Începem de la pagina 1.")
@@ -199,10 +203,20 @@ def download_year(drive_service, composite_type_name, target_year):
             time.sleep(30 * init_attempt)
 
     while True:
-        current_page = next_new_page
-        next_new_page += 1
+        # Prioritizăm reparațiile, apoi avansăm natural
+        if pages_to_process:
+            current_page = pages_to_process.pop(0)
+            is_gap_repair = True
+        else:
+            current_page = next_new_page
+            next_new_page += 1
+            is_gap_repair = False
 
-        print(f"--- [AVANS] An {target_year} / Pagina {current_page} ---")
+        if current_page in downloaded_pages and not is_gap_repair:
+            continue
+
+        prefix_log = "[REPARARE]" if is_gap_repair else "[AVANS]"
+        print(f"--- {prefix_log} An {target_year} / Pagina {current_page} ---")
 
         retry_success = False
         max_retries = 3
@@ -228,7 +242,6 @@ def download_year(drive_service, composite_type_name, target_year):
                 
                 last_response_envelope = history.last_received["envelope"]
                 raw_xml_bytes = etree.tostring(last_response_envelope, pretty_print=True, encoding="utf-8")
-                raw_xml_string = raw_xml_bytes.decode("utf-8")
                 
                 retry_success = True
                 break
@@ -246,13 +259,15 @@ def download_year(drive_service, composite_type_name, target_year):
         filename = f"brut_legislatie_{target_year}_pag{current_page}.xml"
 
         if "<a:Legi>" not in raw_xml_string and "<Legi>" not in raw_xml_string:
-            consecutive_empty_pages += 1
-            print(f"{GALBEN}   ℹ️ Pagină goală detectată. Goluri consecutive: {consecutive_empty_pages}/{LIMITE_GOLURI_FINAL_AN}{RESET}")
-            if consecutive_empty_pages >= LIMITE_GOLURI_FINAL_AN:
-                print(f"\n{VERDE}✅ Anul {target_year} finalizat (S-a confirmat capătul după {LIMITE_GOLURI_FINAL_AN} pagini goale!){RESET}")
-                break
+            if not is_gap_repair:
+                consecutive_empty_pages += 1
+                print(f"{GALBEN}   ℹ️ Pagină goală detectată. Goluri consecutive: {consecutive_empty_pages}/{LIMITE_GOLURI_FINAL_AN}{RESET}")
+                if consecutive_empty_pages >= LIMITE_GOLURI_FINAL_AN:
+                    print(f"\n{VERDE}✅ Anul {target_year} finalizat (S-a confirmat capătul după {LIMITE_GOLURI_FINAL_AN} pagini goale!){RESET}")
+                    break
         else:
-            consecutive_empty_pages = 0
+            if not is_gap_repair:
+                consecutive_empty_pages = 0
             success = upload_to_drive(drive_service, filename, raw_xml_bytes)
             if success:
                 files_saved += 1
