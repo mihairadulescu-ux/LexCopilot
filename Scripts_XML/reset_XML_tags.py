@@ -5,12 +5,10 @@ ROSU = "\033[91m"
 RESET = "\033[0m"
 
 import os
-import sys
 import json
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
-# Sursa pentru folderele de XML brute
 TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_XML")
 
 def obtine_drive():
@@ -27,29 +25,44 @@ def reseteaza_atribute_xml():
         return
 
     service = obtine_drive()
-    print(f"📂 Scanare generală folder XML pentru resetare (ID: {TARGET_FOLDER_ID})...")
+    print(f"📂 Identificare locație folder XML (ID: {TARGET_FOLDER_ID})...")
     
+    # PASUL MAGIC: Aflăm dacă folderul aparține unui Shared Drive ca să nu mai luăm eroare de 404
+    drive_id = None
+    try:
+        folder_meta = service.files().get(fileId=TARGET_FOLDER_ID, fields="driveId", supportsAllDrives=True).execute()
+        drive_id = folder_meta.get("driveId")
+    except Exception as e:
+        print(f"{GALBEN}⚠️ Notă: Nu s-a putut citi driveId direct, continuăm cu autodetecție: {e}{RESET}")
+
+    print(f"🔍 Scanare generală fișiere...")
+    
+    # Reconstruim argumentele apelului exact cum vrea Google Drive API
+    kwargs = {
+        "q": f"'{TARGET_FOLDER_ID}' in parents and trashed = false",
+        "fields": "nextPageToken, files(id, name, description)",
+        "pageSize": 1000,
+        "supportsAllDrives": True,
+        "includeItemsFromAllDrives": True
+    }
+    
+    # Dacă e Shared Drive, API-ul ne obligă să-i dăm corpora="drive" și driveId
+    if drive_id:
+        kwargs["corpora"] = "drive"
+        kwargs["driveId"] = drive_id
+
     page_token = None
-    query = f"'{TARGET_FOLDER_ID}' in parents and trashed = false"
-    
     fisiere_marcate = []
     contor_total = 0
     
     while True:
-        response = service.files().list(
-            q=query, 
-            fields="nextPageToken, files(id, name, description)", 
-            pageToken=page_token, 
-            pageSize=1000,
-            supportsAllDrives=True, 
-            includeItemsFromAllDrives=True
-            # Am eliminat corpora="user" pentru a evita eroarea 404 pe Shared Drives
-        ).execute()
-        
+        if page_token:
+            kwargs["pageToken"] = page_token
+            
+        response = service.files().list(**kwargs).execute()
         fișiere = response.get("files", [])
         contor_total += len(fișiere)
         
-        # Filtrare 100% locală în Python
         for f in fișiere:
             if f['name'].lower().endswith('.xml') and f.get("description") == "processed_for_tags: true":
                 fisiere_marcate.append(f)
@@ -58,33 +71,26 @@ def reseteaza_atribute_xml():
         if not page_token:
             break
             
-    print(f"📊 Scanare finalizată. Din totalul de {contor_total} fișiere detectate, {len(fisiere_marcate)} sunt XML-uri procesate.")
+    print(f"📊 Scanare finalizată. Din {contor_total} fișiere, {len(fisiere_marcate)} sunt XML-uri deja procesate.")
 
     if not fisiere_marcate:
-        print(f"{VERDE}✨ Nu s-a găsit niciun XML marcat cu etichetă. Totul este pregătit pentru o căutare fresh!{RESET}")
+        print(f"{VERDE}✨ Totul este deja curat și pregătit pentru scanarea fresh!{RESET}")
         return
 
-    print(f"⚙️ Se începe curățarea metadatelor pentru cele {len(fisiere_marcate)} fișiere...")
-    
+    print(f"⚙️ Se începe curățarea etichetelor...")
     for idx, xml in enumerate(fisiere_marcate, 1):
         f_id = xml["id"]
         f_nume = xml["name"]
         
         try:
-            service.files().update(
-                fileId=f_id, 
-                body={"description": ""}, 
-                supportsAllDrives=True
-            ).execute()
-            
+            service.files().update(fileId=f_id, body={"description": ""}, supportsAllDrives=True).execute()
             if idx % 100 == 0 or idx == len(fisiere_marcate):
                 print(f"    ✅ [{idx}/{len(fisiere_marcate)}] Resetat cu succes: {f_nume}")
-                
         except Exception as e:
-            print(f"{ROSU}    ❌ Eroare la resetarea fișierului {f_nume}: {e}{RESET}")
+            print(f"{ROSU}    ❌ Eroare la {f_nume}: {e}{RESET}")
             continue
 
-    print(f"\n{VERDE}🚀 Resetare completă! Marcajele au fost eliminate.{RESET}")
+    print(f"\n{VERDE}🚀 Gata! Toate marcajele au fost șterse cu succes.{RESET}")
 
 if __name__ == "__main__":
     reseteaza_atribute_xml()
