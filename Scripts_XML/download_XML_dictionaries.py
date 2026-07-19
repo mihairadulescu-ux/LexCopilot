@@ -50,81 +50,80 @@ def extrage_taguri_din_matrice(service, ani_procesare):
     regex_emitent = re.compile(r"<[^:>]*:?Emitent>(.*?)</[^:>]*:?Emitent>", re.DOTALL)
     regex_tip_act = re.compile(r"<[^:>]*:?TipAct>(.*?)</[^:>]*:?TipAct>", re.DOTALL)
 
-    CHUNK_SIZE = 100  # Dimensiunea micro-taskului pentru a nu bloca API-ul sau memoria
+    CHUNK_SIZE = 100
 
     for target_year in ani_procesare:
-        print(f"\n{GALBEN}⚡ [Dictionare] Scanare si procesare controlata pentru anul {target_year}...{RESET}")
+        print(f"\n{GALBEN}⚡ [Dictionare] Scanare pentru anul {target_year}...{RESET}")
         
         for folder_id in FOLDER_IDS:
             page_token = None
-            # Corecție majoră: Filtrăm direct în API fișierele deja procesate!
-            query = f"'{folder_id}' in parents and name contains 'brut_legislatie_{target_year}_pag' and description != 'processed=true' and trashed = false"
+            # Căutare curată acceptată de API: cerem și description în fields pentru filtrare manuală
+            query = f"'{folder_id}' in parents and name contains 'brut_legislatie_{target_year}_pag' and trashed = false"
 
             try:
                 while True:
                     response = service.files().list(
                         q=query, 
                         spaces='drive', 
-                        fields='nextPageToken, files(id, name)',
-                        pageSize=CHUNK_SIZE,  # Luăm doar câte un set mic odată
+                        fields='nextPageToken, files(id, name, description)',
+                        pageSize=CHUNK_SIZE,
                         pageToken=page_token,
                         supportsAllDrives=True, 
                         includeItemsFromAllDrives=True
                     ).execute()
 
-                    micro_task_files = response.get('files', [])
-                    if not micro_task_files:
+                    all_files = response.get('files', [])
+                    if not all_files:
                         page_token = response.get('nextPageToken', None)
                         if not page_token:
                             break
                         continue
 
-                    print(f"📦 [Micro-Task] Procesez un calup de {len(micro_task_files)} fișiere neprocesate din folderul {folder_id[:8]}...")
+                    # Filtrare în Python: selectăm doar pe cele care NU sunt marcate ca processed=true
+                    micro_task_files = [f for f in all_files if f.get('description', '') != 'processed=true']
 
-                    # Procesăm calupul curent
-                    for file in micro_task_files:
-                        try:
-                            # 1. Descărcare în RAM
-                            cerere = service.files().get_media(fileId=file['id'])
-                            fh = io.BytesIO()
-                            descarcare = MediaIoBaseDownload(fh, cerere)
-                            gata = False
-                            while not gata:
-                                _, gata = descarcare.next_chunk()
-                            
-                            xml_text = fh.getvalue().decode("utf-8", errors="ignore")
-                            
-                            # 2. Extragere rapidă date text
-                            for em in regex_emitent.findall(xml_text):
-                                val = em.strip()
-                                if val: emitenti_gasiti.add(val)
+                    if micro_task_files:
+                        print(f"📦 [Micro-Task] Procesez {len(micro_task_files)} fișiere noi în folderul {folder_id[:8]}...")
+
+                        for file in micro_task_files:
+                            try:
+                                cerere = service.files().get_media(fileId=file['id'])
+                                fh = io.BytesIO()
+                                descarcare = MediaIoBaseDownload(fh, cerere)
+                                gata = False
+                                while not gata:
+                                    _, gata = descarcare.next_chunk()
                                 
-                            for ta in regex_tip_act.findall(xml_text):
-                                val = ta.strip()
-                                if val: tipuri_acte_gasite.add(val)
+                                xml_text = fh.getvalue().decode("utf-8", errors="ignore")
+                                
+                                for em in regex_emitent.findall(xml_text):
+                                    val = em.strip()
+                                    if val: emitenti_gasiti.add(val)
+                                    
+                                for ta in regex_tip_act.findall(xml_text):
+                                    val = ta.strip()
+                                    if val: tipuri_acte_gasite.add(val)
 
-                            # 3. Marcare instantanee ca procesat în Drive pentru a nu-l mai citi niciodată
-                            service.files().update(
-                                fileId=file['id'],
-                                body={'description': 'processed=true'},
-                                fields='id',
-                                supportsAllDrives=True
-                            ).execute()
+                                # Marcare ca procesat
+                                service.files().update(
+                                    fileId=file['id'],
+                                    body={'description': 'processed=true'},
+                                    fields='id',
+                                    supportsAllDrives=True
+                                ).execute()
 
-                        except Exception as file_err:
-                            # Dacă un fișier e blocat, trecem peste el să nu oprim restul micro-taskului
-                            continue
+                            except Exception:
+                                continue
                     
-                    # Verificăm dacă mai sunt pagini în acest folder
                     page_token = response.get('nextPageToken', None)
                     if not page_token:
                         break
 
             except Exception as e:
-                print(f"{ROSU}⚠️ Eroare în timpul executării taskului pe folderul {folder_id[:8]}: {e}{RESET}")
+                print(f"{ROSU}⚠️ Eroare pe folderul {folder_id[:8]}: {e}{RESET}")
                 continue
 
-    # Export fragmente CSV culese
+    # Export CSV
     string_ani = "_".join([str(a) for a in ani_procesare])
     cale_emitenti = f"lista_emitenti_{string_ani}.csv"
     cale_acte = f"lista_tip_acte_{string_ani}.csv"
@@ -141,7 +140,7 @@ def extrage_taguri_din_matrice(service, ani_procesare):
         for t in sorted(list(tipuri_acte_gasite)):
             writer.writerow([t])
             
-    print(f"{VERDE}✅ [Gata] Fragmentele pentru {string_ani} au fost salvate și marcate ca processed!{RESET}")
+    print(f"{VERDE}✅ [Gata] Fragmentele pentru {string_ani} au fost salvate!{RESET}")
 
 if __name__ == "__main__":
     argumente_numerice = []
