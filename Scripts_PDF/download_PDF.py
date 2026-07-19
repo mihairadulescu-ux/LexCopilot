@@ -15,7 +15,7 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 # CONFIGURARE GOOGLE DRIVE ȘI ANI DINAMICI (GITHUB MATRIX)
 # ======================================================================
 GOOGLE_DRIVE_FOLDER_ID = "1c8SEo8UrQVe6qgzPFGLXJFiMyLeI-r8D"
-MAX_DOWNLOAD_WORKERS = 40  # Numărul de thread-uri pentru citirea paralelă a fișierelor dummy
+MAX_DOWNLOAD_WORKERS = 40  
 
 START_YEAR = int(os.getenv("START_YEAR", "2000"))
 END_YEAR = int(os.getenv("END_YEAR", "2026"))
@@ -66,40 +66,43 @@ def decodific_si_proceseaza_dummy(creds, f_id, nume):
 
 def adu_fisiere_existente_in_drive(drive_service, folder_id, an_start, an_stop):
     existente = {}
-    conditii_ani = " or ".join([f"name contains 'MO_PI_{an}_'" for an in range(an_start, an_stop + 1)])
-    query = f"'{folder_id}' in parents and ({conditii_ani}) and trashed = false"
     
-    page_token = None
-    print(f"    ↳ Scanăm metadatele din Drive STRICT pentru anii {an_start} - {an_stop}...", flush=True)
-    
-    while True:
-        response = drive_service.files().list(
-            q=query, 
-            spaces='drive',
-            fields="nextPageToken, files(id, name, size)", 
-            pageToken=page_token, 
-            pageSize=1000,
-            supportsAllDrives=True, 
-            includeItemsFromAllDrives=True,
-            corpora="allDrives"
-        ).execute()
+    # Executăm scanarea pe rând, an de an, pentru a nu sufoca paginarea API-ului v3 pe Shared Drives
+    for an in range(an_start, an_stop + 1):
+        query = f"'{folder_id}' in parents and name contains 'MO_PI_{an}_' and trashed = false"
+        page_token = None
         
-        for f in response.get("files", []):
-            nume = f["name"]
-            f_id = f["id"]
-            size = int(f.get("size", 0))
-            status = "ok"
-            
-            # Orice fișier foarte mic este marcat drept suspect/placeholder
-            if size <= 100:
-                status = "dummy_verificabil"
+        while True:
+            try:
+                response = drive_service.files().list(
+                    q=query, 
+                    spaces='drive',
+                    fields="nextPageToken, files(id, name, size)", 
+                    pageToken=page_token, 
+                    pageSize=1000,
+                    supportsAllDrives=True, 
+                    includeItemsFromAllDrives=True,
+                    corpora="allDrives"
+                ).execute()
                 
-            existente[nume] = {"id": f_id, "size": size, "status": status}
-            
-        page_token = response.get("nextPageToken", None)
-        if not page_token:
-            break
-            
+                for f in response.get("files", []):
+                    nume = f["name"]
+                    f_id = f["id"]
+                    size = int(f.get("size", 0))
+                    status = "ok"
+                    
+                    if size <= 100:
+                        status = "dummy_verificabil"
+                        
+                    existente[nume] = {"id": f_id, "size": size, "status": status}
+                    
+                page_token = response.get("nextPageToken", None)
+                if not page_token:
+                    break
+            except Exception as e:
+                print(f"⚠️ [Scan Warning] Eroare temporară la indexarea anului {an}: {e}. Reîncercăm faza de fallback...")
+                break
+
     fisiere_de_verificat = [n for n, v in existente.items() if v["status"] == "dummy_verificabil"]
     if fisiere_de_verificat:
         total_verificabile = len(fisiere_de_verificat)
@@ -200,7 +203,10 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                 else:
                     meta = inventar_drive[nume_pdf]
                     file_id_existent = meta["id"]
-                    if sufix == "Bis" and meta["status"].startswith("dummy_") and meta["status"] != "dummy_final":
+                    # Dacă e fișier valid (peste 100 bytes) și e deja OK în Drive, NU îl mai descărcăm sub nicio formă
+                    if meta["size"] > 100 and meta["status"] == "ok":
+                        trebuie_descarcat = False
+                    elif sufix == "Bis" and meta["status"].startswith("dummy_") and meta["status"] != "dummy_final":
                         trebuie_descarcat = True
                         status_actual = meta["status"]
                         
@@ -214,9 +220,7 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                         "status_actual": status_actual
                     })
             
-            # --- CORECTARE CHIRURGICALĂ PENTRU IERARHII (Tris, Quater) ---
             nume_bis_martor = f"MO_PI_{an}_{n}Bis.pdf"
-            # Verificăm că Bis existã, are status 'ok' ȘI mărimea lui este cea a unui fișier real (excludem placeholders sub 100 de bytes)
             if nume_bis_martor in inventar_drive:
                 meta_bis = inventar_drive[nume_bis_martor]
                 if meta_bis["status"] == "ok" and meta_bis["size"] > 100:
