@@ -145,7 +145,7 @@ def incarca_sau_actualizeaza_in_drive(drive_service, cale_locala, folder_id, fil
     return False
 
 # ======================================================================
-# CORE CRAWLER CORECTAT: REQUEST CLASIC (GET) PENTRU RUNDĂ STABILĂ
+# CORE CRAWLER CORECTAT: REQUEST IERARHIC CURAT (GET)
 # ======================================================================
 def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
     url_template = "https://monitoruloficial.ro/Monitorul-Oficial--PI--{numar}--{an}.html"
@@ -163,14 +163,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
     print("🧠 Pasul 2: Calculare diferențe și identificare fișiere lipsă...", flush=True)
     coada_descarcare = []
     
-    variante_sufixe = [
-        {"sufix": "", "tip": "simplu"},
-        {"sufix": "Bis", "tip": "bis"},
-        {"sufix": "Tris", "tip": "tris"},
-        {"sufix": "Quatro", "tip": "quatro"},
-        {"sufix": "S", "tip": "s"}
-    ]
-    
     AN_CURENT_SISTEM = 2026
     
     for an in range(an_start, am_stop + 1):
@@ -179,7 +171,7 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
             if f.startswith(f"MO_PI_{an}_"):
                 try:
                     num_str = f.split('_')[3].split('.')[0]
-                    for suf in ['Bis', 'Tris', 'Quatro', 'S']:
+                    for suf in ['Bis', 'Tris', 'Quater', 'S']:
                         num_str = num_str.replace(suf, '')
                     numere_existente_an.append(int(num_str))
                 except (IndexError, ValueError):
@@ -195,8 +187,9 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                 limata_scanare = 100
         
         for n in range(1, limata_scanare + 1):
-            for var in variante_sufixe:
-                numar_complet = f"{n}{var['sufix']}" if var["sufix"] else str(n)
+            # 1. Variantele standard și independente (Simplu, Bis, S) - se verifică MEREU
+            for sufix, tip_var in [("", "simplu"), ("Bis", "bis"), ("S", "special")]:
+                numar_complet = f"{n}{sufix}" if sufix else str(n)
                 nume_pdf = f"MO_PI_{an}_{numar_complet}.pdf"
                 
                 trebuie_descarcat = False
@@ -208,19 +201,36 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                 else:
                     meta = inventar_drive[nume_pdf]
                     file_id_existent = meta["id"]
-                    if var["tip"] == "bis" and meta["status"].startswith("dummy_") and meta["status"] != "dummy_final":
+                    if sufix == "Bis" and meta["status"].startswith("dummy_") and meta["status"] != "dummy_final":
                         trebuie_descarcat = True
                         status_actual = meta["status"]
-                
+                        
                 if trebuie_descarcat:
                     coada_descarcare.append({
                         "an": an, 
                         "numar": numar_complet, 
                         "nume_pdf": nume_pdf, 
-                        "tip": var["tip"],
+                        "tip": tip_var,
                         "file_id_existent": file_id_existent,
                         "status_actual": status_actual
                     })
+            
+            # 2. Variantele ierarhice (Tris, Quater) - se caută DOAR dacă Bis-ul există deja și e valid ok în Drive
+            nume_bis_martor = f"MO_PI_{an}_{n}Bis.pdf"
+            if nume_bis_martor in inventar_drive and inventar_drive[nume_bis_martor]["status"] == "ok":
+                for sufix_rar, tip_rar in [("Tris", "tris"), ("Quater", "quater")]:
+                    numar_complet_rar = f"{n}{sufix_rar}"
+                    nume_pdf_rar = f"MO_PI_{an}_{numar_complet_rar}.pdf"
+                    
+                    if nume_pdf_rar not in inventar_drive:
+                        coada_descarcare.append({
+                            "an": an,
+                            "numar": numar_complet_rar,
+                            "nume_pdf": nume_pdf_rar,
+                            "tip": "special",
+                            "file_id_existent": None,
+                            "status_actual": None
+                        })
 
     total_lipsa = len(coada_descarcare)
     if total_lipsa == 0:
@@ -263,7 +273,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
         
         while incercari < limită_reincercări:
             try:
-                # Sleep fin pentru a mima comportamentul uman normal
                 sleep_time = random.uniform(1.0, 2.5) if incercari == 0 else random.uniform(5.0, 10.0)
                 time.sleep(sleep_time)
                 
@@ -272,8 +281,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                     "Referer": "https://monitoruloficial.ro/e-monitor/"
                 }
                 
-                # URMEAZĂ SCHIMBAREA CHEIE: Executăm .get() normal pentru a permite serverului 
-                # să livreze fișierul prin mecanismul său nativ de răspuns/redirect HTML-to-PDF
                 with httpx.Client(headers=headers, timeout=timeout_resilient, follow_redirects=True) as client:
                     response = client.get(url)
                     
@@ -290,7 +297,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                     response.raise_for_status()
                     content_type = response.headers.get("Content-Type", "").lower()
                     
-                    # Dacă serverul livrează corect fluxul binar PDF
                     if "application/pdf" in content_type or len(response.content) > 20000:
                         with open(cale_locala, "wb") as f:
                             f.write(response.content)
@@ -301,7 +307,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                         descarcat_ok = True
                         break
                     else:
-                        # Dacă răspunsul e pagină text/html simplă (fișier lipsă camuflat sau limită text)
                         if este_special:
                             creeaza_fantomă = True
                             valoare_fantomă = " "
@@ -313,7 +318,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                             valoare_fantomă = str(urmatorul_contor) if urmatorul_contor < 6 else " "
                             break
                         else:
-                            # Pentru fișierele simple, dacă e doar o eroare pasageră de rețea, ridicăm excepție pt retry
                             raise IOError("Serverul a returnat pagină web în loc de documentul binar.")
                             
             except Exception as e:
@@ -326,7 +330,6 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                 else:
                     time.sleep(3.0)
         
-        # Sincronizarea datelor descărcate sau scrierea marcajelor dummy
         if descarcat_ok:
             marime_mb = os.path.getsize(cale_locala) / 1024 / 1024
             print(f"📥 Descărcat complet: {nume_pdf} (~{marime_mb:.2f} MB)", flush=True)
@@ -357,21 +360,27 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
             pass
     print("\n🎉 Rularea nocturnă s-a finalizat!", flush=True)
 
+# ======================================================================
+# PARSER ROBUST DE INTERVALE (FLEXIBIL PENTRU MATRICEA YML)
+# ======================================================================
 if __name__ == "__main__":
-    # Verificăm dinamic argumentele primite din linia de comandă
-    if len(sys.argv) == 2:
-        # Dacă s-a trimis un singur an (ex: GitHub Matrix pentru 2016)
-        an_s = int(sys.argv[1])
-        an_f = int(sys.argv[1])
-    elif len(sys.argv) >= 3:
-        # Dacă s-a trimis un interval (ex: 2000 2005)
-        an_s = int(sys.argv[1])
-        an_f = int(sys.argv[2])
+    argumente_numerice = []
+    
+    for arg in sys.argv[1:]:
+        piese = arg.split()
+        for piesa in piese:
+            if piesa.isdigit():
+                argumente_numerice.append(int(piesa))
+
+    if len(argumente_numerice) == 1:
+        an_s = argumente_numerice[0]
+        an_f = argumente_numerice[0]
+    elif len(argumente_numerice) >= 2:
+        an_s = argumente_numerice[0]
+        an_f = argumente_numerice[1]
     else:
-        # Dacă nu s-a trimis nimic, luăm din variabilele de mediu sau implicit
         an_s = START_YEAR
         an_f = END_YEAR
         
-    print(f"🎯 [Config Matrix] Rulăm scriptul izolat pentru intervalul: {an_s} - {an_f}")
+    print(f"🎯 [Config Matrix] Rulăm scriptul izolat pentru intervalul: {an_s} - {an_f}", flush=True)
     descarca_monitoare_precalculat(an_start=an_s, am_stop=an_f)
- 
