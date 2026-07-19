@@ -1,8 +1,6 @@
 import os
 import sys
 import json
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
 
 def obtine_serviciu_drive():
     info_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -15,6 +13,8 @@ def obtine_serviciu_drive():
     liste_foldere = [f.strip() for f in foldere_brut.split(",") if f.strip()]
     
     try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
         credențiale = service_account.Credentials.from_service_account_info(
             json.loads(info_json),
             scopes=["https://www.googleapis.com/auth/drive"]
@@ -30,10 +30,9 @@ def ruleaza_reset_flaguri(serviciu, foldere_drive, ani_procesare):
         fișiere_de_resetat = []
         token_cautare = f"brut_legislatie_{an}_"
 
-        # Listăm tot din discuri și filtrăm în Python
         for idx, id_folder in enumerate(foldere_drive, 1):
-            print(f"🔍 Listare completă pentru reset în discul {idx}/{len(foldere_drive)}...")
-            interogare = f"'{id_folder}' in parents and mimeType = 'text/xml' and trashed = false"
+            print(f"🔍 Listare brută pentru reset în discul {idx}/{len(foldere_drive)}...")
+            interogare = f"'{id_folder}' in parents"
             
             try:
                 pag_token = None
@@ -46,7 +45,8 @@ def ruleaza_reset_flaguri(serviciu, foldere_drive, ani_procesare):
                     ).execute()
                     
                     for f in rezultat.get('files', []):
-                        if token_cautare in f.get('name', ''):
+                        nume_f = f.get('name', '')
+                        if token_cautare in nume_f and nume_f.lower().endswith('.xml'):
                             fișiere_de_resetat.append(f)
                             
                     pag_token = rezultat.get('nextPageToken')
