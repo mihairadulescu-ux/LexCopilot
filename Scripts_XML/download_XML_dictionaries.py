@@ -82,12 +82,11 @@ def proceseaza_segment_xml():
     set_emitenti = citeste_csv_existent(cale_emitenti)
     set_acte = citeste_csv_existent(cale_acte)
     
-    print(f"{VERDE}🔍 Pasul 1: Scanare fișiere neprocesate în cele {len(folder_ids)} locații...{RESET}")
+    print(f"{VERDE}🔍 Pasul 1: Scanare fișiere neprocesate în locații...{RESET}")
     fisiere_xml = []
     
     for folder_id in folder_ids:
         page_token = None
-        # Colectăm doar fișierele unde proprietatea processed NU este 'true'
         query = (
             f"'{folder_id}' in parents and name contains '.xml' and "
             f"not appProperties has {{ key='processed' and value='true' }} and trashed = false"
@@ -110,15 +109,15 @@ def proceseaza_segment_xml():
                 if not page_token:
                     break
             except Exception as e:
-                print(f"{ROSU}⚠️ Eroare scanare folder {folder_id}: {e}{RESET}")
+                print(f"{ROSU}⚠️ Ignorat folder inaccesibil sau inexistent (ID: {folder_id}).{RESET}")
                 break
 
     total_fisiere = len(fisiere_xml)
     if total_fisiere == 0:
-        print("🎉 Toate fișierele XML sunt complet procesate!")
+        print("🎉 Toate fișierele XML accesibile sunt complet procesate!")
         return
 
-    print(f"📊 Am găsit {total_fisiere} fișiere XML noi de analizat.", flush=True)
+    print(f"📊 Am găsit {total_fisiere} fișiere XML noi de analizat în folderele valide.", flush=True)
 
     for idx, fx in enumerate(fisiere_xml, 1):
         nume = fx["name"]
@@ -142,7 +141,6 @@ def proceseaza_segment_xml():
             if tip_act:
                 set_acte.add(tip_act)
                 
-            # Setăm nativ starea 'processed: true'
             service.files().update(
                 fileId=fid,
                 body={"appProperties": {"processed": "true"}},
