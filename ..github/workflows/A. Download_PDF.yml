@@ -1,4 +1,4 @@
-name: "Descărcare Legislație Paralelă PDF"
+name:  "🚀 REGELE PDF - Sincronizare Unificata"
 
 on:
   workflow_dispatch: # Permite pornirea manuală din interfața GitHub
