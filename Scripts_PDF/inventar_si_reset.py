@@ -7,9 +7,13 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+VERDE = "\033[92m"
+GALBEN = "\033[93m"
+ROSU = "\033[91m"
+RESET = "\033[0m"
+
 # Configurații globale din mediu
 TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_PDF")
-MIN_SIZE_BYTES = 1000  # Pragul sub care considerăm PDF-ul ca fiind corupt/dummy eroare
 
 def obtine_drive():
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
@@ -19,11 +23,11 @@ def obtine_drive():
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 def listeaza_si_curata_pdf_uri(service, drive_folder_pdf):
-    print(f"📂 Scanare profundă și validare integritate folder PDF (ID: {drive_folder_pdf})...", flush=True)
+    print(f"📂 Scanare profundă și validare structurală folder PDF (ID: {drive_folder_pdf})...", flush=True)
     pdf_uri = []
     page_token = None
     
-    # Am scos filtrul rigid de mimeType pentru a asigura că indexăm corect și nu omitem nimic la scanare
+    # Scanăm nativ tot folderul din Shared Drive
     query = f"'{drive_folder_pdf}' in parents and trashed = false"
     
     while True:
@@ -31,12 +35,12 @@ def listeaza_si_curata_pdf_uri(service, drive_folder_pdf):
             response = service.files().list(
                 q=query, 
                 spaces='drive',
-                fields="nextPageToken, files(id, name, size)", 
+                fields="nextPageToken, files(id, name, size, mimeType)", 
                 pageToken=page_token, 
                 pageSize=1000,
                 supportsAllDrives=True, 
                 includeItemsFromAllDrives=True, 
-                corpora="allDrives"  # CRUCIAL pentru Shared Drives: caută nativ în toată structura drive-ului mapat
+                corpora="allDrives"
             ).execute()
             
             files = response.get("files", [])
@@ -44,32 +48,35 @@ def listeaza_si_curata_pdf_uri(service, drive_folder_pdf):
             for file in files:
                 name = file.get("name", "")
                 
-                # Ignorăm fișierele CSV de status existente din folder ca să nu le procesăm ca fiind PDF-uri corupte
+                # Ignorăm fișierele de status CSV ca să nu le atingem
                 if name.startswith("status_") and name.endswith(".csv"):
                     continue
                     
                 file_id = file.get("id")
+                mime_type = file.get("mimeType", "")
                 size = int(file.get("size", 0))
                 
-                # --- VERIFICARE ȘI ELIMINARE FANTOME (DUMMY) ---
-                if size < MIN_SIZE_BYTES:
-                    print(f"🗑️ [CURĂȚARE] Placeholder/Fișier invalid detectat și eliminat: {name} ({size} bytes).", flush=True)
+                # --- LOGICA DE FIER BAZATĂ PE MIME-TYPE ---
+                # Dacă are extensie .pdf dar Google nu îl recunoaște ca application/pdf (e text/dummy), îl măturăm
+                if name.lower().endswith('.pdf') and mime_type != 'application/pdf':
+                    print(f"🗑️ [ELIMINARE] Fișier invalid/placeholder detectat: {name} (Mime: {mime_type}, {size} bytes). Ștergere...", flush=True)
                     try:
                         service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
                     except Exception as e:
-                        print(f"⚠️ Eroare la ștergerea fișierului {name}: {e}", flush=True)
-                else:
-                    if name.lower().endswith('.pdf'):
-                        pdf_uri.append(file)
+                        print(f"⚠️ Nu s-a putut șterge fișierul invalid {name}: {e}", flush=True)
+                
+                # Dacă este un PDF legitim și confirmat structural de Google, îl păstrăm în index
+                elif name.lower().endswith('.pdf') and mime_type == 'application/pdf':
+                    pdf_uri.append(file)
                         
             page_token = response.get("nextPageToken", None)
             if not page_token:
                 break
         except Exception as e:
-            print(f"❌ Eroare critică în timpul listării fișierelor din Drive: {e}", flush=True)
+            print(f"{ROSU}❌ Eroare critică în timpul scanării din Drive: {e}{RESET}", flush=True)
             break
             
-    print(f"📊 Scanare completă. S-au păstrat {len(pdf_uri)} fișiere PDF reale și valide în stocarea Cloud.", flush=True)
+    print(f"📊 Scanare completă. S-au validat și păstrat {len(pdf_uri)} fișiere PDF legitime în cloud.", flush=True)
     return pdf_uri
 
 def sparge_numar_si_sufix(nume_fisier):
@@ -90,7 +97,7 @@ def cheie_sortare_sufixe(sufix):
 
 def reseteaza_tot():
     if not TARGET_FOLDER_ID:
-        print("❌ EROARE CRITICĂ: Variabila DRIVE_FOLDER_PDF nu este setată în mediu.")
+        print(f"{ROSU}❌ EROARE CRITICĂ: Variabila DRIVE_FOLDER_PDF nu este setată în mediu.{RESET}")
         sys.exit(1)
 
     service = obtine_drive()
@@ -104,11 +111,11 @@ def reseteaza_tot():
             if nr_baza not in structura_ani[an]: structura_ani[an][nr_baza] = {}
             structura_ani[an][nr_baza][sufix] = {"id": pdf["id"], "size_kb": round(int(pdf.get("size", 0))/1024, 1)}
 
-    print(f"\n💾 Generare registre CSV de control direct în folderul destinație...", flush=True)
+    print(f"\n💾 Generare registre CSV securizate direct în folderul destinație...", flush=True)
     for an, numere_baza in sorted(structura_ani.items()):
         nume_registru = f"status_{an}.csv"
         
-        # Securizăm limita maximă de scanare per an
+        # Limita superioară stabilă de scanat per an
         maxim_nr_baza = min(max(numere_baza.keys()), 1350)
         
         randuri_csv = []
@@ -116,30 +123,30 @@ def reseteaza_tot():
             if nr in numere_baza:
                 sub_editii = numere_baza[nr]
                 
-                # Înregistrăm numărul de bază/simplu
+                # Înregistrăm numărul simplu (dacă există ca PDF valid)
                 if "" in sub_editii:
                     randuri_csv.append([str(nr), "", "descarcat", sub_editii[""]["size_kb"], sub_editii[""]["id"]])
                 else:
                     randuri_csv.append([str(nr), "", "", "0", ""])
                     
-                # Înregistrăm sufixele ierarhice (Bis, Tris, etc.) ordonate corect matematic
+                # Înregistrăm sufixele ordonate curat (Bis, Tris, etc.) confirmate ca PDF-uri reale
                 sufixe_ordonate = sorted([s for s in sub_editii.keys() if s != ""], key=cheie_sortare_sufixe)
                 for sufix in sufixe_ordonate:
                     randuri_csv.append([str(nr), sufix, "descarcat", sub_editii[sufix]["size_kb"], sub_editii[sufix]["id"]])
             else:
-                # Dacă numărul lipsește complet, completăm linia de bază liberă
+                # Dacă numărul lipsește complet în format PDF valid, lăsăm linia goală standard
                 randuri_csv.append([str(nr), "", "", "0", ""])
 
-        # Scrierea fizică a CSV-ului temporar
+        # Scrierea CSV-ului temporar local
         cale_temp = f"temp_{nume_registru}"
         with open(cale_temp, mode="w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
+            writer = csv.writer(f, delimiter=",")
             writer.writerow(["numar_baza", "sufix", "status", "dimensiune_kb", "drive_file_id"])
             writer.writerows(randuri_csv)
                 
         media = MediaFileUpload(cale_temp, mimetype="text/csv")
         
-        # Interogăm Drive-ul pentru a face update direct sau creare curată
+        # Sincronizăm direct registrul cu cel existent din Drive (update sau create)
         query_reg = f"'{TARGET_FOLDER_ID}' in parents and name = '{nume_registru}' and trashed = false"
         existente = service.files().list(
             q=query_reg, 
@@ -157,7 +164,7 @@ def reseteaza_tot():
         if os.path.exists(cale_temp):
             os.remove(cale_temp)
             
-        print(f"    ✅ Registrul istoric [{nume_registru}] a fost sincronizat cu succes în cloud.", flush=True)
+        print(f"    ✅ Registrul istoric [{nume_registru}] a fost securizat și scris cu succes în cloud.", flush=True)
 
 if __name__ == "__main__":
     reseteaza_tot()
