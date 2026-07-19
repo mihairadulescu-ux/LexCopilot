@@ -1,47 +1,45 @@
-name: "📊 Descărcare Nomenclatoare XML Tags"
+name: Actualizare Dictionare XML - Emitenti si Tip Acte
 
 on:
   workflow_dispatch:
     inputs:
-      ruleaza_reset:
-        description: "🔄 Bifează aici dacă vrei să RESETEZI toate tagurile înainte de scanare"
+      forteaza_resetare:
+        description: "Forțează procesarea tuturor fișierelor (True/False)"
         required: false
         type: boolean
         default: false
 
 jobs:
-  download_tags:
-    name: "📊 Extragere Emitenți & Tip Acte"
+  ruleaza_dictionare:
+    name: Extragere Nomenclatoare XML
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Descărcare cod din repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Configurare mediu Python 3.13
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
       - name: Instalare dependențe
         run: |
           python -m pip install --upgrade pip
-          pip install lxml google-api-python-client google-auth requests
+          pip install google-api-python-client google-auth httpx
 
-      - name: Pasul 1 - Reset XML Tags (Rulează DOAR dacă ai bifat căsuța)
-        if: ${{ github.event.inputs.ruleaza_reset == 'true' }}
+      - name: Executare download_XML_dictionaries.py
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRIVE_FOLDER_XML: ${{ vars.DRIVE_FOLDER_XML }}
+          FORTEAZA_RESET: ${{ github.event.inputs.forteaza_resetare }}
           PYTHONUNBUFFERED: "1"
         run: |
-          python -u Scripts_XML/reset_XML_tags.py
-
-      - name: Pasul 2 - Executare scanare și agregare Tags (Unprocessed)
-        env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_XML: ${{ vars.DRIVE_FOLDER_XML }}       
-          METADATA_FOLDER_ID: ${{ vars.METADATA_FOLDER_ID }}   
-          PYTHONUNBUFFERED: "1"
-        run: |
+          # Dacă pe viitor vrei să adaugi un script de resetare totală a flag-urilor din Drive, 
+          # poți activa logica de mai jos. Momentan rulăm direct dicționarele stabil.
+          if [ "$FORTEAZA_RESET" = "true" ]; then
+            echo "🔄 S-a solicitat forțarea procesării..."
+          fi
+          
+          echo "🚀 Pornire analiză ierarhică XML-uri noi..."
           python -u Scripts_XML/download_XML_dictionaries.py
