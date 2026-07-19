@@ -7,9 +7,7 @@ import io
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-import xml.etree.ElementTree as ET
 
-# Culori pentru consistență cu scriptul tău
 VERDE = "\033[92m"
 GALBEN = "\033[93m"
 ROSU = "\033[91m"
@@ -31,7 +29,7 @@ if not FOLDER_IDS:
     ]
 
 def get_drive_service():
-    scopes = ["https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/drive.readonly"]
+    scopes = ["https://www.googleapis.com/auth/drive.readonly"]
     github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     
     if github_secret:
@@ -49,11 +47,14 @@ def extrage_taguri_din_matrice(service, ani_procesare):
     emitenti_gasiti = set()
     tipuri_acte_gasite = set()
 
+    # Regex-uri ultra-rapide care extrag textul dintre taguri ignorand complet namespace-urile
+    regex_emitent = re.compile(r"<[^:>]*:?Emitent>(.*?)</[^:>]*:?Emitent>", re.DOTALL)
+    regex_tip_act = re.compile(r"<[^:>]*:?TipAct>(.*?)</[^:>]*:?TipAct>", re.DOTALL)
+
     for target_year in ani_procesare:
-        print(f"\n{GALBEN}⚡ [Dictionare] Colectare si parsare fisiere pentru anul {target_year}...{RESET}")
+        print(f"\n{GALBEN}⚡ [Dictionare] Scanare fișiere pentru anul {target_year}...{RESET}")
         fișiere_an = []
 
-        # Copiat fidel din logica ta de scanare istoric, dar extragem și ID-ul fișierului pentru descărcare
         for folder_id in FOLDER_IDS:
             page_token = None
             query = f"'{folder_id}' in parents and name contains 'brut_legislatie_{target_year}_pag' and trashed = false"
@@ -79,12 +80,14 @@ def extrage_taguri_din_matrice(service, ani_procesare):
                 continue
 
         total_gasite = len(fișiere_an)
-        print(f"{VERDE}📦 Am descoperit în total {total_gasite} fișiere XML de procesat pentru anul {target_year}.{RESET}")
+        print(f"{VERDE}📦 Am descoperit {total_gasite} fișiere XML pentru anul {target_year}. Începe descărcarea...{RESET}")
 
-        # Procesare și descărcare în memorie
+        if total_gasite == 0:
+            continue
+
         for idx_f, file in enumerate(fișiere_an, 1):
-            if idx_f % 100 == 0 or idx_f == total_gasite:
-                print(f"   ⚙️ Parsare progres: {idx_f}/{total_gasite}...")
+            if idx_f % 250 == 0 or idx_f == total_gasite:
+                print(f"   ⚙️ Procesat text: {idx_f}/{total_gasite}...")
                 
             try:
                 cerere = service.files().get_media(fileId=file['id'])
@@ -94,27 +97,22 @@ def extrage_taguri_din_matrice(service, ani_procesare):
                 while not gata:
                     _, gata = descarcare.next_chunk()
                 
-                conținut_xml = fh.getvalue()
+                # Decodăm textul brut direct
+                xml_text = fh.getvalue().decode("utf-8", errors="ignore")
                 
-                # Folosim etree pentru compatibilitate cu librăriile folosite de tine
-                from lxml import etree as MET
-                radacina = MET.fromstring(conținut_xml)
-                
-                # Namespace-urile pot fi prezente în envelope-ul SOAP salvat brut
-                # Căutăm elementele flexibil după tag local local-name()
-                for item in radacina.xpath("//*[local-name()='Act']"):
-                    emitent = item.xpath("./*[local-name()='Emitent']")
-                    tip_act = item.xpath("./*[local-name()='TipAct']")
+                # Extragere prin regex (evită crash-ul de parser XML dacă fișierul e trunchiat sau are caractere speciale)
+                for em in regex_emitent.findall(xml_text):
+                    val = em.strip()
+                    if val: emitenti_gasiti.add(val)
                     
-                    if emitent and emitent[0].text:
-                        emitenti_gasiti.add(emitent[0].text.strip())
-                    if tip_act and tip_act[0].text:
-                        tipuri_acte_gasite.add(tip_act[0].text.strip())
+                for ta in regex_tip_act.findall(xml_text):
+                    val = ta.strip()
+                    if val: tipuri_acte_gasite.add(val)
                         
-            except Exception as e:
+            except Exception:
                 continue
 
-    # Export fragmente CSV culese pe acest fir al matricei
+    # Export CSV
     string_ani = "_".join([str(a) for a in ani_procesare])
     cale_emitenti = f"lista_emitenti_{string_ani}.csv"
     cale_acte = f"lista_tip_acte_{string_ani}.csv"
@@ -131,7 +129,7 @@ def extrage_taguri_din_matrice(service, ani_procesare):
         for t in sorted(list(tipuri_acte_gasite)):
             writer.writerow([t])
             
-    print(f"{VERDE}✅ Fragmente exportate cu succes pe acest fir al matricei!{RESET}")
+    print(f"{VERDE}✅ Fișierele {cale_emitenti} și {cale_acte} au fost generate cu succes!{RESET}")
 
 if __name__ == "__main__":
     argumente_numerice = []
