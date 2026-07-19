@@ -1,4 +1,4 @@
-name: "🏁 Executie Descarcare Industriala XML"
+name: Executie Descarcare Industriala XML
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ani: ["1990 1991"] # Rulează intervalul dorit sub formă de matrice
+        ani: ["1990 1991"]
 
     steps:
       - name: Verificare Cod Sursa (Checkout)
@@ -19,8 +19,7 @@ jobs:
       - name: Configurare Mediu Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: "pip"
+          python-version: "3.11" # Am scos linia de cache care bloca rularea
 
       - name: Instalare Dependinte Necesare
         run: |
