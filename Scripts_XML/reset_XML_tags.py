@@ -25,31 +25,18 @@ def reseteaza_atribute_xml():
         return
 
     service = obtine_drive()
-    print(f"📂 Identificare locație folder XML (ID: {TARGET_FOLDER_ID})...")
+    print(f"📂 Inițiere scanare folder XML (ID: {TARGET_FOLDER_ID})...")
+    print(f"🔍 Căutare globală în Shared Drives...")
     
-    # PASUL MAGIC: Aflăm dacă folderul aparține unui Shared Drive ca să nu mai luăm eroare de 404
-    drive_id = None
-    try:
-        folder_meta = service.files().get(fileId=TARGET_FOLDER_ID, fields="driveId", supportsAllDrives=True).execute()
-        drive_id = folder_meta.get("driveId")
-    except Exception as e:
-        print(f"{GALBEN}⚠️ Notă: Nu s-a putut citi driveId direct, continuăm cu autodetecție: {e}{RESET}")
-
-    print(f"🔍 Scanare generală fișiere...")
-    
-    # Reconstruim argumentele apelului exact cum vrea Google Drive API
+    # Configurația perfectă pentru Shared Drives: corpora='allDrives' caută automat peste tot!
     kwargs = {
         "q": f"'{TARGET_FOLDER_ID}' in parents and trashed = false",
         "fields": "nextPageToken, files(id, name, description)",
         "pageSize": 1000,
         "supportsAllDrives": True,
-        "includeItemsFromAllDrives": True
+        "includeItemsFromAllDrives": True,
+        "corpora": "allDrives"
     }
-    
-    # Dacă e Shared Drive, API-ul ne obligă să-i dăm corpora="drive" și driveId
-    if drive_id:
-        kwargs["corpora"] = "drive"
-        kwargs["driveId"] = drive_id
 
     page_token = None
     fisiere_marcate = []
@@ -59,7 +46,13 @@ def reseteaza_atribute_xml():
         if page_token:
             kwargs["pageToken"] = page_token
             
-        response = service.files().list(**kwargs).execute()
+        try:
+            response = service.files().list(**kwargs).execute()
+        except Exception as e:
+            print(f"{ROSU}🛑 Eroare critică la citire: {e}{RESET}")
+            print(f"{GALBEN}💡 SFAT: Verifică dacă adresa de email a Service Account-ului are acces de membru în acest Shared Drive!{RESET}")
+            return
+            
         fișiere = response.get("files", [])
         contor_total += len(fișiere)
         
@@ -71,7 +64,7 @@ def reseteaza_atribute_xml():
         if not page_token:
             break
             
-    print(f"📊 Scanare finalizată. Din {contor_total} fișiere, {len(fisiere_marcate)} sunt XML-uri deja procesate.")
+    print(f"📊 Scanare finalizată. Din {contor_total} fișiere găsite, {len(fisiere_marcate)} sunt XML-uri deja marcate.")
 
     if not fisiere_marcate:
         print(f"{VERDE}✨ Totul este deja curat și pregătit pentru scanarea fresh!{RESET}")
