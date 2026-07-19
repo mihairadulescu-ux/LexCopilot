@@ -1,205 +1,168 @@
-# Culori pentru un log frumos în consolă
+import os
+import sys
+import io
+import json
+import csv
+import xml.etree.ElementTree as ET
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+
 VERDE = "\033[92m"
 GALBEN = "\033[93m"
 ROSU = "\033[91m"
 RESET = "\033[0m"
 
-import os
-import io
-import csv
-import json
-from lxml import etree
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaInMemoryUpload, MediaIoBaseDownload
+FOLDER_XML_ID = os.getenv("DRIVE_FOLDER_XML")
 
-# Citim variabila care poate conține mai multe ID-uri separate prin virgulă
-TARGET_FOLDERS_RAW = os.getenv("DRIVE_FOLDER_XML", "")
-METADATA_FOLDER_ID = os.getenv("METADATA_FOLDER_ID")  
 
 def obtine_drive():
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
-        raise EnvironmentError("❌ Lipsește secretul GOOGLE_SERVICE_ACCOUNT_JSON!")
+        raise EnvironmentError("❌ Lipseste secretul GOOGLE_SERVICE_ACCOUNT_JSON!")
     info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
-    creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
+    creds = Credentials.from_service_account_info(
+        info, scopes=["https://www.googleapis.com/auth/drive"]
+    )
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
-def descarca_si_incarca_dictionare_existente(service):
-    emitenti = {}
-    tip_acte = {}
-    for nume_fisier, dictionar in [("dictionar_emitenti.csv", emitenti), ("dictionar_tip_acte.csv", tip_acte)]:
-        query = f"'{METADATA_FOLDER_ID}' in parents and name = '{nume_fisier}' and trashed = false"
-        try:
-            files = service.files().list(
-                q=query, 
-                spaces='drive', 
-                fields='files(id)', 
-                supportsAllDrives=True, 
-                includeItemsFromAllDrives=True
-            ).execute().get('files', [])
+
+def extrage_taguri_din_xml(continut_xml):
+    emitent = None
+    tip_act = None
+    
+    try:
+        context = ET.iterparse(io.StringIO(continut_xml), events=("end",))
+        for event, elem in context:
+            tag_curat = elem.tag.split('}')[-1].lower()
             
-            if files:
-                request = service.files().get_media(fileId=files[0]['id'])
-                fh = io.BytesIO()
-                downloader = MediaIoBaseDownload(fh, request)
-                done = False
-                while not done:
-                    _, done = downloader.next_chunk()
-                fh.seek(0)
-                reader = csv.reader(io.StringIO(fh.getvalue().decode('utf-8')), delimiter=";")
-                next(reader, None)
+            if tag_curat in ["emitent", "autor", "institutie"]:
+                if elem.text and elem.text.strip():
+                    emitent = elem.text.strip()
+            elif tag_curat in ["tipact", "tip_act", "document_type"]:
+                if elem.text and elem.text.strip():
+                    tip_act = elem.text.strip()
+                
+            if emitent and tip_act:
+                break
+    except ET.ParseError:
+        pass
+        
+    return emitent, tip_act
+
+
+def citeste_csv_existent(cale_fisier):
+    """Încarcă elementele existente din CSV-ul local pentru a preveni duplicatele."""
+    elemente = set()
+    if os.path.exists(cale_fisier):
+        try:
+            with open(cale_fisier, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                next(reader, None)  # Sărim peste header
                 for rand in reader:
-                    if len(rand) >= 2:
-                        dictionar[rand[0]] = rand[1]
-        except Exception as e:
-            print(f"{GALBEN}⚠️ Nu s-a putut citi istoricul pentru {nume_fisier}: {e}{RESET}", flush=True)
-    return emitenti, tip_acte
+                    if rand and rand[0].strip():
+                        elemente.add(rand[0].strip())
+        except Exception:
+            pass
+    return elemente
 
-def salveaza_dictionare_in_drive(service, emitenti, tip_acte):
-    for nume_fisier, date, header in [
-        ("dictionar_emitenti.csv", emitenti, ["ID", "Denumire"]),
-        ("dictionar_tip_acte.csv", tip_acte, ["ID", "Denumire"])
-    ]:
-        output = io.StringIO()
-        writer = csv.writer(output, delimiter=";", quotechar='"', quoting=csv.QUOTE_MINIMAL)
-        writer.writerow(header)
-        for k, v in sorted(date.items()):
-            writer.writerow([k, v])
-        content_bytes = output.getvalue().encode('utf-8')
-        query = f"'{METADATA_FOLDER_ID}' in parents and name = '{nume_fisier}' and trashed = false"
-        
-        try:
-            existing = service.files().list(
-                q=query, 
-                spaces='drive', 
-                fields='files(id)', 
-                supportsAllDrives=True, 
-                includeItemsFromAllDrives=True
-            ).execute().get('files', [])
-            
-            media = MediaInMemoryUpload(content_bytes, mimetype="text/csv", resumable=True)
-            if existing:
-                service.files().update(fileId=existing[0]['id'], media_body=media, supportsAllDrives=True).execute()
-            else:
-                meta = {"name": nume_fisier, "parents": [METADATA_FOLDER_ID]}
-                service.files().create(body=meta, media_body=media, supportsAllDrives=True).execute()
-        except Exception as e:
-            print(f"{ROSU}❌ Eroare salvare dicționar {nume_fisier}: {e}{RESET}", flush=True)
 
-def proceseaza_xml_brut():
-    print(f"{VERDE}🚀 Inițiere scanare matriceală XML pentru extragere metadate...{RESET}", flush=True)
-    if not TARGET_FOLDERS_RAW or not METADATA_FOLDER_ID:
-        print(f"{ROSU}🛑 Erori configurare: DRIVE_FOLDER_XML sau METADATA_FOLDER_ID lipsesc!{RESET}", flush=True)
+def salveaza_lista_simpla(cale_fisier, header, set_date):
+    """Salvează un set sortat alfabetic într-un CSV curat cu o singură coloană."""
+    with open(cale_fisier, mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([header])
+        for item in sorted(list(set_date)):
+            writer.writerow([item])
+
+
+def proceseaza_segment_xml():
+    if not FOLDER_XML_ID:
+        print(f"{ROSU}❌ Lipseste ID-ul folderului XML (DRIVE_FOLDER_XML).{RESET}")
         return
 
-    # Extragem lista de ID-uri din variabila globală
-    folder_ids = [fid.strip() for fid in TARGET_FOLDERS_RAW.split(",") if fid.strip()]
-    
     service = obtine_drive()
-    emitenti, tip_acte = descarca_si_incarca_dictionare_existente(service)
-    print(f"📊 Bază inițială încărcată: {len(emitenti)} emitenți cunoscuți, {len(tip_acte)} tipuri de acte.", flush=True)
-
-    toate_fisierele = []
-    print(f"🔍 Identificăm fișiere din cele {len(folder_ids)} locații mapate...", flush=True)
     
-    # Parcurgem fiecare Shared Drive definit
-    for folder_id in folder_ids:
-        page_token = None
-        query = f"'{folder_id}' in parents and trashed = false"
+    # Încărcăm listele curente pentru a funcționa incremental
+    cale_emitenti = "lista_emitenti.csv"
+    cale_acte = "lista_tip_acte.csv"
+    
+    set_emitenti = citeste_csv_existent(cale_emitenti)
+    set_acte = citeste_csv_existent(cale_acte)
+    
+    print(f"{VERDE}🔍 Pasul 1: Scanare fișiere neprocesate în Drive...{RESET}")
+    # Filtrare nativă API: colectăm doar fișierele fără proprietatea processed=true
+    query = (
+        f"'{FOLDER_XML_ID}' in parents and name contains '.xml' "
+        f"and appProperties/processed != 'true' and trashed = false"
+    )
+    
+    fisiere_xml = []
+    page_token = None
+    
+    while True:
+        response = service.files().list(
+            q=query, spaces='drive', 
+            fields="nextPageToken, files(id, name)",
+            pageToken=page_token, pageSize=1000, supportsAllDrives=True,
+            includeItemsFromAllDrives=True, corpora="allDrives"
+        ).execute()
         
-        while True:
-            try:
-                response = service.files().list(
-                    q=query, 
-                    spaces='drive', 
-                    fields='nextPageToken, files(id, name, description)',
-                    pageToken=page_token, 
-                    pageSize=1000, 
-                    supportsAllDrives=True, 
-                    includeItemsFromAllDrives=True
-                ).execute()
-                toate_fisierele.extend(response.get('files', []))
-                page_token = response.get('nextPageToken', None)
-                if not page_token:
-                    break
-            except Exception:
-                try:
-                    query_alt = "name contains '.xml' and trashed = false"
-                    response_alt = service.files().list(
-                        q=query_alt,
-                        spaces='drive',
-                        fields='nextPageToken, files(id, name, description)',
-                        pageToken=page_token,
-                        pageSize=1000,
-                        supportsAllDrives=True,
-                        includeItemsFromAllDrives=True
-                    ).execute()
-                    toate_fisierele.extend(response_alt.get('files', []))
-                    page_token = response_alt.get('nextPageToken', None)
-                    if not page_token:
-                        break
-                except Exception as e_alt:
-                    print(f"{ROSU}⚠️ Nu s-a putut scana locația {folder_id}: {e_alt}{RESET}", flush=True)
-                    break
+        fisiere_xml.extend(response.get("files", []))
+        page_token = response.get("nextPageToken", None)
+        if not page_token:
+            break
 
-    # Filtrare locală Python: extragem STRICT XML-urile care sunt neprocesate
-    fisiere_de_procesat = [
-        f for f in toate_fisierele 
-        if f.get('name', '').lower().endswith('.xml') and f.get('description') != 'processed_for_tags: true'
-    ][:1500] 
-
-    if not fisiere_de_procesat:
-        print(f"{VERDE}🎉 Toate XML-urile din Shared Drives au fost deja procesate! Dicționarele sunt la zi.{RESET}", flush=True)
+    total_fisiere = len(fisiere_xml)
+    if total_fisiere == 0:
+        print("🎉 Toate fișierele XML din folder sunt complet procesate!")
         return
 
-    print(f"🧠 Am găsit {len(fisiere_de_procesat)} XML-uri UNPROCESSED. Începem parsarea de taguri...", flush=True)
-    modificari_detectate = False
-    
-    for idx, fisier in enumerate(fisiere_de_procesat, 1):
-        f_id = fisier['id']
-        f_nume = fisier['name']
+    print(f"📊 Am găsit {total_fisiere} fișiere XML noi de scanat.", flush=True)
+
+    for idx, fx in enumerate(fisiere_xml, 1):
+        nume = fx["name"]
+        fid = fx["id"]
+        
+        print(f"⏳ [{idx}/{total_fisiere}] Extragere dicționar: {nume}...", flush=True)
+        
         try:
-            request = service.files().get_media(fileId=f_id)
+            # 1. Descărcare eficientă în stream memorie
+            request = service.files().get_media(fileId=fid)
             fh = io.BytesIO()
             downloader = MediaIoBaseDownload(fh, request)
             done = False
             while not done:
                 _, done = downloader.next_chunk()
             
-            xml_content = fh.getvalue()
-            context = etree.iterparse(io.BytesIO(xml_content), events=('end',), tag=('Emitent', 'TipAct'))
+            fh.seek(0)
+            continut_text = fh.getvalue().decode('utf-8', errors='ignore')
             
-            for event, elem in context:
-                if elem.tag == 'Emitent':
-                    id_em = elem.findtext('Id') or elem.findtext('{http://schemas.datacontract.org/2004/07/FreeWebService}Id')
-                    nume_em = elem.findtext('Denumire') or elem.findtext('{http://schemas.datacontract.org/2004/07/FreeWebService}Denumire')
-                    if id_em and nume_em and id_em not in emitenti:
-                        emitenti[id_em] = nume_em.strip()
-                        modificari_detectate = True
-                elif elem.tag == 'TipAct':
-                    id_tip = elem.findtext('Id') or elem.findtext('{http://schemas.datacontract.org/2004/07/FreeWebService}Id')
-                    nume_tip = elem.findtext('Denumire') or elem.findtext('{http://schemas.datacontract.org/2004/07/FreeWebService}Denumire')
-                    if id_tip and nume_tip and id_tip not in tip_acte:
-                        tip_acte[id_tip] = nume_tip.strip()
-                        modificari_detectate = True
-                elem.clear()
+            # 2. Extracție etichete
+            emitent, tip_act = extrage_taguri_din_xml(continut_text)
             
-            # Marcăm fișierul ca procesat direct în metadate
-            service.files().update(fileId=f_id, body={'description': 'processed_for_tags: true'}, supportsAllDrives=True).execute()
-            
-            # IMPRESIRE LIVE: Schimbat la afișare din 20 în 20 cu flush=True forțat
-            if idx % 20 == 0 or idx == len(fisiere_de_procesat):
-                print(f"   ↳ {VERDE}[{idx}/{len(fisiere_de_procesat)}]{RESET} Parsat și marcat: {f_nume}", flush=True)
+            if emitent:
+                set_emitenti.add(emitent)
+            if tip_act:
+                set_acte.add(tip_act)
                 
+            # 3. Aplicare flag 'processed' direct în metadatele Google Drive
+            service.files().update(
+                fileId=fid,
+                body={"appProperties": {"processed": "true"}},
+                supportsAllDrives=True
+            ).execute()
+            
+            print(f"    ✅ Valori reținute. Fișier marcat ca procesat în Cloud.")
+            
         except Exception as e:
-            print(f"{ROSU}⚠️ Eroare la citirea tagurilor din {f_nume}: {e}{RESET}", flush=True)
-            continue
+            print(f"    ❌ {ROSU}[Eroare]{RESET} Imposibil de citit {nume}: {str(e)[:60]}")
 
-    if modificari_detectate:
-        print(f"\n💾 S-au găsit taguri noi! Salvăm dicționarele în folderul de metadate...", flush=True)
-        salveaza_dictionare_in_drive(service, emitenti, tip_acte)
-        
-    print(f"{VERDE}🎉 Finalizat! Total curent: {len(emitenti)} emitenți și {len(tip_acte)} tipuri acte.{RESET}", flush=True)
+    # 4. Actualizare nomenclatoare locale (unice, sortate alfabetic)
+    salveaza_lista_simpla(cale_emitenti, "Emitent", set_emitenti)
+    salveaza_lista_simpla(cale_acte, "Tip_Act", set_acte)
+
+    print(f"\n🏁 {VERDE}Nomenclatoarele din [{cale_emitenti}] și [{cale_acte}] au fost aduse la zi!{RESET}")
+
 
 if __name__ == "__main__":
-    proceseaza_xml_brut()
+    proceseaza_segment_xml()
