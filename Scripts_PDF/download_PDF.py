@@ -177,21 +177,18 @@ def ruleaza_sincronizare_matriceala(an_start, an_stop):
                 with httpx.Client(headers=headers, timeout=timeout_resilient, follow_redirects=True) as client:
                     response = client.get(url)
                     
-                    # --- FILTRARE CORECTĂ ȘI STRICTĂ PE CODURI DE EROARE ---
                     if response.status_code == 404:
                         print(f"    ❌ [404] Neexistent sigur pe server. Notat ca neexistent.", flush=True)
                         registru_an[nume_pdf] = "neexistent"
                         modificari_detectate = True
                         continue
                     
-                    # Dacă dă orice alt cod de eroare (ex: 500, 503, 403), NU scriem nimic în CSV, dăm skip direct
                     if response.status_code != 200:
                         print(f"    ⚠️ [Eroare Server {response.status_code}] Skip. Nu se modifică starea în CSV.", flush=True)
                         continue
                         
                     content_type = response.headers.get("Content-Type", "").lower()
                     
-                    # Validăm că este binar PDF adevărat
                     if "application/pdf" in content_type or len(response.content) > 20000:
                         cale_l = director_temp / nume_pdf
                         with open(cale_l, "wb") as f_out:
@@ -206,11 +203,14 @@ def ruleaza_sincronizare_matriceala(an_start, an_stop):
                         registru_an[nume_pdf] = "descarcat"
                         modificari_detectate = True
                     else:
-                        # Dacă a dat status 200 OK, dar a returnat o pagină web în loc de PDF (un HTML mascat),
-                        # înseamnă că poate fi o eroare temporară de sesiune sau mentenanță a site-ului.
-                        # NU îl marcăm ca neexistent, îl lăsăm gol ca să fie reîncercat tura următoare.
-                        print(f"    ⚠️ [HTML primit] Serverul a trimis text în loc de PDF. Skip pentru siguranță.", flush=True)
-                        continue
+                        # --- BLOC DIAGNOSTICARE: CAPTURĂ CONȚINUT HTML ASUNS ---
+                        text_primit = response.text.strip()
+                        snippet_html = text_primit[:500].replace('\n', ' ').replace('\r', '')
+                        print(f"\n🔍 {GALBEN}[DIAGNOSTIC]{RESET} Serverul a trimis status 200 OK dar conținut TEXT/HTML.")
+                        print(f"💾 Conținut detectat (primele 500 caractere):\n{GALBEN}{snippet_html}{RESET}\n")
+                        
+                        print(f"🛑 {ROSU}Oprire automată controlată. Trimite snippet-ul de mai sus pentru analiză!{RESET}")
+                        sys.exit(0)
                         
             except Exception as e:
                 print(f"    ❌ [Eroare Rețea] {str(e)[:70]}. Va fi reîncercat la rularea următoare.", flush=True)
