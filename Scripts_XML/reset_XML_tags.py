@@ -3,7 +3,8 @@ import json
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
-TARGET_FOLDER_ID = os.getenv("DRIVE_FOLDER_XML")
+# Suportă acum un singur ID sau mai multe despărțite prin virgulă (ex: "ID1,ID2,ID3")
+TARGET_FOLDERS_RAW = os.getenv("DRIVE_FOLDER_XML", "")
 
 def obtine_drive():
     print("🔑 [Reset XML] Conectare Google Drive...")
@@ -14,49 +15,57 @@ def obtine_drive():
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 def reseteaza_atribute_xml():
-    if not TARGET_FOLDER_ID:
-        print("🛑 Eroare configurare: DRIVE_FOLDER_XML lipseste din mediu!")
+    if not TARGET_FOLDERS_RAW:
+        print("🛑 Eroare configurare: DRIVE_FOLDER_XML lipsește din mediu!")
         return
 
+    # Împărțim stringul după virgulă și curățăm spațiile goale
+    folder_ids = [fid.strip() for fid in TARGET_FOLDERS_RAW.split(",") if fid.strip()]
+    
     service = obtine_drive()
-    print(f"📂 Scanare folder XML (ID: {TARGET_FOLDER_ID})...")
-    
-    page_token = None
-    # Copiat ID-ul exact de query din scriptul tău vechi de succes
-    query = f"'{TARGET_FOLDER_ID}' in parents and trashed = false"
-    
+    print(f"📂 Inițiere resetare pe {len(folder_ids)} Shared Drive-uri mapate...")
+
     fisiere_marcate = []
     
-    while True:
-        response = service.files().list(
-            q=query, 
-            fields="nextPageToken, files(id, name, description)", 
-            pageToken=page_token, 
-            pageSize=1000,
-            supportsAllDrives=True, 
-            includeItemsFromAllDrives=True, 
-            corpora="user"  # Păstrat fix ca în scriptul tău vechi care mergea
-        ).execute()
+    # Iterăm prin fiecare folder/drive din listă
+    for folder_id in folder_ids:
+        print(f"🔍 Scanare folder XML (ID: {folder_id})...")
+        page_token = None
+        query = f"'{folder_id}' in parents and trashed = false"
         
-        fișiere = response.get("files", [])
-        
-        # Filtrare brută în Python, fără bătăi de cap cu API-ul
-        for f in fișiere:
-            nume = f.get('name', '').lower()
-            descriere = f.get('description', '')
-            
-            if nume.endswith('.xml') and descriere == "processed_for_tags: true":
-                fisiere_marcate.append(f)
+        while True:
+            try:
+                # Interogare nativă și curată pentru Shared Drives, fără corpora="user" care dădea 404
+                response = service.files().list(
+                    q=query, 
+                    fields="nextPageToken, files(id, name, description)", 
+                    pageToken=page_token, 
+                    pageSize=1000,
+                    supportsAllDrives=True, 
+                    includeItemsFromAllDrives=True
+                ).execute()
                 
-        page_token = response.get("nextPageToken", None)
-        if not page_token:
-            break
-            
+                fișiere = response.get("files", [])
+                
+                # Filtrare locală în memoria RAM Python
+                for f in fișiere:
+                    nume = f.get('name', '').lower()
+                    descriere = f.get('description', '')
+                    if nume.endswith('.xml') and descriere == "processed_for_tags: true":
+                        fisiere_marcate.append(f)
+                        
+                page_token = response.get("nextPageToken", None)
+                if not page_token:
+                    break
+            except Exception as e:
+                print(f"⚠️ Nu s-a putut scana folderul {folder_id}: {e}")
+                break
+
     if not fisiere_marcate:
-        print("✨ Nu s-a găsit niciun XML marcat. Totul este pregătit pentru o căutare fresh!")
+        print("✨ Nu s-a găsit niciun XML marcat în locațiile verificate. Totul este pregătit fresh!")
         return
 
-    print(f"⚙️ Am găsit {len(fisiere_marcate)} fișiere. Începe curățarea...")
+    print(f"⚙️ Am găsit în total {len(fisiere_marcate)} fișiere marcate. Începe curățarea metadatelor...")
     for idx, xml in enumerate(fisiere_marcate, 1):
         try:
             service.files().update(
@@ -66,11 +75,11 @@ def reseteaza_atribute_xml():
             ).execute()
             
             if idx % 100 == 0 or idx == len(fisiere_marcate):
-                print(f"    ✅ [{idx}/{len(fisiere_marcate)}] Resetat: {xml['name']}")
+                print(f"    ✅ [{idx}/{len(fisiere_marcate)}] Resetat cu succes: {xml['name']}")
         except Exception as e:
             continue
 
-    print("\n🚀 Resetare completă!")
+    print("\n🚀 Resetare completă pe toate Shared Drive-urile!")
 
 if __name__ == "__main__":
     reseteaza_atribute_xml()
