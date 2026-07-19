@@ -43,7 +43,7 @@ def get_drive_service():
         
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
-def extrage_taguri_din_matrice(service, ani_procesare):
+def extrage_taguri_din_matrice(service, eticheta_sesiune):
     emitenti_gasiti = set()
     tipuri_acte_gasite = set()
 
@@ -52,85 +52,84 @@ def extrage_taguri_din_matrice(service, ani_procesare):
 
     CHUNK_SIZE = 100
 
-    for target_year in ani_procesare:
-        print(f"\n{GALBEN}⚡ [Dictionare] Pornire procesare pentru anul {target_year}...{RESET}", flush=True)
+    print(f"\n{GALBEN}⚡ [Dictionare] Pornire sesiune paralela: {eticheta_sesiune}...{RESET}", flush=True)
+    
+    for folder_id in FOLDER_IDS:
+        page_token = None
+        # Interogare complet independentă de ani: aducem tot ce e XML din folder
+        query = f"'{folder_id}' in parents and mimeType = 'text/xml' and trashed = false"
         
-        for folder_id in FOLDER_IDS:
-            page_token = None
-            query = f"'{folder_id}' in parents and trashed = false"
-            
-            print(f"📡 Trimit cerere către Google API pentru folderul {folder_id[:8]}... Se așteaptă indexarea.", flush=True)
-            
-            contor_total_procesat = 0
-            try:
-                while True:
-                    response = service.files().list(
-                        q=query, 
-                        spaces='drive', 
-                        fields='nextPageToken, files(id, name, description)',
-                        pageSize=CHUNK_SIZE,
-                        pageToken=page_token,
-                        supportsAllDrives=True, 
-                        includeItemsFromAllDrives=True
-                    ).execute()
+        print(f"📡 Scanare flux pe folderul {folder_id[:8]}...", flush=True)
+        
+        contor_total_procesat = 0
+        try:
+            while True:
+                response = service.files().list(
+                    q=query, 
+                    spaces='drive', 
+                    fields='nextPageToken, files(id, name, description)',
+                    pageSize=CHUNK_SIZE,
+                    pageToken=page_token,
+                    supportsAllDrives=True, 
+                    includeItemsFromAllDrives=True
+                ).execute()
 
-                    all_files = response.get('files', [])
-                    if not all_files:
-                        break
+                all_files = response.get('files', [])
+                if not all_files:
+                    break
 
-                    token_an = f"brut_legislatie_{target_year}_pag"
-                    micro_task_files = [
-                        f for f in all_files 
-                        if token_an in f.get('name', '') and f.get('description', '') != 'processed=true'
-                    ]
+                # Filtrare exclusivă în Python pe baza flag-ului de procesare
+                micro_task_files = [f for f in all_files if f.get('description', '') != 'processed=true']
 
-                    if micro_task_files:
-                        print(f"   📦 [Micro-Task] Am primit {len(micro_task_files)} fișiere proaspete din indexul curent.", flush=True)
+                if micro_task_files:
+                    print(f"   📦 [Micro-Task] Am preluat {len(micro_task_files)} fișiere neprocesate.", flush=True)
 
-                        for file in micro_task_files:
-                            try:
-                                cerere = service.files().get_media(fileId=file['id'])
-                                fh = io.BytesIO()
-                                descarcare = MediaIoBaseDownload(fh, cerere)
-                                gata = False
-                                while not gata:
-                                    _, gata = descarcare.next_chunk()
+                    for file in micro_task_files:
+                        try:
+                            cerere = service.files().get_media(fileId=file['id'])
+                            fh = io.BytesIO()
+                            descarcare = MediaIoBaseDownload(fh, cerere)
+                            gata = False
+                            while not gata:
+                                _, gata = descarcare.next_chunk()
+                            
+                            xml_text = fh.getvalue().decode("utf-8", errors="ignore")
+                            
+                            for em in regex_emitent.findall(xml_text):
+                                val = em.strip()
+                                if val: emitenti_gasiti.add(val)
                                 
-                                xml_text = fh.getvalue().decode("utf-8", errors="ignore")
-                                
-                                for em in regex_emitent.findall(xml_text):
-                                    val = em.strip()
-                                    if val: emitenti_gasiti.add(val)
-                                    
-                                for ta in regex_tip_act.findall(xml_text):
-                                    val = ta.strip()
-                                    if val: tipuri_acte_gasite.add(val)
+                            for ta in regex_tip_act.findall(xml_text):
+                                val = ta.strip()
+                                if val: tipuri_acte_gasite.add(val)
 
-                                service.files().update(
-                                    fileId=file['id'],
-                                    body={'description': 'processed=true'},
-                                    fields='id',
-                                    supportsAllDrives=True
-                                ).execute()
-                                
-                                contor_total_procesat += 1
+                            # Marcam fisierul imediat
+                            service.files().update(
+                                fileId=file['id'],
+                                body={'description': 'processed=true'},
+                                fields='id',
+                                supportsAllDrives=True
+                              ).execute()
+                            
+                            contor_total_procesat += 1
 
-                            except Exception:
-                                continue
-                                
-                        print(f"   📊 [Progres] Total salvat și etichetat în acest folder: {contor_total_procesat}", flush=True)
-                    
-                    page_token = response.get('nextPageToken', None)
-                    if not page_token:
-                        break
+                        except Exception:
+                            continue
+                            
+                    print(f"   📊 [Progres Folder] Total extras și marcat: {contor_total_procesat}", flush=True)
+                
+                page_token = response.get('nextPageToken', None)
+                if not page_token:
+                    break
 
-            except Exception as e:
-                print(f"{ROSU}⚠️ Eroare pe folderul {folder_id[:8]}: {e}{RESET}", flush=True)
-                continue
+        except Exception as e:
+            print(f"{ROSU}⚠️ Eroare pe folderul {folder_id[:8]}: {e}{RESET}", flush=True)
+            continue
 
-    string_ani = "_".join([str(a) for a in ani_procesare])
-    cale_emitenti = f"lista_emitenti_{string_ani}.csv"
-    cale_acte = f"lista_tip_acte_{string_ani}.csv"
+    # Salvăm fișierele cu un ID unic bazat pe parametrii sesiunii matricei
+    nume_identificare = eticheta_sesiune.replace(" ", "_")
+    cale_emitenti = f"lista_emitenti_{nume_identificare}.csv"
+    cale_acte = f"lista_tip_acte_{nume_identificare}.csv"
     
     with open(cale_emitenti, mode='w', newline='', encoding='utf-8') as fh:
         writer = csv.writer(fh)
@@ -144,30 +143,10 @@ def extrage_taguri_din_matrice(service, ani_procesare):
         for t in sorted(list(tipuri_acte_gasite)):
             writer.writerow([t])
             
-    print(f"{VERDE}✅ [Gata] Toate fragmentele pentru {string_ani} au fost finalizate!{RESET}", flush=True)
+    print(f"{VERDE}✅ [Gata] Sesiunea {eticheta_sesiune} a finalizat fragmentul de nomenclatoare!{RESET}", flush=True)
 
 if __name__ == "__main__":
-    # COPIAT FIDEL DIN download_XML.py PENTRU PARSARE IDENTICĂ A ARGUMENTELOR
-    argumente_numerice = []
-    
-    for arg in sys.argv[1:]:
-        piese = arg.split()
-        for piesa in piese:
-            if piesa.isdigit():
-                argumente_numerice.append(int(piesa))
-
-    if len(argumente_numerice) == 1:
-        an_s = argumente_numerice[0]
-        an_f = argumente_numerice[0]
-        ani_finali = [an_s]
-    elif len(argumente_numerice) >= 2:
-        an_s = argumente_numerice[0]
-        an_f = argumente_numerice[1]
-        ani_finali = list(range(an_s, an_f + 1))
-    else:
-        # Fallback industrial dacă tot nu prinde nimic
-        ani_finali = [1990, 1991]
-        
-    print(f"{VERDE}🎯 [Dictionare] Pornire fir industrial pentru anii: {ani_finali}{RESET}", flush=True)
+    # Luăm argumentele doar ca etichetă pentru numele fișierului rezultat
+    eticheta = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "sesiune_generica"
     drive_service = get_drive_service()
-    extrage_taguri_din_matrice(drive_service, ani_finali)
+    extrage_taguri_din_matrice(drive_service, eticheta)
