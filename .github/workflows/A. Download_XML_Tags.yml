@@ -1,7 +1,13 @@
-name: Creare dictionare Emitent si tip act
+name: Decarcare dictioare
 
 on:
   workflow_dispatch:
+    inputs:
+      ruleaza_reset:
+        description: 'Bifați aici dacă vreți RESETAREA flagurilor (processed -> false) înainte de rulare'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   procesare_paralela:
@@ -32,10 +38,11 @@ jobs:
           pip install lxml google-auth google-api-python-client zeep
 
       # ======================================================================
-      # PASUL 1: RESETARE FLAGURI (Continuă indiferent de status)
+      # PASUL 1: RESETARE FLAGURI (Rulează DOAR dacă bifa din interfață e activată)
       # ======================================================================
       - name: ⚙️ Rulare Reset XML Tags (Matrice)
-        continue-on-error: true # Bifa de siguranță: dacă nu are ce reseta, trece mai departe
+        if: ${{ github.event.inputs.ruleaza_reset == 'true' }}
+        continue-on-error: true
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
@@ -50,7 +57,7 @@ jobs:
       # PASUL 2: DESCARCARE BRUTA XML (Continuă chiar dacă Just.ro dă timeout)
       # ======================================================================
       - name: 🚀 Rulare Download XML Brut (Matrice)
-        continue-on-error: true # Bifa anti-blocaj: garantează că trecem la taguri chiar dacă descărcarea se oprește parțial
+        continue-on-error: true
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
