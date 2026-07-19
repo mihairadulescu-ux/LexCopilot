@@ -39,7 +39,7 @@ def ruleaza_reset_flaguri(serviciu, foldere_drive, ani_procesare):
         # Interogăm discurile rând pe rând folosind startsWith
         for idx, id_folder in enumerate(foldere_drive, 1):
             print(f"🔍 Căutare XML-uri pentru reset în discul {idx}/{len(foldere_drive)}...")
-            interogare = f"'{id_folder}' in parents and name startsWith 'brut_legislatie_{an}_' and mimeType = 'text/xml' and trashed = false"
+            interogare = f"'{id_folder}' in parents and name contains 'brut_legislatie_{an}_' and mimeType = 'text/xml' and trashed = false"
             
             try:
                 pag_token = None
