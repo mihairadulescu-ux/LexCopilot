@@ -53,13 +53,16 @@ def extrage_taguri_din_matrice(service, ani_procesare):
     CHUNK_SIZE = 100
 
     for target_year in ani_procesare:
-        print(f"\n{GALBEN}⚡ [Dictionare] Scanare pentru anul {target_year}...{RESET}")
+        print(f"\n{GALBEN}⚡ [Dictionare] Pornire procesare pentru anul {target_year}...{RESET}")
         
         for folder_id in FOLDER_IDS:
             page_token = None
-            # Căutare curată acceptată de API: cerem și description în fields pentru filtrare manuală
-            query = f"'{folder_id}' in parents and name contains 'brut_legislatie_{target_year}_pag' and trashed = false"
-
+            # Interogare de baza: eliminam filtrul textual greu ca sa raspunda serverul instant
+            query = f"'{folder_id}' in parents and trashed = false"
+            
+            print(f"📡 Trimit cerere către Google API pentru folderul {folder_id[:8]}... Se așteaptă indexarea.")
+            
+            contor_total_procesat = 0
             try:
                 while True:
                     response = service.files().list(
@@ -74,16 +77,17 @@ def extrage_taguri_din_matrice(service, ani_procesare):
 
                     all_files = response.get('files', [])
                     if not all_files:
-                        page_token = response.get('nextPageToken', None)
-                        if not page_token:
-                            break
-                        continue
+                        break
 
-                    # Filtrare în Python: selectăm doar pe cele care NU sunt marcate ca processed=true
-                    micro_task_files = [f for f in all_files if f.get('description', '') != 'processed=true']
+                    # Filtrare exactă în Python (numele conține anul și structura corectă, iar starea nu e processed)
+                    token_an = f"brut_legislatie_{target_year}_pag"
+                    micro_task_files = [
+                        f for f in all_files 
+                        if token_an in f.get('name', '') and f.get('description', '') != 'processed=true'
+                    ]
 
                     if micro_task_files:
-                        print(f"📦 [Micro-Task] Procesez {len(micro_task_files)} fișiere noi în folderul {folder_id[:8]}...")
+                        print(f"   📦 [Micro-Task] Am primit {len(micro_task_files)} fișiere proaspete din indexul curent.")
 
                         for file in micro_task_files:
                             try:
@@ -104,16 +108,20 @@ def extrage_taguri_din_matrice(service, ani_procesare):
                                     val = ta.strip()
                                     if val: tipuri_acte_gasite.add(val)
 
-                                # Marcare ca procesat
+                                # Marcare instanta ca procesat
                                 service.files().update(
                                     fileId=file['id'],
                                     body={'description': 'processed=true'},
                                     fields='id',
                                     supportsAllDrives=True
                                 ).execute()
+                                
+                                contor_total_procesat += 1
 
                             except Exception:
                                 continue
+                                
+                        print(f"   📊 [Progres] Total salvat și etichetat în acest folder: {contor_total_procesat}")
                     
                     page_token = response.get('nextPageToken', None)
                     if not page_token:
@@ -140,7 +148,7 @@ def extrage_taguri_din_matrice(service, ani_procesare):
         for t in sorted(list(tipuri_acte_gasite)):
             writer.writerow([t])
             
-    print(f"{VERDE}✅ [Gata] Fragmentele pentru {string_ani} au fost salvate!{RESET}")
+    print(f"{VERDE}✅ [Gata] Toate fragmentele pentru {string_ani} au fost finalizate!{RESET}")
 
 if __name__ == "__main__":
     argumente_numerice = []
