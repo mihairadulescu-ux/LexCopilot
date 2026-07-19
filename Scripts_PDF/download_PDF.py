@@ -189,8 +189,23 @@ def ruleaza_sincronizare_matriceala(an_start, an_stop):
                         
                     content_type = response.headers.get("Content-Type", "").lower()
                     
-                    # Dacă primim direct fișier binar PDF (sau mărimea e masivă), îl descărcăm
+                    # Verificare binară
                     if "application/pdf" in content_type or len(response.content) > 30000:
+                        # --- BLOC DE EXAMINARE OCTEȚI PDF REAL ---
+                        total_bytes = len(response.content)
+                        # Extragem primii 5 bytes în format text brut și hexazecimal
+                        magic_bytes_brut = response.content[:5]
+                        magic_bytes_hex = " ".join(f"{b:02x}" for b in magic_bytes_brut)
+                        magic_bytes_text = magic_bytes_brut.decode('utf-8', errors='ignore')
+                        
+                        # Prindem un mic extras din header (primele 150 de caractere text)
+                        header_snippet = response.content[:150].decode('utf-8', errors='ignore').replace('\n', ' ').replace('\r', '')
+                        
+                        print(f"    🔬 [ANATOMIE PDF] Mărime: {total_bytes} bytes ({total_bytes/1024/1024:.2f} MB)")
+                        print(f"    ↳ Magic Bytes (Hex): {VERDE}{magic_bytes_hex}{RESET} | Text: {VERDE}{magic_bytes_text}{RESET}")
+                        print(f"    ↳ Extras Header: {GALBEN}{header_snippet}...{RESET}", flush=True)
+                        # ----------------------------------------
+                        
                         cale_l = director_temp / nume_pdf
                         with open(cale_l, "wb") as f_out:
                             f_out.write(response.content)
@@ -205,7 +220,6 @@ def ruleaza_sincronizare_matriceala(an_start, an_stop):
                         modificari_detectate = True
                     else:
                         text_primit = response.text
-                        # --- FILTRARE FILTRU INTELIGENT: DETECTARE VIEWER GOL (404 MASCAT) ---
                         if "flowpaper_viewer" in text_primit or "flowpaper" in text_primit or "<title>Monitorul Oficial" in text_primit:
                             print(f"    ❌ [HTML Empty Viewer] Interfață fără document binar. Notat ca neexistent.", flush=True)
                             registru_an[nume_pdf] = "neexistent"
