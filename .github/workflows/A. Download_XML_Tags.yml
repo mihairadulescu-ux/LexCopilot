@@ -1,4 +1,4 @@
-name: Actualizare Dictionare XML - Emitenti si Tip Acte
+name: 🏁 Actualizare Dictionare XML - Emitenti si Tip Acte
 
 on:
   workflow_dispatch:
