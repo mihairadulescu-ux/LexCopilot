@@ -11,13 +11,17 @@ RESET = "\033[0m"
 
 TARGET_FOLDERS_RAW = os.getenv("DRIVE_FOLDER_XML", "")
 
+
 def obtine_drive():
     print("🔑 [Reset XML] Conectare Google Drive...")
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
         raise EnvironmentError("❌ Lipsește secretul GOOGLE_SERVICE_ACCOUNT_JSON!")
     info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
-    creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
+    creds = Credentials.from_service_account_info(
+        info, scopes=["https://www.googleapis.com/auth/drive"]
+    )
     return build("drive", "v3", credentials=creds, cache_discovery=False)
+
 
 def reseteaza_atribute_xml():
     if not TARGET_FOLDERS_RAW:
@@ -31,77 +35,63 @@ def reseteaza_atribute_xml():
     fisiere_marcate = []
     
     for folder_id in folder_ids:
-        print(f"🔍 Scanare folder XML (ID: {folder_id})...")
+        print(f"🔍 Scanare fișiere deja procesate în folderul XML (ID: {folder_id})...")
         page_token = None
-        query = f"'{folder_id}' in parents and trashed = false"
+        
+        # Căutăm direct fișierele care au proprietatea processed setată pe 'true'
+        query = (
+            f"'{folder_id}' in parents and name contains '.xml' and "
+            f"appProperties/processed = 'true' and trashed = false"
+        )
         
         while True:
             try:
                 response = service.files().list(
                     q=query, 
                     spaces='drive',
-                    fields="nextPageToken, files(id, name, description)", 
+                    fields="nextPageToken, files(id, name)", 
                     pageToken=page_token, 
                     pageSize=1000,
                     supportsAllDrives=True, 
-                    includeItemsFromAllDrives=True
+                    includeItemsFromAllDrives=True,
+                    corpora="allDrives"
                 ).execute()
                 
-                fișiere = response.get("files", [])
-                for f in fișiere:
-                    nume = f.get('name', '').lower()
-                    descriere = f.get('description', '')
-                    if nume.endswith('.xml') and descriere == "processed_for_tags: true":
-                        fisiere_marcate.append(f)
-                        
+                fisiere_marcate.extend(response.get("files", []))
+                
                 page_token = response.get("nextPageToken", None)
                 if not page_token:
                     break
-            except Exception:
-                try:
-                    query_alt = "name contains '.xml' and trashed = false"
-                    response_alt = service.files().list(
-                        q=query_alt,
-                        spaces='drive',
-                        fields="nextPageToken, files(id, name, description)",
-                        pageToken=page_token,
-                        pageSize=1000,
-                        supportsAllDrives=True,
-                        includeItemsFromAllDrives=True
-                    ).execute()
-                    
-                    for f in response_alt.get("files", []):
-                        if f.get("description") == "processed_for_tags: true":
-                            fisiere_marcate.append(f)
-                    break
-                except Exception as e_alt:
-                    print(f"{ROSU}⚠️ Eroare scanare folder {folder_id}: {e_alt}{RESET}")
-                    break
+            except Exception as e:
+                print(f"{ROSU}⚠️ Eroare scanare folder {folder_id}: {e}{RESET}")
+                break
 
     if not fisiere_marcate:
-        print(f"{VERDE}✨ Nu s-a găsit niciun XML marcat în locațiile verificate. Totul este curat!{RESET}")
+        print(f"{VERDE}✨ Nu s-a găsit niciun XML marcat ca procesat. Totul este curat în Cloud!{RESET}")
         return
 
     total_fisiere = len(fisiere_marcate)
-    print(f"{GALBEN}⚙️ Am găsit în total {total_fisiere} fișiere marcate. Începe curățarea metadatelor...{RESET}", flush=True)
+    print(f"{GALBEN}⚙️ Am găsit în total {total_fisiere} fișiere procesate. Începe ștergerea flag-urilor...{RESET}", flush=True)
     
     for idx, xml in enumerate(fisiere_marcate, 1):
         try:
+            # Resetăm proprietatea setând processed pe 'false' (sau eliminând-o prin re-scriere)
             service.files().update(
                 fileId=xml["id"], 
-                body={"description": ""}, 
+                body={"appProperties": {"processed": "false"}}, 
                 supportsAllDrives=True
             ).execute()
             
-            # Afișăm mai des (din 10 în 10) ca să vedem clar că scriptul muncește
+            # Afișăm progresul din 10 în 10 fișiere ca să știm că mașinăria lucrează
             if idx % 10 == 0 or idx == total_fisiere:
-                print(f"    ✅ [{idx}/{total_fisiere}] Resetat description pentru: {xml['name']}", flush=True)
+                print(f"    ✅ [{idx}/{total_fisiere}] Resetat flag processed pentru: {xml['name']}", flush=True)
         except Exception as e:
             print(f"{ROSU}⚠️ Eroare resetare la fișierul {xml['name']}: {e}{RESET}", flush=True)
             continue
 
-    print(f"\n{VERDE}🎉 [SUCCES] Curățarea etichetelor s-a finalizat complet pentru toate cele {total_fisiere} fișiere!{RESET}\n")
+    print(f"\n{VERDE}🎉 [SUCCES] Curățarea proprietăților s-a finalizat complet pentru toate cele {total_fisiere} fișiere!{RESET}\n")
     print("---------------------------------------------------------------------------------", flush=True)
+
 
 if __name__ == "__main__":
     reseteaza_atribute_xml()
