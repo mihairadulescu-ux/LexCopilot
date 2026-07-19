@@ -20,6 +20,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "" # Forțăm manual oprirea căutării de requirements.txt sau pyproject.toml
 
       - name: Instalare Dependinte Necesare
         run: |
