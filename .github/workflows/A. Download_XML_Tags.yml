@@ -29,4 +29,4 @@ jobs:
           METADATA_FOLDER_ID: ${{ vars.METADATA_FOLDER_ID }}   # Folderul destinație pentru CSV-uri
           PYTHONUNBUFFERED: "1"
         run: |
-          python -u Scripts_XML/download_XML_dictionaries.py
+          python -u Scripts_XML/reset_XML_tags.py
