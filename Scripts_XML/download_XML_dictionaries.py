@@ -14,10 +14,10 @@ def obtine_serviciu_drive():
     foldere_brut = os.getenv("DRIVE_FOLDER_XML")
     
     if not info_json or not foldere_brut:
-        print("🛑 [Eroare] Lipsesc secretele sau variabilele de foldere în mediu!")
+        print("🛑 [Eroare] Lipsesc credențialele sau folderul XML în mediu!")
         sys.exit(1)
         
-    # Spargem lista de foldere prin virgulă (exact ca la download_XML)
+    # Spargem lista de foldere prin virgulă
     liste_foldere = [f.strip() for f in foldere_brut.split(",") if f.strip()]
     
     try:
@@ -31,7 +31,7 @@ def obtine_serviciu_drive():
         sys.exit(1)
 
 # ======================================================================
-# EXTRAGERE TAGURI DIN FIȘIERELE UNUI AN
+# EXTRAGERE TAGURI DIN FIȘIERELE XML (CONVENȚIE: brut_legislatie_{an}_)
 # ======================================================================
 def extrage_taguri_din_matrice(serviciu, foldere_drive, ani_procesare):
     import xml.etree.ElementTree as ET
@@ -45,10 +45,10 @@ def extrage_taguri_din_matrice(serviciu, foldere_drive, ani_procesare):
         print(f"\n⚡ Încep scanarea istorică pentru anul: {an}")
         fișiere_an = []
 
-        # Parcurgem toate cele 4 foldere pentru a aduna fișierele XML ale anului curent
+        # Parcurgem cele 4 foldere folosind startsWith (antiglonț pe underscore)
         for idx, id_folder in enumerate(foldere_drive, 1):
             print(f"🔍 Căutare în discul {idx}/{len(foldere_drive)} (ID: {id_folder[:8]}...)...")
-            interogare = f"'{id_folder}' in parents and name contains 'brut_legislatie_{an}' and mimeType = 'text/xml' and trashed = false"
+            interogare = f"'{id_folder}' in parents and name startsWith 'brut_legislatie_{an}_' and mimeType = 'text/xml' and trashed = false"
             
             try:
                 pag_token = None
@@ -67,15 +67,14 @@ def extrage_taguri_din_matrice(serviciu, foldere_drive, ani_procesare):
             except Exception as e:
                 print(f"⚠️ Atenție: Nu s-a putut scana discul {idx}: {e}")
 
-        print(f"📦 Am descoperit în total {len(fișiere_an)} fișiere XML pentru anul {an} în toate cele 4 discuri.")
+        print(f"📦 Am descoperit în total {len(fișiere_an)} fișiere XML pentru anul {an} în toate discurile.")
 
         # Procesăm fiecare XML localizat în memorie
         for idx_f, f in enumerate(fișiere_an, 1):
             if idx_f % 100 == 0 or idx_f == len(fișiere_an):
-                print(f"⚙️ Procesare: {idx_f}/{len(fișiere_an)}...")
+                print(f"⚙️ Procesare documente: {idx_f}/{len(fișiere_an)}...")
                 
             try:
-                # Descărcăm conținutul direct în memorie, fără fișiere temporare pe disc
                 cerere = serviciu.files().get_media(fileId=f['id'])
                 fh = io.BytesIO()
                 descarcare = MediaIoBaseDownload(fh, cerere)
@@ -84,12 +83,9 @@ def extrage_taguri_din_matrice(serviciu, foldere_drive, ani_procesare):
                     _, gata = descarcare.next_chunk()
                 
                 conținut_xml = fh.getvalue()
-                
-                # Parsare XML rapidă
                 radacina = ET.fromstring(conținut_xml)
                 
-                # Căutăm tagurile de interes în structură
-                # (Ajustează căile/tagurile dacă structura XML diferă în fișierele tale)
+                # Colectăm Emitent și TipAct din structura XML a actului
                 for item in radacina.findall(".//Act"): 
                     emitent = item.find("Emitent")
                     tip_act = item.find("TipAct")
@@ -100,13 +96,10 @@ def extrage_taguri_din_matrice(serviciu, foldere_drive, ani_procesare):
                         tipuri_acte_gasite.add(tip_act.text.strip())
                         
             except Exception as e:
-                # Sărim peste fișierele corupte sau blocate ca să nu oprim execuția
                 continue
 
-    # Salvăm rezultatele parțiale ale acestui fir în fișiere CSV locale
-    # Ele vor fi colectate automat de jobul final din GitHub Actions
+    # Salvare fragmente locale în CSV-uri
     string_ani = "_".join(ani_procesare)
-    
     cale_emitenti = f"lista_emitenti_{string_ani}.csv"
     cale_acte = f"lista_tip_acte_{string_ani}.csv"
     
@@ -124,9 +117,6 @@ def extrage_taguri_din_matrice(serviciu, foldere_drive, ani_procesare):
             
     print(f"✅ Fragmente exportate cu succes: {cale_emitenti} și {cale_acte}")
 
-# ======================================================================
-# PUNCTUL DE INTRARE ÎN SCRIPT
-# ======================================================================
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("🛑 Eroare: Lipsesc anii ca parametru!")
@@ -139,6 +129,5 @@ if __name__ == "__main__":
         ani = argumente
         
     print(f"🎯 [Dictionare] Pornire procesare pentru anii: {ani}")
-    
     client_drive, listă_foldere = obtine_serviciu_drive()
     extrage_taguri_din_matrice(client_drive, listă_foldere, ani)
