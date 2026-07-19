@@ -2,8 +2,6 @@ import os
 import sys
 import csv
 import json
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
 
 def obtine_serviciu_drive():
     info_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -16,6 +14,8 @@ def obtine_serviciu_drive():
     liste_foldere = [f.strip() for f in foldere_brut.split(",") if f.strip()]
     
     try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
         credențiale = service_account.Credentials.from_service_account_info(
             json.loads(info_json),
             scopes=["https://www.googleapis.com/auth/drive"]
@@ -38,14 +38,14 @@ def extrage_taguri_din_matrice(serviciu, foldere_drive, ani_procesare):
         fișiere_an = []
         token_cautare = f"brut_legislatie_{an}_"
 
-        # Listăm tot din cele 4 foldere și filtrăm manual în Python
         for idx, id_folder in enumerate(foldere_drive, 1):
-            print(f"🔍 Listare completă discul {idx}/{len(foldere_drive)} (ID: {id_folder[:8]}...)...")
-            # Interogare de bază: doar să fie în folder și să fie XML, fără filtre pe nume text
-            interogare = f"'{id_folder}' in parents and mimeType = 'text/xml' and trashed = false"
+            print(f"🔍 Listare brută discul {idx}/{len(foldere_drive)} (ID: {id_folder[:8]}...)...")
+            # Tragem TOT ce există în folder, fără nicio restricție de tip sau nume la nivel de API
+            interogare = f"'{id_folder}' in parents"
             
             try:
                 pag_token = None
+                contor_total_folder = 0
                 while True:
                     rezultat = serviciu.files().list(
                         q=interogare,
@@ -54,20 +54,24 @@ def extrage_taguri_din_matrice(serviciu, foldere_drive, ani_procesare):
                         pageToken=pag_token
                     ).execute()
                     
-                    # Filtrare brutală și sigură în Python
-                    for f in rezultat.get('files', []):
-                        if token_cautare in f.get('name', ''):
+                    lista_fisiere = rezultat.get('files', [])
+                    contor_total_folder += len(lista_fisiere)
+                    
+                    for f in lista_fisiere:
+                        nume_f = f.get('name', '')
+                        # Verificăm dacă conține token-ul și se termină în .xml sau .XML
+                        if token_cautare in nume_f and nume_f.lower().endswith('.xml'):
                             fișiere_an.append(f)
                             
                     pag_token = rezultat.get('nextPageToken')
                     if not pag_token:
                         break
+                print(f"   ℹ️ Total obiecte detectate în discul {idx}: {contor_total_folder}")
             except Exception as e:
                 print(f"⚠️ Atenție: Nu s-a putut scana discul {idx}: {e}")
 
-        print(f"📦 Am descoperit în total {len(fișiere_an)} fișiere XML pentru anul {an} în toate discurile.")
+        print(f"📦 Filtrare Python: Am identificat {len(fișiere_an)} fișiere XML valide pentru anul {an}.")
 
-        # Procesăm fiecare XML localizat în memorie
         for idx_f, f in enumerate(fișiere_an, 1):
             if idx_f % 100 == 0 or idx_f == len(fișiere_an):
                 print(f"⚙️ Procesare documente: {idx_f}/{len(fișiere_an)}...")
