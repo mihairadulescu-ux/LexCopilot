@@ -146,15 +146,13 @@ def ruleaza_sincronizare_an_specific(an):
     numere_simple_gasite = []
     for nume_f, status in registru_an.items():
         if status == "descarcat":
-            # Potrivim doar fișierele simple, care nu au litere la final (ex: MO_PI_2002_124.pdf)
             m = re.search(r"MO_PI_\d{4}_(\d+)\.pdf$", nume_f)
             if m:
                 numere_simple_gasite.append(int(m.group(1)))
                 
     ultimul_numar_baza_cert = max(numere_simple_gasite) if numere_simple_gasite else 0
     if ultimul_numar_baza_cert > 0:
-        print(f"🎯 [Barieră Ierarhică] Ultimul număr de bază cert detectat în Drive pentru anul {an} este: {ultimul_numar_baza_cert}. Sufixele de după el vor fi blocate automant.", flush=True)
-    # -------------------------------------------------------------
+        print(f"🎯 [Barieră Ierarhică] Ultimul număr de bază cert detectat în Drive pentru anul {an} este: {ultimul_numar_baza_cert}. Sufixele de după el vor fi blocate automat.", flush=True)
 
     coada_an = []
     
@@ -165,7 +163,7 @@ def ruleaza_sincronizare_an_specific(an):
             continue
             
         if registru_an[f_simplu] == "descarcat":
-            # PROTECȚIE: Dacă numărul curent depășește ultimul număr simplu real, oprim căutarea de sufixe!
+            # PROTECȚIE: Dacă numărul curent depășește ultimul număr simplu real, blocăm adăugarea sufixelor
             if ultimul_numar_baza_cert > 0 and n > ultimul_numar_baza_cert:
                 continue
                 
