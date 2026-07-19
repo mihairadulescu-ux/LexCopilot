@@ -1,4 +1,4 @@
-name: Pipeline Industrial Legislatie XML (Matrice Paralela)
+name: Descarcare dictionare Emitent si tip Acte
 
 on:
   workflow_dispatch: # Permite lansarea manuala din interfata GitHub
