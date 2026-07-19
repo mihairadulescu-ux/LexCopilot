@@ -36,7 +36,7 @@ def extrage_contor_bis(status_string):
 
 def obtine_creds():
     if "GOOGLE_SERVICE_ACCOUNT_JSON" not in os.environ:
-        raise EnvironmentError("❌ Lipsește secretul GOOGLE_SERVICE_ACCOUNT_JSON!")
+        raise EnvironmentError("❌ Lipseste secretul GOOGLE_SERVICE_ACCOUNT_JSON!")
     info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
     return Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
 
@@ -75,13 +75,13 @@ def adu_fisiere_existente_in_drive(drive_service, folder_id, an_start, an_stop):
     while True:
         response = drive_service.files().list(
             q=query, 
-            spaces='drive',  # Forțează corelarea în indexul global
+            spaces='drive',
             fields="nextPageToken, files(id, name, size)", 
             pageToken=page_token, 
             pageSize=1000,
             supportsAllDrives=True, 
             includeItemsFromAllDrives=True,
-            corpora="allDrives"  # CRUCIAL: Caută nativ în Shared Drives fără 404 sau rezultate vide
+            corpora="allDrives"
         ).execute()
         
         for f in response.get("files", []):
@@ -90,7 +90,8 @@ def adu_fisiere_existente_in_drive(drive_service, folder_id, an_start, an_stop):
             size = int(f.get("size", 0))
             status = "ok"
             
-            if size == 1:
+            # Orice fișier foarte mic este marcat drept suspect/placeholder
+            if size <= 100:
                 status = "dummy_verificabil"
                 
             existente[nume] = {"id": f_id, "size": size, "status": status}
@@ -146,9 +147,6 @@ def incarca_sau_actualizeaza_in_drive(drive_service, cale_locala, folder_id, fil
         print(f"❌ [Drive Err] Eroare scriere/update {nume_fisier}: {e}", flush=True)
     return False
 
-# ======================================================================
-# CORE CRAWLER CORECTAT: REQUEST IERARHIC CURAT (GET)
-# ======================================================================
 def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
     url_template = "https://monitoruloficial.ro/Monitorul-Oficial--PI--{numar}--{an}.html"
     
@@ -216,21 +214,25 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
                         "status_actual": status_actual
                     })
             
+            # --- CORECTARE CHIRURGICALĂ PENTRU IERARHII (Tris, Quater) ---
             nume_bis_martor = f"MO_PI_{an}_{n}Bis.pdf"
-            if nume_bis_martor in inventar_drive and inventar_drive[nume_bis_martor]["status"] == "ok":
-                for sufix_rar, tip_rar in [("Tris", "tris"), ("Quater", "quater")]:
-                    numar_complet_rar = f"{n}{sufix_rar}"
-                    nume_pdf_rar = f"MO_PI_{an}_{numar_complet_rar}.pdf"
-                    
-                    if nume_pdf_rar not in inventar_drive:
-                        coada_descarcare.append({
-                            "an": an,
-                            "numar": numar_complet_rar,
-                            "nume_pdf": nume_pdf_rar,
-                            "tip": "special",
-                            "file_id_existent": None,
-                            "status_actual": None
-                        })
+            # Verificăm că Bis existã, are status 'ok' ȘI mărimea lui este cea a unui fișier real (excludem placeholders sub 100 de bytes)
+            if nume_bis_martor in inventar_drive:
+                meta_bis = inventar_drive[nume_bis_martor]
+                if meta_bis["status"] == "ok" and meta_bis["size"] > 100:
+                    for sufix_rar, tip_rar in [("Tris", "tris"), ("Quater", "quater")]:
+                        numar_complet_rar = f"{n}{sufix_rar}"
+                        nume_pdf_rar = f"MO_PI_{an}_{numar_complet_rar}.pdf"
+                        
+                        if nume_pdf_rar not in inventar_drive:
+                            coada_descarcare.append({
+                                "an": an,
+                                "numar": numar_complet_rar,
+                                "nume_pdf": nume_pdf_rar,
+                                "tip": "special",
+                                "file_id_existent": None,
+                                "status_actual": None
+                            })
 
     total_lipsa = len(coada_descarcare)
     if total_lipsa == 0:
@@ -360,12 +362,8 @@ def descarca_monitoare_precalculat(an_start=2000, am_stop=2026):
             pass
     print("\n🎉 Rularea nocturnă s-a finalizat!", flush=True)
 
-# ======================================================================
-# PARSER ROBUST DE INTERVALE (FLEXIBIL PENTRU MATRICEA YML)
-# ======================================================================
 if __name__ == "__main__":
     argumente_numerice = []
-    
     for arg in sys.argv[1:]:
         piese = arg.split()
         for piesa in piese:
