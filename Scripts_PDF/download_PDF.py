@@ -110,8 +110,6 @@ def salveaza_registru_an(service, folder_id, an, registru_local):
         
     try:
         media = MediaFileUpload(cale_temp, mimetype="text/csv")
-        query = f"'{folder_id}' in parents window name = '{nume_csv}' and trashed = false"
-        # Curățăm variantele vechi ca să nu se adune fișiere orfane în Drive
         query = f"'{folder_id}' in parents and name = '{nume_csv}' and trashed = false"
         existing = service.files().list(q=query, spaces='drive', fields='files(id)', supportsAllDrives=True, includeItemsFromAllDrives=True, corpora="allDrives").execute().get('files', [])
         if existing:
@@ -144,6 +142,20 @@ def ruleaza_sincronizare_an_specific(an):
         if registru_an.get(nume_f) != "descarcat":
             registru_an[nume_f] = "descarcat"
         
+    # --- CALCULARE DINAMICĂ A ULTIMULUI NUMĂR DE BAZĂ EXISTENT ---
+    numere_simple_gasite = []
+    for nume_f, status in registru_an.items():
+        if status == "descarcat":
+            # Potrivim doar fișierele simple, care nu au litere la final (ex: MO_PI_2002_124.pdf)
+            m = re.search(r"MO_PI_\d{4}_(\d+)\.pdf$", nume_f)
+            if m:
+                numere_simple_gasite.append(int(m.group(1)))
+                
+    ultimul_numar_baza_cert = max(numere_simple_gasite) if numere_simple_gasite else 0
+    if ultimul_numar_baza_cert > 0:
+        print(f"🎯 [Barieră Ierarhică] Ultimul număr de bază cert detectat în Drive pentru anul {an} este: {ultimul_numar_baza_cert}. Sufixele de după el vor fi blocate automant.", flush=True)
+    # -------------------------------------------------------------
+
     coada_an = []
     
     for n in range(1, MAX_NUMERE_AN + 1):
@@ -153,6 +165,10 @@ def ruleaza_sincronizare_an_specific(an):
             continue
             
         if registru_an[f_simplu] == "descarcat":
+            # PROTECȚIE: Dacă numărul curent depășește ultimul număr simplu real, oprim căutarea de sufixe!
+            if ultimul_numar_baza_cert > 0 and n > ultimul_numar_baza_cert:
+                continue
+                
             f_bis = f"MO_PI_{an}_{n}Bis.pdf"
             f_special = f"MO_PI_{an}_{n}S.pdf"
             if f_special not in registru_an or registru_an[f_special] == "":
@@ -189,16 +205,12 @@ def ruleaza_sincronizare_an_specific(an):
             continue
             
         print(f"⏳ [{idx}/{total_an}] Solicitare server ({an}): {nume_pdf}...", flush=True)
-        
-        # Pauză strategică variabilă, mărită ușor pentru a reduce presiunea pe firewall
         time.sleep(random.uniform(1.0, 2.2))
         
         try:
             headers = {"User-Agent": random.choice(USER_AGENTS), "Referer": "https://monitoruloficial.ro/"}
             with httpx.Client(headers=headers, timeout=timeout_resilient, follow_redirects=True) as client:
                 response = client.get(url)
-                
-                # Resetam contorul de erori retea daca request-ul s-a incheiat cu un cod HTTP valid
                 erori_consecutive_retea = 0
                 
                 if response.status_code == 404:
@@ -243,7 +255,6 @@ def ruleaza_sincronizare_an_specific(an):
             erori_consecutive_retea += 1
             print(f"    ❌ {ROSU}[Eroare Rețea / Conexiune Sever]{RESET} Detalii: {str(e)[:90]}", flush=True)
             
-            # --- STRATEGIE DE SALVARE DE URGENȚĂ LA CĂDEREA CONEXIUNII ---
             if modificari_nesalvate > 0:
                 print(f"🚨 Conexiune instabilă! Forțăm salvarea datelor strânse până acum...", flush=True)
                 salveaza_registru_an(service, TARGET_FOLDER_ID, an, registru_an)
