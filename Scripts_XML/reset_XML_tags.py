@@ -28,6 +28,7 @@ def reseteaza_atribute_xml():
         print(f"{ROSU}🛑 Eroare configurare: DRIVE_FOLDER_XML lipsește din mediu!{RESET}")
         return
 
+    # Curățare completă whitespace
     folder_ids = [fid.strip() for fid in TARGET_FOLDERS_RAW.split(",") if fid.strip()]
     service = obtine_drive()
     print(f"{VERDE}📂 Inițiere resetare pe {len(folder_ids)} locații...{RESET}")
@@ -38,7 +39,7 @@ def reseteaza_atribute_xml():
         print(f"🔍 Scanare folder XML (ID: {folder_id})...")
         page_token = None
         
-        # Sintaxa nativă stabilă pentru proprietățile aplicației
+        # Sintaxă nativă curată pentru appProperties
         query = (
             f"'{folder_id}' in parents and name contains '.xml' and "
             f"appProperties has {{ key='processed' and value='true' }} and trashed = false"
@@ -61,19 +62,19 @@ def reseteaza_atribute_xml():
                 if not page_token:
                     break
             except Exception as e:
-                print(f"{ROSU}⚠️ Eroare scanare folder {folder_id}: {e}{RESET}")
+                # Protecție: dacă folderul e invalid/404, nu oprim execuția pentru restul
+                print(f"{ROSU}⚠️ Folder inaccesibil sau ID greșit ({folder_id}): Erori în lanț evitate.{RESET}")
                 break
 
     if not fisiere_marcate:
-        print(f"{VERDE}✨ Nu s-a găsit niciun XML marcat ca procesat. Totul este curat în Cloud!{RESET}")
+        print(f"{VERDE}✨ Nu s-a găsit niciun XML marcat ca procesat.{RESET}")
         return
 
     total_fisiere = len(fisiere_marcate)
-    print(f"{GALBEN}⚙️ Am găsit în total {total_fisiere} fișiere procesate. Începe ștergerea flag-urilor...{RESET}", flush=True)
+    print(f"{GALBEN}⚙️ Începe ștergerea flag-urilor pentru {total_fisiere} fișiere...{RESET}", flush=True)
     
     for idx, xml in enumerate(fisiere_marcate, 1):
         try:
-            # Trecem proprietatea pe 'false' ca să poată fi re-procesat
             service.files().update(
                 fileId=xml["id"], 
                 body={"appProperties": {"processed": "false"}}, 
