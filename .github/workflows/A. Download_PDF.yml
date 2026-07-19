@@ -1,17 +1,17 @@
-name: "🚀 REGELE PDF - Sincronizare Unificata"
+name: REGELE PDF - Sincronizare Unificata
 
 on:
   workflow_dispatch:
     inputs:
       ruleaza_reset:
-        description: "🧹 Bifează aici pentru CURĂȚARE TOTALĂ dummy-uri și RECONSTRUCȚIE registre CSV"
+        description: "Curatare totala dummy-uri si reconstructie registre CSV"
         required: false
         type: boolean
         default: false
 
 jobs:
   sync_pdfs:
-    name: "⚡ Procesare Matriceală PDF"
+    name: Procesare Matriceala PDF
     runs-on: ubuntu-latest
     
     steps:
@@ -28,7 +28,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install google-api-python-client google-auth httpx
 
-      - name: 🧹 PASUL A: Reset & Indexare Istorică (Rulează DOAR dacă este bifat manual)
+      - name: PASUL A - Reset si Indexare Istorica
         if: ${{ github.event.inputs.ruleaza_reset == 'true' }}
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
@@ -37,7 +37,7 @@ jobs:
         run: |
           python -u Scripts_PDF/reset_and_index.py
 
-      - name: 📥 PASUL B: Executare Crawler Inteligent bazat pe CSV
+      - name: PASUL B - Executare Crawler bazat pe CSV
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRIVE_FOLDER_PDF: ${{ vars.DRIVE_FOLDER_PDF }}
