@@ -41,10 +41,7 @@ jobs:
           STRATEGIE_RESET: ${{ github.event.inputs.ruleaza_reset }}
           PYTHONUNBUFFERED: "1"
         run: |
-          # Forțăm exportarea lor ca variabile de mediu globale în interiorul acestei instanțe Bash
-          export GOOGLE_SERVICE_ACCOUNT_JSON="${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}"
-          export DRIVE_FOLDER_PDF="${{ vars.DRIVE_FOLDER_PDF }}"
-          export AN_TINTA="${{ matrix.an }}"
+          # Nu mai folosim export manual pentru JSON. GitHub Actions o face deja nativ si sigur in spate.
           
           # Verificăm variabila din env pentru a rula scriptul de inventar/reset
           if [ "$STRATEGIE_RESET" = "true" ]; then
@@ -54,5 +51,5 @@ jobs:
             echo "▶️ Se sare peste reset. Se folosește registrul existent."
           fi
           
-          # Executare crawler cu mediul complet injectat global
+          # Executare crawler cu mediul nativ pastrat curat
           python -u Scripts_PDF/download_PDF.py $AN_TINTA
