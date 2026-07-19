@@ -1,4 +1,4 @@
-name: Decarcare dictioare
+name: Descarcare Dictionare
 
 on:
   workflow_dispatch:
@@ -12,8 +12,14 @@ on:
 jobs:
   procesare_paralela:
     runs-on: ubuntu-latest
+    
+    # Injectăm secretele direct AICI, la nivel global de job, ca să fie vizibile peste tot instant!
+    env:
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
+
     strategy:
-      fail-fast: false # Împiedică închiderea celorlalte fire dacă unul singur dă eroare
+      fail-fast: false
       matrix:
         ani: [
           "1990 1991", "1992 1993", "1994 1995", "1996 1997", "1998 1999",
@@ -29,7 +35,7 @@ jobs:
       - name: Configurare Mediu Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.10'
 
       - name: Instalare Dependinte Industriale
         run: |
@@ -37,14 +43,11 @@ jobs:
           pip install lxml google-auth google-api-python-client zeep
 
       # ======================================================================
-      # PASUL 1: RESETARE FLAGURI (Rulează DOAR dacă bifa din interfață e activată)
+      # PASUL 1: RESETARE FLAGURI (Vizibilitate garantată a mediului global)
       # ======================================================================
       - name: ⚙️ Rulare Reset XML Tags (Matrice)
         if: ${{ github.event.inputs.ruleaza_reset == 'true' }}
         continue-on-error: true
-        env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
         run: |
           if [ -f Scripts_XML/reset_XML_tags.py ]; then
             python Scripts_XML/reset_XML_tags.py ${{ matrix.ani }}
@@ -53,13 +56,10 @@ jobs:
           fi
 
       # ======================================================================
-      # PASUL 2: DESCARCARE BRUTA XML (Continuă chiar dacă Just.ro dă timeout)
+      # PASUL 2: DESCARCARE BRUTA XML
       # ======================================================================
       - name: 🚀 Rulare Download XML Brut (Matrice)
         continue-on-error: true
-        env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
         run: python Scripts_XML/download_XML.py ${{ matrix.ani }}
 
       # ======================================================================
@@ -67,9 +67,6 @@ jobs:
       # ======================================================================
       - name: 🔍 Rulare Extragere Dictionare (Matrice)
         continue-on-error: true
-        env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
         run: |
           if [ -f Scripts_XML/download_dictionaries.py ]; then
             python Scripts_XML/download_dictionaries.py ${{ matrix.ani }}
