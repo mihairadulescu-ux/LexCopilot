@@ -163,14 +163,14 @@ def ruleaza_sincronizare_matriceala(an_start, an_stop):
             print(f"🎉 Toate elementele ierarhice pentru anul {an} sunt la zi în CSV. Trecem la următorul an.", flush=True)
             continue
             
-        print(f"🚀 Începe verificarea a {total_an} fișiere lipsă din structura anului {an}...", flush=True)
+        print(f"🚀 Începe verificarea a {total_an} fișiere lipsă dintr-un total mapat al anului {an}...", flush=True)
         
         for idx, item in enumerate(coada_an, 1):
             nume_pdf = item["nume"]
             url = url_template.format(numar=item["numar"], an=an)
             
             print(f"⏳ [{idx}/{total_an}] Solicitare server: {nume_pdf}...", flush=True)
-            time.sleep(random.uniform(0.6, 1.4))
+            time.sleep(random.uniform(0.5, 1.2))
             
             try:
                 headers = {"User-Agent": random.choice(USER_AGENTS), "Referer": "https://monitoruloficial.ro/"}
@@ -189,7 +189,8 @@ def ruleaza_sincronizare_matriceala(an_start, an_stop):
                         
                     content_type = response.headers.get("Content-Type", "").lower()
                     
-                    if "application/pdf" in content_type or len(response.content) > 20000:
+                    # Dacă primim direct fișier binar PDF (sau mărimea e masivă), îl descărcăm
+                    if "application/pdf" in content_type or len(response.content) > 30000:
                         cale_l = director_temp / nume_pdf
                         with open(cale_l, "wb") as f_out:
                             f_out.write(response.content)
@@ -203,16 +204,15 @@ def ruleaza_sincronizare_matriceala(an_start, an_stop):
                         registru_an[nume_pdf] = "descarcat"
                         modificari_detectate = True
                     else:
-                        # --- CAPTURĂ EXTINSĂ DUMUMP HTML (3000 CARACTERE) ---
                         text_primit = response.text
-                        snippet_extins = text_primit[:3000]
-                        
-                        print(f"\n🔍 {GALBEN}[DIAGNOSTIC EXTINS - COD HTTP 200 DAR CONȚINUT TEXT]{RESET}")
-                        print(f"💾 Structura brută primită de la server (primele 3000 de caractere):\n")
-                        print(f"{GALBEN}{snippet_extins}{RESET}\n")
-                        print(f"----------------------------------------------------------------------")
-                        print(f"🛑 {ROSU}Oprire automată pentru analiză completă. Trimite textul de mai sus!{RESET}")
-                        sys.exit(0)
+                        # --- FILTRARE FILTRU INTELIGENT: DETECTARE VIEWER GOL (404 MASCAT) ---
+                        if "flowpaper_viewer" in text_primit or "flowpaper" in text_primit or "<title>Monitorul Oficial" in text_primit:
+                            print(f"    ❌ [HTML Empty Viewer] Interfață fără document binar. Notat ca neexistent.", flush=True)
+                            registru_an[nume_pdf] = "neexistent"
+                            modificari_detectate = True
+                        else:
+                            print(f"    ⚠️ [HTML Necunoscut / Mentenanță] Structură text nesigură. Skip.", flush=True)
+                            continue
                         
             except Exception as e:
                 print(f"    ❌ [Eroare Rețea] {str(e)[:70]}. Va fi reîncercat la rularea următoare.", flush=True)
