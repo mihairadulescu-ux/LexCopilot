@@ -3,10 +3,14 @@ import sys
 import json
 import io
 import re
+import socket  # Protecție anti-freeze la nivel de rețea
 from datetime import datetime, timezone
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+
+# Setează un timeout global de 30 secunde pentru orice cerere de rețea
+socket.setdefaulttimeout(30.0)
 
 VERDE = "\033[92m"
 GALBEN = "\033[93m"
@@ -58,34 +62,41 @@ def descarca_index_existenta_din_drive(service):
         print(f"⚠️ Nu s-a putut descărca fișierul index folosind XML_STORAGE_INDEX: {e}", flush=True)
 
 
-def salveaza_index_in_drive(service, fisiere_map, e_partial=False):
-    """Salvează starea pe disc și face update direct în Drive."""
+def salveaza_local_checkpoint(fisiere_map):
+    """Salvare intermediară pe disc local + mesaj simplu în consolă."""
     acum_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    
-    structura_finala = {
+    structura = {
         "last_updated": acum_iso,
         "total_fisiere": len(fisiere_map),
         "fisiere": fisiere_map
     }
-
     with open(CALE_INDEX_LOCAL, "w", encoding="utf-8") as f:
-        json.dump(structura_finala, f, ensure_ascii=False, indent=2)
+        json.dump(structura, f, ensure_ascii=False, indent=2)
+    print(f"💾 Salvat local: {len(fisiere_map)} fișiere.", flush=True)
+
+
+def salveaza_final_in_drive(service, fisiere_map):
+    """Upload-ul final master pe Google Drive la finalizarea completă a scanării."""
+    salveaza_local_checkpoint(fisiere_map)
 
     if not INDEX_FILE_ID:
+        print("⚠️ 'XML_STORAGE_INDEX' nu este configurat. Salvat doar pe disc local.", flush=True)
         return
 
-    media = MediaFileUpload(CALE_INDEX_LOCAL, mimetype='application/json', resumable=True)
-    eticheta = "CHECKPOINT INTERMEDIAR (10k)" if e_partial else "MASTER INDEX FINAL"
-
-    try:
-        service.files().update(
-            fileId=INDEX_FILE_ID,
-            media_body=media,
-            supportsAllDrives=True
-        ).execute()
-        print(f"💾 [Cloud Checkpoint] {eticheta} salvat pe Drive! Total: {len(fisiere_map)} fișiere.", flush=True)
-    except Exception as e:
-        print(f"⚠️ Eroare la salvarea pe Drive ({INDEX_FILE_ID}): {e}", flush=True)
+    print(f"\n{GALBEN}📤 [Upload Drive] Se încarcă varianta finală a indexului pe Google Drive...{RESET}", flush=True)
+    
+    for incercare in range(1, 4):
+        try:
+            media = MediaFileUpload(CALE_INDEX_LOCAL, mimetype='application/json', resumable=True)
+            service.files().update(
+                fileId=INDEX_FILE_ID,
+                media_body=media,
+                supportsAllDrives=True
+            ).execute()
+            print(f"{VERDE}✅ [Master Index Update Successful] Fișier sincronizat pe ID: {INDEX_FILE_ID}!{RESET}", flush=True)
+            break
+        except Exception as e:
+            print(f"⚠️ Eroare upload master pe Drive (încercarea {incercare}/3): {e}", flush=True)
 
 
 def curata_cos_de_gunoi_targetat(service):
@@ -216,8 +227,6 @@ def construieste_sau_actualizeaza_index():
         print(f"🚀 [FULL INDEX] Se construiește indexul complet de la zero...", flush=True)
 
     pattern_nume = re.compile(r"brut_legislatie_(\d+)_pag(\d+)\.xml")
-    
-    # Contor global pentru verificat pragul de 10.000 fișiere adăugate/procesate
     contor_fisiere_noi = 0
 
     # STEP 1: Scanăm cele 4 foldere de XML pentru a adăuga fișiere
@@ -237,7 +246,7 @@ def construieste_sau_actualizeaza_index():
                 response = service.files().list(
                     q=query,
                     spaces='drive',
-                    fields='nextPageToken, files(id, name)',  # Fără 'description' (fără opțiunea processed)
+                    fields='nextPageToken, files(id, name)',
                     pageSize=1000,
                     pageToken=page_token,
                     supportsAllDrives=True,
@@ -250,7 +259,6 @@ def construieste_sau_actualizeaza_index():
 
                 for f in files:
                     nume = f['name']
-                    
                     match = pattern_nume.search(nume)
                     an_val = int(match.group(1)) if match else None
                     pag_val = int(match.group(2)) if match else None
@@ -268,9 +276,9 @@ def construieste_sau_actualizeaza_index():
                     contor_folder += 1
                     contor_fisiere_noi += 1
 
-                    # 💾 SALVARE AUTOMATĂ PE DRIVE LA FIECARE 10.000 DE FIȘIERE
+                    # Anunță exact în consolă când se face salvarea intermediară la fiecare 10k
                     if contor_fisiere_noi % 10000 == 0:
-                        salveaza_index_in_drive(service, fisiere_map, e_partial=True)
+                        salveaza_local_checkpoint(fisiere_map)
 
                 page_token = response.get('nextPageToken', None)
                 if not page_token:
@@ -284,9 +292,8 @@ def construieste_sau_actualizeaza_index():
     # STEP 2: Aplicăm toate actualizările din folderul TEMPORARY_XML_INDEXES (cronologic)
     fisiere_map = aplica_si_curata_indexuri_temporare(service, fisiere_map)
 
-    # STEP 3: Salvare finală completă
-    print(f"\n{VERDE}✅ [Master Index Salvat Final] Total în index: {len(fisiere_map)} fișiere unice.{RESET}", flush=True)
-    salveaza_index_in_drive(service, fisiere_map, e_partial=False)
+    # STEP 3: Upload-ul master în Drive are loc la final
+    salveaza_final_in_drive(service, fisiere_map)
 
 
 if __name__ == "__main__":
