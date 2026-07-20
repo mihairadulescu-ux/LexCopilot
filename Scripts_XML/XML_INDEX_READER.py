@@ -3,6 +3,7 @@ import json
 import io
 import re
 from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.errors import HttpError
 
 CALE_INDEX_LOCAL = "index_xml.json"
 
@@ -23,7 +24,7 @@ FOLDERE_XML_IDS = [fid.strip() for fid in FOLDERE_XML_RAW.split(",") if fid.stri
 
 
 def descarca_index_master(service):
-    """PASUL 1: Descărcare directă sau auto-descoperire dinamică a indexului master."""
+    """PASUL 1: Descărcare directă sau auto-descoperire dinamică a indexului master cu suport Shared Drives."""
     target_id = INDEX_FILE_ID
 
     # Dacă variabila lipsește sau conține ID-ul vechi, căutăm dinamic index_xml.json în folderul de metadate
@@ -31,7 +32,13 @@ def descarca_index_master(service):
         folder_meta = os.getenv("METADATA_FOLDER_ID", "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR").strip()
         try:
             query = f"'{folder_meta}' in parents and name = 'index_xml.json' and trashed = false"
-            res = service.files().list(q=query, spaces='drive', fields='files(id)', supportsAllDrives=True).execute()
+            res = service.files().list(
+                q=query, 
+                spaces='drive', 
+                fields='files(id)', 
+                supportsAllDrives=True, 
+                includeItemsFromAllDrives=True
+            ).execute()
             files = res.get('files', [])
             if files:
                 target_id = files[0]['id']
@@ -63,7 +70,7 @@ def descarca_index_master(service):
 def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
     """
     PASUL 2: Citește și aplică micro-indecșii existenți în TEMPORARY_XML_INDEXES 
-    în ordine cronologică (după createdTime), actualizând starea în memorie.
+    în ordine cronologică (după createdTime), cu suport complet pentru Shared Drives.
     """
     if not FOLDER_TEMP_INDEXES_ID:
         return fisiere_map
@@ -89,6 +96,7 @@ def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
         for log_file in loguri_temp:
             file_id = log_file['id']
             try:
+                # 🚀 Fix cheie: supportsAllDrives=True la descărcarea conținutului micro-indexului
                 content_bytes = service.files().get_media(fileId=file_id, supportsAllDrives=True).execute()
                 data_log = json.loads(content_bytes.decode('utf-8'))
                 flag_updates = data_log.get('flag_updates', {})
@@ -103,7 +111,12 @@ def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
                             if nume_f in fisiere_map:
                                 for key, val in modi_flags.items():
                                     fisiere_map[nume_f][key] = val
-                                mutații_aplicate += 1
+                            else:
+                                fisiere_map[nume_f] = modi_flags
+                            mutații_aplicate += 1
+            except HttpError as err:
+                if err.resp.status in [404, 410]:
+                    continue  # Ignorăm dacă a fost șters deja de consolidare
             except Exception:
                 pass
 
