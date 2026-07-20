@@ -31,7 +31,7 @@ FOLDERE_XML_IDS = [fid.strip() for fid in FOLDERE_XML_RAW.split(",") if fid.stri
 
 
 def descarca_index_master(service):
-    """Descărcare ultra-rapidă directă prin ID-ul fix furnizat în XML_STORAGE_INDEX."""
+    """PASUL 1: Descărcare directă a indexului master prin ID-ul fix furnizat în XML_STORAGE_INDEX."""
     if not INDEX_FILE_ID:
         print("ℹ️ 'XML_STORAGE_INDEX' nu este setat. Se începe cu un index vid local.", flush=True)
         return {"last_updated": None, "total_fisiere": 0, "fisiere": {}}
@@ -55,7 +55,7 @@ def descarca_index_master(service):
 
 def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
     """
-    CITEȘTE și aplică micro-indecșii existenți în TEMPORARY_XML_INDEXES 
+    PASUL 2: CITEȘTE și aplică micro-indecșii existenți în TEMPORARY_XML_INDEXES 
     ÎN ORDINE CRONOLOGICĂ (după createdTime), actualizând starea în memorie.
     """
     if not FOLDER_TEMP_INDEXES_ID:
@@ -113,19 +113,24 @@ def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
 
 def obtine_index_virtual(service):
     """
+    SECVENȚA EXACTĂ DE EXECUȚIE:
     1. Descarcă Master Index (index_xml.json).
-    2. Scanează noutățile (Delta) apărute pe Drive după timestamp.
-    3. CITEȘTE și aplică peste el toți micro-indecșii temporari ordonați cronologic.
-    4. Returnează Indexul Virtual perfect, actualizat 100% la secundă!
+    2. CITEȘTE și aplică toți micro-indecșii temporari neconsolidați (cronologic).
+    3. [ULTIMA ETAPĂ] Verificarea Fulger Delta: Scanează noutățile (XML-uri noi) apărute pe Drive până la această secundă.
+    4. Returnează Indexul Virtual perfect.
     """
+    # Pasul 1: Descărcăm starea de bază din master
     data_master = descarca_index_master(service)
     fisiere_map = data_master.get("fisiere", {})
     last_updated = data_master.get("last_updated")
 
+    # Pasul 2: Aplicăm mutațiile recente din micro-indecșii temporari
+    fisiere_map = aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map)
+
+    # Pasul 3 (ULTIMUL): Verificarea Fulger Delta pe Google Drive după fișiere XML ultra-noi
     pattern_nume = re.compile(r"brut_legislatie_(\d+)_pag(\d+)\.xml")
     noutati_gasite = 0
 
-    # Step A: Căutăm Delta (fișiere XML noi create între timp)
     if last_updated:
         for folder_id in FOLDERE_XML_IDS:
             query = f"'{folder_id}' in parents and name contains 'brut_legislatie_' and modifiedTime > '{last_updated}' and trashed = false"
@@ -146,6 +151,7 @@ def obtine_index_virtual(service):
                     files = response.get('files', [])
                     for f in files:
                         nume = f['name']
+                        # Adăugăm fișierul nou doar dacă nu există deja în hartă
                         if nume not in fisiere_map:
                             desc = f.get('description', '')
                             match = pattern_nume.search(nume)
@@ -169,10 +175,7 @@ def obtine_index_virtual(service):
                 print(f"⚠️ Eroare verificare delta folder {folder_id[:8]}: {e}", flush=True)
 
     if noutati_gasite > 0:
-        print(f"⚡ [Index Virtual] Identificate {noutati_gasite} fișiere XML ultra-noi apărute pe Drive.", flush=True)
-
-    # Step B: Aplicăm în memorie toate micro-indecșii temporari netrecuți în Master (cronologic)
-    fisiere_map = aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map)
+        print(f"⚡ [Verificare Delta Finală] Identificate {noutati_gasite} fișiere XML ultra-noi apărute pe Drive.", flush=True)
 
     data_master["fisiere"] = fisiere_map
     data_master["total_fisiere"] = len(fisiere_map)
@@ -182,7 +185,7 @@ def obtine_index_virtual(service):
 def obtine_fisiere_neprocesate(service, nume_flag="Tags_extracted"):
     """
     Subrutină helper: Returnează o listă de fișiere neprocesate, 
-    garantat curate (luând în calcul master-ul + noutățile + micro-indecșii neconsolidați).
+    garantat curate (luând în calcul master-ul + micro-indecșii + noutățile ultimei secunde).
     """
     index_v = obtine_index_virtual(service)
     fisiere_map = index_v.get("fisiere", {})
