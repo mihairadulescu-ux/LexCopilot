@@ -19,6 +19,10 @@ from zeep import Client
 from zeep.transports import Transport
 from zeep.plugins import HistoryPlugin
 
+# Subrutinele noastre de gestionare a indexului
+from XML_INDEX_READER import obtine_index_virtual
+from micro_index_writer import trimite_update_index_temporar
+
 # ======================================================================
 # CONFIGURĂRI LISTĂ DIRECTOARE
 # ======================================================================
@@ -62,51 +66,30 @@ def get_drive_service():
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
-def get_already_downloaded_pages(service, target_year):
+def extract_downloaded_pages_for_year(index_virtual, target_year):
     """
-    Căutare sigură bazată pe parsare numerică reală a fișierelor existente.
-    Scanăm paginat pentru a fi imuni la capcanele sortării alfabetice a Google Drive.
+    Extrage din Indexul Virtual transmis mulțimea numerelor de pagini deja
+    existente pe Drive pentru anul targetat.
+    Zero interogări în Drive - procesare instantă în memorie!
     """
     valid_pages = set()
+    fisiere_map = index_virtual.get("fisiere", {})
     
-    if not FOLDER_IDS:
-        return valid_pages
-
-    print(f"⚡ [Scanare Istoric] Colectare pagini existente pentru anul {target_year}...")
-
-    # Regex specific: extragem DOAR numărul aflat după '_pag'
+    # Regex pentru meciuit numărul paginii
     pattern_pagina = re.compile(rf"brut_legislatie_{target_year}_pag(\d+)\.xml$")
-
-    for folder_id in FOLDER_IDS:
-        page_token = None
-        query = f"'{folder_id}' in parents and name contains 'brut_legislatie_{target_year}_pag' and trashed = false"
-
-        try:
-            while True:
-                response = service.files().list(
-                    q=query, 
-                    spaces='drive', 
-                    fields='nextPageToken, files(name)',
-                    pageSize=1000,
-                    pageToken=page_token,
-                    supportsAllDrives=True, 
-                    includeItemsFromAllDrives=True
-                ).execute()
-
-                for file in response.get('files', []):
-                    name = file.get('name', '')
-                    
-                    match = pattern_pagina.search(name)
-                    if match:
-                        valoare_pagina = int(match.group(1))
-                        valid_pages.add(valoare_pagina)
-                            
-                page_token = response.get('nextPageToken', None)
-                if not page_token:
-                    break
-        except Exception as e:
-            continue
-            
+    
+    for nume_fisier, meta in fisiere_map.items():
+        # Verificăm dacă anul din metadate se potrivește
+        if meta.get("an") == target_year:
+            match = pattern_pagina.search(nume_fisier)
+            if match:
+                valid_pages.add(int(match.group(1)))
+        elif meta.get("an") is None:
+            # Fallback prin verificare nume direct dacă atributul 'an' este None
+            match = pattern_pagina.search(nume_fisier)
+            if match:
+                valid_pages.add(int(match.group(1)))
+                
     return valid_pages
 
 
@@ -153,7 +136,7 @@ def create_fresh_soap_client():
     Creează o instanță curată de client SOAP cu protecție anti-freeze.
     Forțează întreruperea rețelei la 45 secunde dacă serverul lasă canalul deschis fără să trimită date.
     """
-    socket.setdefaulttimeout(45.0)  # CORECTAT: setdefaulttimeout cu 'd' mic
+    socket.setdefaulttimeout(45.0)
     
     history = HistoryPlugin()
     transport = Transport(timeout=45, operation_timeout=45)
@@ -161,16 +144,17 @@ def create_fresh_soap_client():
     return client, history
 
 
-def download_year(drive_service, composite_type_name, target_year):
+def download_year(drive_service, index_virtual, composite_type_name, target_year):
     """Descarcă toate paginile lipsă sau noi pentru un singur an."""
     print(f"\n{GALBEN}{'='*70}\n📅 AN INDUSTRIAL XML: {target_year}\n{'='*70}{RESET}")
 
-    downloaded_pages = get_already_downloaded_pages(drive_service, target_year)
+    # Preluare instantanee din Index Virtual (memorie)
+    downloaded_pages = extract_downloaded_pages_for_year(index_virtual, target_year)
     
     pages_to_process = []
     if downloaded_pages:
         max_page = max(downloaded_pages)
-        print(f"📦 {len(downloaded_pages)} pagini REALE identificate în istoric pentru {target_year}. (Ultima salvată: {max_page})")
+        print(f"📦 {len(downloaded_pages)} pagini REALE identificate în index pentru {target_year}. (Ultima salvată: {max_page})")
         
         all_expected_pages = set(range(1, max_page + 1))
         gaps = sorted(list(all_expected_pages - downloaded_pages))
@@ -225,7 +209,7 @@ def download_year(drive_service, composite_type_name, target_year):
         for attempt in range(0, max_retries + 1):
             try:
                 if attempt > 0:
-                    print(f"{GALBEN}   🔄 Reîncercare {attempt}/{max_retries} pentru pagina {current_page} (Resetare client SOAP)...{RESET}")
+                    print(f"{GALBEN}    🔄 Reîncercare {attempt}/{max_retries} pentru pagina {current_page} (Resetare client SOAP)...{RESET}")
                     time.sleep(15 * attempt)
                     client, history = create_fresh_soap_client()
                     token_key = client.service.GetToken()
@@ -248,11 +232,11 @@ def download_year(drive_service, composite_type_name, target_year):
                 retry_success = True
                 break
             except Exception as soap_error:
-                print(f"{GALBEN}   ⚠️ Problemă tehnică/Timeout la pagina {current_page}: {soap_error}{RESET}")
+                print(f"{GALBEN}    ⚠️ Problemă tehnică/Timeout la pagina {current_page}: {soap_error}{RESET}")
                 token_key = None
 
         if not retry_success:
-            print(f"{ROSU}   ❌ Pagina {current_page} abandonată după eșuarea tuturor tentativelor de reîncercare.{RESET}")
+            print(f"{ROSU}    ❌ Pagina {current_page} abandonată după eșuarea tuturor tentativelor de reîncercare.{RESET}")
             continue
 
         last_response_envelope = history.last_received["envelope"]
@@ -264,7 +248,7 @@ def download_year(drive_service, composite_type_name, target_year):
         if "<a:Legi>" not in raw_xml_string and "<Legi>" not in raw_xml_string:
             if not is_gap_repair:
                 consecutive_empty_pages += 1
-                print(f"{GALBEN}   ℹ️ Pagină goală detectată. Goluri consecutive: {consecutive_empty_pages}/{LIMITE_GOLURI_FINAL_AN}{RESET}")
+                print(f"{GALBEN}    ℹ️ Pagină goală detectată. Goluri consecutive: {consecutive_empty_pages}/{LIMITE_GOLURI_FINAL_AN}{RESET}")
                 if consecutive_empty_pages >= LIMITE_GOLURI_FINAL_AN:
                     print(f"\n{VERDE}✅ Anul {target_year} finalizat (S-a confirmat capătul după {LIMITE_GOLURI_FINAL_AN} pagini goale!){RESET}")
                     break
@@ -274,6 +258,8 @@ def download_year(drive_service, composite_type_name, target_year):
             success = upload_to_drive(drive_service, filename, raw_xml_bytes)
             if success:
                 files_saved += 1
+                # 📢 Notificăm Master Index-ul prin micro-index că am descărcat fișierul
+                trimite_update_index_temporar(drive_service, "downloaded", [filename])
 
         time.sleep(2.0)
 
@@ -285,12 +271,17 @@ def download_laws_main(an_start, an_stop):
     try:
         print(f"{VERDE}🚀 Pornire segment industrial paralel XML. Interval: {an_start} – {an_stop}...{RESET}")
         drive_service = get_drive_service()
+        
+        # 📥 Preluăm o singură dată Indexul Virtual (Master + Micro-indecși + Delta ultimă secundă)
+        print(f"{GALBEN}🧠 Interogare Index Virtual pentru determinarea stării actualizate...{RESET}")
+        index_virtual = obtine_index_virtual(drive_service)
+        
         composite_type_name = "{http://schemas.datacontract.org/2004/07/FreeWebService}CompositeType"
         total_files_segment = 0
         
         for year in range(an_start, an_stop + 1):
             try:
-                files_saved = download_year(drive_service, composite_type_name, year)
+                files_saved = download_year(drive_service, index_virtual, composite_type_name, year)
                 total_files_segment += files_saved
             except Exception as year_error:
                 print(f"{ROSU}💥 Eroare pentru anul {year}: {year_error}.{RESET}")
