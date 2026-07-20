@@ -7,13 +7,11 @@ from googleapiclient.errors import HttpError
 
 CALE_INDEX_LOCAL = "index_xml.json"
 
-# ID-uri de fallback
 DEFAULT_TEMP_FOLDER_ID = "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
 
 INDEX_FILE_ID = os.getenv("XML_STORAGE_INDEX", "").strip()
 FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES", "").replace('"', '').replace("'", "").strip() or DEFAULT_TEMP_FOLDER_ID
 
-# Citim folderele XML din mediu
 FOLDERE_XML_RAW = os.getenv("DRIVE_FOLDER_XML", "").replace('"', '').replace("'", "").replace("\n", "").replace("\r", "")
 FOLDERE_XML_IDS = [fid.strip() for fid in FOLDERE_XML_RAW.split(",") if fid.strip()] or [
     "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m",
@@ -24,10 +22,9 @@ FOLDERE_XML_IDS = [fid.strip() for fid in FOLDERE_XML_RAW.split(",") if fid.stri
 
 
 def descarca_index_master(service):
-    """PASUL 1: Descărcare directă sau auto-descoperire dinamică a indexului master cu suport Shared Drives."""
+    """Descărcare directă sau auto-descoperire dinamică a indexului master."""
     target_id = INDEX_FILE_ID
 
-    # Dacă variabila lipsește sau conține ID-ul vechi, căutăm dinamic index_xml.json în folderul de metadate
     if not target_id or target_id == "1OkPgwX_F6FKwupuhD9kO3rynj4zdel0N":
         folder_meta = os.getenv("METADATA_FOLDER_ID", "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR").strip()
         try:
@@ -68,10 +65,7 @@ def descarca_index_master(service):
 
 
 def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
-    """
-    PASUL 2: Citește și aplică micro-indecșii existenți în TEMPORARY_XML_INDEXES 
-    în ordine cronologică (după createdTime), cu suport complet pentru Shared Drives.
-    """
+    """Citește și aplică micro-indecșii din TEMPORARY_XML_INDEXES cu merge complet de atribute."""
     if not FOLDER_TEMP_INDEXES_ID:
         return fisiere_map
 
@@ -89,14 +83,12 @@ def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
             return fisiere_map
 
         loguri_temp.sort(key=lambda x: x.get('createdTime', ''))
-
         print(f"⚡ [Index Virtual] Citire {len(loguri_temp)} micro-indecși temporari în ordine cronologică...", flush=True)
 
         mutații_aplicate = 0
         for log_file in loguri_temp:
             file_id = log_file['id']
             try:
-                # 🚀 Fix cheie: supportsAllDrives=True la descărcarea conținutului micro-indexului
                 content_bytes = service.files().get_media(fileId=file_id, supportsAllDrives=True).execute()
                 data_log = json.loads(content_bytes.decode('utf-8'))
                 flag_updates = data_log.get('flag_updates', {})
@@ -108,15 +100,13 @@ def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
                                 del fisiere_map[nume_f]
                                 mutații_aplicate += 1
                         else:
-                            if nume_f in fisiere_map:
-                                for key, val in modi_flags.items():
-                                    fisiere_map[nume_f][key] = val
-                            else:
-                                fisiere_map[nume_f] = modi_flags
+                            if nume_f not in fisiere_map:
+                                fisiere_map[nume_f] = {}
+                            fisiere_map[nume_f].update(modi_flags)
                             mutații_aplicate += 1
             except HttpError as err:
                 if err.resp.status in [404, 410]:
-                    continue  # Ignorăm dacă a fost șters deja de consolidare
+                    continue
             except Exception:
                 pass
 
@@ -129,13 +119,6 @@ def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
 
 
 def obtine_index_virtual(service):
-    """
-    SECVENȚA EXACTĂ DE EXECUȚIE:
-    1. Descarcă Master Index (index_xml.json).
-    2. Citește și aplică toți micro-indecșii temporari neconsolidați.
-    3. Verificarea Delta: Scanează XML-urile noi apărute pe Drive până la această secundă.
-    4. Returnează Indexul Virtual.
-    """
     data_master = descarca_index_master(service)
     fisiere_map = data_master.get("fisiere", {})
     last_updated = data_master.get("last_updated")
@@ -165,7 +148,7 @@ def obtine_index_virtual(service):
                     files = response.get('files', [])
                     for f in files:
                         nume = f['name']
-                        if nume not in fisiere_map:
+                        if nume not in fisiere_map or not fisiere_map[nume].get('id'):
                             desc = f.get('description', '')
                             match = pattern_nume.search(nume)
                             an_val = int(match.group(1)) if match else None
@@ -176,6 +159,7 @@ def obtine_index_virtual(service):
                                 'folder_id': folder_id,
                                 'an': an_val,
                                 'pagina': pag_val,
+                                'downloaded': True,
                                 'Tags_extracted': False,
                                 'processed': ('processed=true' in desc)
                             }
@@ -201,7 +185,7 @@ def obtine_fisiere_neprocesate(service, nume_flag="Tags_extracted"):
     
     rezultat = []
     for nume, date in fisiere_map.items():
-        if not date.get(nume_flag, False):
+        if not date.get(nume_flag, False) and date.get('id'):
             item = dict(date)
             item['nume'] = nume
             rezultat.append(item)
