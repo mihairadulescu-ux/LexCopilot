@@ -36,7 +36,7 @@ jobs:
       - name: 📤 Salvare Index ca Artefact
         uses: actions/upload-artifact@v4
         with:
-          name: index-fisiere-drive
+          name: index-xml-artifact
           path: index_fisiere.json
           retention-days: 1
 
