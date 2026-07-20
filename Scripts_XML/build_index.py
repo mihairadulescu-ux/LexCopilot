@@ -62,8 +62,8 @@ def descarca_index_existenta_din_drive(service):
         print(f"⚠️ Nu s-a putut descărca fișierul index folosind XML_STORAGE_INDEX: {e}", flush=True)
 
 
-def salveaza_local_checkpoint(fisiere_map):
-    """Salvare intermediară pe disc local + mesaj simplu în consolă."""
+def salveaza_local_checkpoint(fisiere_map, informatii=""):
+    """Salvare intermediară pe disc local + mesaj de progres concis."""
     acum_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     structura = {
         "last_updated": acum_iso,
@@ -72,12 +72,14 @@ def salveaza_local_checkpoint(fisiere_map):
     }
     with open(CALE_INDEX_LOCAL, "w", encoding="utf-8") as f:
         json.dump(structura, f, ensure_ascii=False, indent=2)
-    print(f"💾 Salvat local: {len(fisiere_map)} fișiere.", flush=True)
+    
+    detaliu = f" ({informatii})" if informatii else ""
+    print(f"💾 [Checkpoint Local] Total indexate: {len(fisiere_map)} fișiere unice{detaliu}.", flush=True)
 
 
 def salveaza_final_in_drive(service, fisiere_map):
     """Upload-ul final master pe Google Drive la finalizarea completă a scanării."""
-    salveaza_local_checkpoint(fisiere_map)
+    salveaza_local_checkpoint(fisiere_map, informatii="Stare finală înainte de Upload")
 
     folder_destinatie_id = FOLDERE_XML_IDS[0] if FOLDERE_XML_IDS else None
 
@@ -114,7 +116,6 @@ def salveaza_final_in_drive(service, fisiere_map):
         
         id_nou = f_nou.get('id')
 
-        # Acordăm drepturi de citire globale pe fișier pentru a fi vizibil în interfața web
         try:
             service.permissions().create(
                 fileId=id_nou,
@@ -261,14 +262,14 @@ def construieste_sau_actualizeaza_index():
         print(f"🚀 [FULL INDEX] Se construiește indexul complet de la zero...", flush=True)
 
     pattern_nume = re.compile(r"brut_legislatie_(\d+)_pag(\d+)\.xml")
-    contor_fisiere_noi = 0
 
-    # STEP 1: Scanăm cele 4 foldere de XML pentru a adăuga fișiere
+    # STEP 1: Scanăm cele 4 foldere de XML
     for idx_folder, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
         print(f"\n{GALBEN}📂 Scanare Folder XML {idx_folder}/{len(FOLDERE_XML_IDS)} (ID: {folder_id[:8]}...){RESET}", flush=True)
         
         page_token = None
         contor_folder = 0
+        fisiere_noi_in_folder = 0
         
         if last_updated and not pune_reset:
             query = f"'{folder_id}' in parents and name contains 'brut_legislatie_' and modifiedTime > '{last_updated}' and trashed = false"
@@ -293,6 +294,9 @@ def construieste_sau_actualizeaza_index():
 
                 for f in files:
                     nume = f['name']
+                    if nume not in fisiere_map:
+                        fisiere_noi_in_folder += 1
+
                     match = pattern_nume.search(nume)
                     an_val = int(match.group(1)) if match else None
                     pag_val = int(match.group(2)) if match else None
@@ -308,24 +312,24 @@ def construieste_sau_actualizeaza_index():
                     }
                     
                     contor_folder += 1
-                    contor_fisiere_noi += 1
 
-                    if contor_fisiere_noi % 10000 == 0:
-                        salveaza_local_checkpoint(fisiere_map)
+                    # Salvăm și logăm doar la fiecare 10.000 de fișiere scanate per folder
+                    if contor_folder % 10000 == 0:
+                        salveaza_local_checkpoint(fisiere_map, informatii=f"Folder {idx_folder}: {contor_folder} scanate")
 
                 page_token = response.get('nextPageToken', None)
                 if not page_token:
                     break
                     
-            print(f"✅ [Folder Finalizat] Găsite {contor_folder} fișiere în folderul {folder_id[:8]}.", flush=True)
+            print(f"✅ [Folder Finalizat] Scanate {contor_folder} fișiere în folderul {folder_id[:8]} (Fișiere noi adăugate: {fisiere_noi_in_folder}).", flush=True)
 
         except Exception as e:
             print(f"{ROSU}⚠️ Eroare scanare folder {folder_id[:8]}: {e}{RESET}", flush=True)
 
-    # STEP 2: Aplicăm toate actualizările din folderul TEMPORARY_XML_INDEXES (cronologic)
+    # STEP 2: Aplicăm toate actualizările din folderul TEMPORARY_XML_INDEXES
     fisiere_map = aplica_si_curata_indexuri_temporare(service, fisiere_map)
 
-    # STEP 3: Upload-ul master în Drive are loc la final
+    # STEP 3: Upload-ul master în Drive
     salveaza_final_in_drive(service, fisiere_map)
 
 
