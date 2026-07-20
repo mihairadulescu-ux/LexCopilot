@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import io
+import re
 from datetime import datetime, timezone
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -14,13 +15,21 @@ RESET = "\033[0m"
 
 CALE_INDEX_LOCAL = "index_xml.json"
 
-TARGET_FOLDERS_RAW = os.getenv("DRIVE_FOLDER_XML", "")
-FOLDER_IDS = [fid.strip() for fid in TARGET_FOLDERS_RAW.replace('"', '').replace("'", "").split(",") if fid.strip()] or [
+# 1. Variabila care deține informația cu privire la folderul de stocare metadate
+FOLDER_METADATA_ID = os.getenv("DRIVE_FOLDER_METADATA", "").replace('"', '').replace("'", "").strip()
+
+# 2. Variabila care deține informația cu privire la folderele de stocare XML-uri
+FOLDERE_XML_RAW = os.getenv("DRIVE_FOLDER_XML", "").replace('"', '').replace("'", "").replace("\n", "").replace("\r", "")
+FOLDERE_XML_IDS = [fid.strip() for fid in FOLDERE_XML_RAW.split(",") if fid.strip()] or [
     "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m",
     "1G7CkaoivnTR0O8mZceB0143Q6956C1-1",
     "1T2N_v81889Y7tyHUbrTSLR073YC7mGk5",
     "1NWe4JKhhaQ4HxFGs7FfhxnlemE0ZM2E2"
 ]
+
+# Dacă folderul de metadate nu este setat separat, îl folosim pe primul din lista de XML ca fallback
+if not FOLDER_METADATA_ID:
+    FOLDER_METADATA_ID = FOLDERE_XML_IDS[0]
 
 def get_drive_service():
     scopes = ["https://www.googleapis.com/auth/drive"]
@@ -32,12 +41,11 @@ def get_drive_service():
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 def descarca_index_existenta_din_drive(service):
-    """Preia index_xml.json din primul folder master dacă nu există local."""
+    """Descărcăm index_xml.json strict din folderul de metadate."""
     if os.path.exists(CALE_INDEX_LOCAL):
         return
         
-    id_folder_master = FOLDER_IDS[0]
-    query = f"'{id_folder_master}' in parents and name = '{CALE_INDEX_LOCAL}' and trashed = false"
+    query = f"'{FOLDER_METADATA_ID}' in parents and name = '{CALE_INDEX_LOCAL}' and trashed = false"
     try:
         rezultat = service.files().list(q=query, fields="files(id)").execute()
         fisiere = rezultat.get('files', [])
@@ -48,37 +56,37 @@ def descarca_index_existenta_din_drive(service):
             gata = False
             while not gata:
                 _, gata = downloader.next_chunk()
-            print(f"📥 [Cloud Sync] Am descărcat indexul istoric din Google Drive.")
+            print(f"📥 [Cloud Sync] Încărcat indexul din Folderul de Metadate ({FOLDER_METADATA_ID[:8]}...).")
     except Exception as e:
         print(f"⚠️ Nu s-a putut descărca indexul din Drive: {e}")
 
 def salveaza_index_in_drive(service):
-    """Urcă sau actualizează indexul în primul folder master din Google Drive."""
+    """Salvăm/actualizăm index_xml.json în folderul de metadate."""
     if not os.path.exists(CALE_INDEX_LOCAL):
         return
-    id_folder_master = FOLDER_IDS[0]
-    query = f"'{id_folder_master}' in parents and name = '{CALE_INDEX_LOCAL}' and trashed = false"
+    
+    query = f"'{FOLDER_METADATA_ID}' in parents and name = '{CALE_INDEX_LOCAL}' and trashed = false"
     try:
         rezultat = service.files().list(q=query, fields="files(id)").execute()
         fisiere = rezultat.get('files', [])
         media = MediaFileUpload(CALE_INDEX_LOCAL, mimetype='application/json')
         if fisiere:
             service.files().update(fileId=fisiere[0]['id'], media_body=media).execute()
-            print(f"📤 [Cloud Sync] Indexul global 'index_xml.json' a fost actualizat în Drive.")
+            print(f"📤 [Cloud Sync] Indexul 'index_xml.json' a fost actualizat în Folderul de Metadate!")
         else:
-            metadata = {'name': CALE_INDEX_LOCAL, 'parents': [id_folder_master]}
+            metadata = {'name': CALE_INDEX_LOCAL, 'parents': [FOLDER_METADATA_ID]}
             service.files().create(body=metadata, media_body=media).execute()
-            print(f"📤 [Cloud Sync] Indexul 'index_xml.json' a fost creat și salvat în Drive.")
+            print(f"📤 [Cloud Sync] Indexul 'index_xml.json' a fost creat în Folderul de Metadate!")
     except Exception as e:
         print(f"⚠️ Eroare la sincronizarea indexului cu Drive: {e}")
 
 def construieste_sau_actualizeaza_index():
     service = get_drive_service()
-    
     descarca_index_existenta_din_drive(service)
+    
     pune_reset = os.getenv("STRATEGIE_RESET", "false").lower() == "true"
     
-    fisiere_existente_dict = {}
+    fisiere_map = {}
     last_updated = None
 
     if os.path.exists(CALE_INDEX_LOCAL) and not pune_reset:
@@ -87,20 +95,16 @@ def construieste_sau_actualizeaza_index():
                 data_stocata = json.load(f)
                 if isinstance(data_stocata, dict) and "fisiere" in data_stocata:
                     last_updated = data_stocata.get("last_updated")
-                    for item in data_stocata.get("fisiere", []):
-                        fisiere_existente_dict[item['id']] = item
-                    print(f"🧠 [Index Incremental] Încarcat index cu {len(fisiere_existente_dict)} fișiere. Ultimul update: {last_updated}")
+                    if isinstance(data_stocata["fisiere"], dict):
+                        fisiere_map = data_stocata["fisiere"]
+                    print(f"🧠 [Index Incremental] Încărcate {len(fisiere_map)} fișiere. Ultimul update: {last_updated}")
         except Exception as e:
             print(f"⚠️ Eroare la citirea indexului vechi: {e}")
 
-    if last_updated:
-        print(f"⚡ [Mod Delta] Scanare strictă fișiere modificate/adăugate după {last_updated}...", flush=True)
-    else:
-        print(f"🔄 [Mod Full Scan] Scanare completă peste toate cele 4 foldere...", flush=True)
-
     fisiere_noi_sau_modificate = 0
+    pattern_nume = re.compile(r"brut_legislatie_(\d+)_pag(\d+)\.xml")
 
-    for idx_folder, folder_id in enumerate(FOLDER_IDS, start=1):
+    for idx_folder, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
         page_token = None
         contor_folder = 0
         
@@ -114,7 +118,7 @@ def construieste_sau_actualizeaza_index():
                 response = service.files().list(
                     q=query,
                     spaces='drive',
-                    fields='nextPageToken, files(id, name, description, modifiedTime)',
+                    fields='nextPageToken, files(id, name, description)',
                     pageSize=1000,
                     pageToken=page_token,
                     supportsAllDrives=True,
@@ -126,17 +130,24 @@ def construieste_sau_actualizeaza_index():
                     break
 
                 for f in files:
+                    nume = f['name']
                     desc = f.get('description', '')
                     is_processed = (desc == 'processed=true' or 'processed=true' in desc)
                     
-                    item_data = {
+                    match = pattern_nume.search(nume)
+                    an_val = int(match.group(1)) if match else None
+                    pag_val = int(match.group(2)) if match else None
+
+                    stare_tags_existenta = fisiere_map.get(nume, {}).get("Tags_extracted", False)
+
+                    fisiere_map[nume] = {
                         'id': f['id'],
-                        'name': f['name'],
-                        'processed': is_processed,
-                        'folder_id': folder_id
+                        'folder_id': folder_id,
+                        'an': an_val,
+                        'pagina': pag_val,
+                        'Tags_extracted': stare_tags_existenta,
+                        'processed': is_processed
                     }
-                    
-                    fisiere_existente_dict[f['id']] = item_data
                     contor_folder += 1
                     fisiere_noi_sau_modificate += 1
 
@@ -154,14 +165,14 @@ def construieste_sau_actualizeaza_index():
     
     structura_finala = {
         "last_updated": acum_iso,
-        "total_fisiere": len(fisiere_existente_dict),
-        "fisiere": list(fisiere_existente_dict.values())
+        "total_fisiere": len(fisiere_map),
+        "fisiere": fisiere_map
     }
 
     with open(CALE_INDEX_LOCAL, "w", encoding="utf-8") as f:
         json.dump(structura_finala, f, ensure_ascii=False, indent=2)
 
-    print(f"\n{VERDE}✅ [Index Salvat] Total în index: {len(fisiere_existente_dict)} fișiere. Actualizări: {fisiere_noi_sau_modificate}. Ștampila: {acum_iso}{RESET}", flush=True)
+    print(f"\n{VERDE}✅ [Index Salvat] Total în index: {len(fisiere_map)} fișiere. Actualizări: {fisiere_noi_sau_modificate}. Ștampila: {acum_iso}{RESET}", flush=True)
 
     salveaza_index_in_drive(service)
 
