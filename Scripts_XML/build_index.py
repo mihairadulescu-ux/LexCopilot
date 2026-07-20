@@ -88,9 +88,10 @@ def descarca_index_master(service):
         return {"last_updated": None, "total_fisiere": 0, "fisiere": {}}, target_id
 
 
-def aplica_micro_indecsi_si_curata(service, fisiere_master, max_batch=150):
+def aplica_micro_indecsi_si_curata(service, fisiere_master):
     """
-    Citește, aplică și ȘTERGE (via trashed=True) micro-indecșii temporari în BATCH-URI sigure.
+    Citește, aplică și MUTĂ ÎN TRASH micro-indecșii temporari din TEMPORARY_XML_INDEXES.
+    Această abordare previne bucla infinită de re-procesare.
     """
     if not FOLDER_TEMP_INDEXES_ID:
         return fisiere_master, 0
@@ -100,7 +101,6 @@ def aplica_micro_indecsi_si_curata(service, fisiere_master, max_batch=150):
         resp = service.files().list(
             q=query,
             fields="files(id, name, createdTime)",
-            pageSize=max_batch,  # Limităm numărul de fișiere procesate per rundă pentru viteză
             supportsAllDrives=True,
             includeItemsFromAllDrives=True
         ).execute()
@@ -112,17 +112,17 @@ def aplica_micro_indecsi_si_curata(service, fisiere_master, max_batch=150):
 
         # Sortăm cronologic pentru aplicare ordonată
         loguri_temp.sort(key=lambda x: x.get('createdTime', ''))
-        print(f"🔄 [Consolidare Mutații] Se procesează un batch de {len(loguri_temp)} indexuri temporare...", flush=True)
+        print(f"🔄 [Consolidare Mutații] Găsite {len(loguri_temp)} indexuri temporare în Drive. Se procesează...", flush=True)
 
         mutații_aplicate = 0
-        curatate_count = 0
+        sterse_count = 0
 
-        for idx, log_file in enumerate(loguri_temp, start=1):
+        for log_file in loguri_temp:
             file_id = log_file['id']
             file_name = log_file.get('name', file_id)
 
             try:
-                # 🚀 Descărcare conținut
+                # 1. Descărcăm conținutul micro-indexului
                 cerere = service.files().get_media(fileId=file_id, supportsAllDrives=True)
                 fh = io.BytesIO()
                 downloader = MediaIoBaseDownload(fh, cerere)
@@ -146,21 +146,22 @@ def aplica_micro_indecsi_si_curata(service, fisiere_master, max_batch=150):
                                 fisiere_master[nume_f] = modi_flags
                             mutații_aplicate += 1
 
-                # 🧹 CURĂȚARE GARANTATĂ: Mutare în Trash
+                # 2. CURĂȚARE GARANTATĂ: Mutăm în Trash (permis pentru Writer)
                 try:
-                    service.files().update(fileId=file_id, body={'trashed': True}, supportsAllDrives=True).execute()
-                    curatate_count += 1
+                    service.files().update(
+                        fileId=file_id, 
+                        body={'trashed': True}, 
+                        supportsAllDrives=True
+                    ).execute()
+                    sterse_count += 1
                 except Exception:
                     try:
                         service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
-                        curatate_count += 1
+                        sterse_count += 1
                     except Exception:
                         pass
 
-                time.sleep(0.01)  # Prevenire rate limit
-
-                if idx % 50 == 0:
-                    print(f"   📊 [Progres Consolidare] {idx}/{len(loguri_temp)} micro-indecși curățați...", flush=True)
+                time.sleep(0.01)
 
             except HttpError as err:
                 if err.resp.status in [404, 410]:
@@ -169,7 +170,7 @@ def aplica_micro_indecsi_si_curata(service, fisiere_master, max_batch=150):
             except Exception as e:
                 print(f"   └─ ⚠️ Eroare neașteptată temporar {file_name}: {e}", flush=True)
 
-        print(f"   └─ ✅ Consolidate cu succes {mutații_aplicate} mutații în baza master (curățate {curatate_count} fișiere).", flush=True)
+        print(f"   └─ ✅ Consolidate cu succes {mutații_aplicate} mutații în baza master (curățate {sterse_count} fișiere temporare).", flush=True)
         return fisiere_master, mutații_aplicate
 
     except Exception as e:
