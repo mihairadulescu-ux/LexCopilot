@@ -4,6 +4,8 @@ import csv
 import json
 import re
 import io
+import time
+from datetime import datetime, timezone
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
@@ -16,8 +18,11 @@ GALBEN = "\033[93m"
 ROSU = "\033[91m"
 RESET = "\033[0m"
 
-# Folosim ID-ul din METADATA_FOLDER_ID sau fallback pe primul ID din DRIVE_FOLDER_XML
+# Folderul de destinație pentru fișierele CSV finale de metadate
 FOLDER_METADATE_ID = os.getenv("METADATA_FOLDER_ID", "").strip()
+
+# Folderul pentru micro-indecșii temporari de sincronizare real-time
+FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES", "").replace('"', '').replace("'", "").strip() or "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
 
 if not FOLDER_METADATE_ID:
     FOLDERE_XML_RAW = os.getenv("DRIVE_FOLDER_XML", "").replace('"', '').replace("'", "").replace("\n", "").replace("\r", "")
@@ -39,6 +44,49 @@ def get_drive_service():
         creds = service_account.Credentials.from_service_account_file(credentials_path, scopes=scopes)
         
     return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+def salveaza_micro_index_temporar(service, flag_updates):
+    """
+    Creează un fișier temporar de mutații pe Drive (în TEMPORARY_XML_INDEXES) 
+    pentru a anunța toate celelalte scripturi că aceste fișiere au Tags_extracted = True.
+    """
+    if not flag_updates:
+        return
+
+    timestamp = int(time.time())
+    nume_temp = f"temp_index_dictionaries_{timestamp}.json"
+    
+    structura_log = {
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source": "download_XML_dictionaries.py",
+        "flag_updates": flag_updates
+    }
+
+    # Salvare locală temporară
+    with open(nume_temp, "w", encoding="utf-8") as f:
+        json.dump(structura_log, f, ensure_ascii=False, indent=2)
+
+    # Încărcare pe Drive în folderul temporar
+    try:
+        media = MediaFileUpload(nume_temp, mimetype='application/json')
+        file_metadata = {
+            'name': nume_temp,
+            'parents': [FOLDER_TEMP_INDEXES_ID]
+        }
+        res = service.files().create(
+            body=file_metadata, 
+            media_body=media, 
+            supportsAllDrives=True, 
+            fields='id'
+        ).execute()
+        
+        print(f"{VERDE}⚡ [Micro-Index Publicat] Înregistrat flag-ul 'Tags_extracted: True' pentru {len(flag_updates)} fișiere (ID Temp: {res.get('id')}){RESET}", flush=True)
+    except Exception as e:
+        print(f"{ROSU}⚠️ Nu s-a putut publica micro-indexul temporar pe Drive: {e}{RESET}", flush=True)
+    finally:
+        if os.path.exists(nume_temp):
+            os.remove(nume_temp)
 
 
 def incarca_pe_drive(service, cale_fisier_local, folder_id):
@@ -69,7 +117,7 @@ def incarca_pe_drive(service, cale_fisier_local, folder_id):
 
 
 def extrage_taguri_din_matrice(service, ani_procesare):
-    # 🚀 Obținem indexul virtual ultra-actualizat (master + micro-indecși + delta)
+    # 🚀 Obținem indexul virtual ultra-actualizat
     index_v = obtine_index_virtual(service)
     fisiere_map = index_v.get("fisiere", {})
 
@@ -79,15 +127,17 @@ def extrage_taguri_din_matrice(service, ani_procesare):
     regex_emitent = re.compile(r"<[^>]*?Emitent[^>]*?>(.*?)</[^>]*?Emitent>", re.DOTALL | re.IGNORECASE)
     regex_tip_act = re.compile(r"<[^>]*?TipAct[^>]*?>(.*?)</[^>]*?TipAct>", re.DOTALL | re.IGNORECASE)
 
+    # Filtrăm doar fișierele din anii ceruți care NU au fost procesate deja (Tags_extracted == False)
     fisiere_tinta = [
         (nume, info) for nume, info in fisiere_map.items() 
-        if info.get('an') in ani_procesare
+        if info.get('an') in ani_procesare and not info.get('Tags_extracted', False)
     ]
 
     string_ani = "_".join([str(a) for a in ani_procesare])
-    print(f"\n{GALBEN}⚡ [Dictionare] Scanare pe indexul virtual pentru anii {string_ani} ({len(fisiere_tinta)} fișiere selectate)...{RESET}", flush=True)
+    print(f"\n{GALBEN}⚡ [Dictionare] Scanare pe indexul virtual pentru anii {string_ani} ({len(fisiere_tinta)} fișiere neprocesate selectate)...{RESET}", flush=True)
 
     contor_total_procesat = 0
+    flag_updates = {}
 
     for nume_fisier, info in fisiere_tinta:
         file_id = info.get('id')
@@ -114,6 +164,8 @@ def extrage_taguri_din_matrice(service, ani_procesare):
                 if val: 
                     tipuri_acte_gasite.add(val)
 
+            # Marcăm fișierul ca procesat pentru starea de mutație
+            flag_updates[nume_fisier] = {"Tags_extracted": True}
             contor_total_procesat += 1
 
             if contor_total_procesat % 500 == 0:
@@ -123,6 +175,9 @@ def extrage_taguri_din_matrice(service, ani_procesare):
             continue
 
     print(f"\n✅ [Procesare Finalizată] Total fișiere scanate: {contor_total_procesat}", flush=True)
+
+    # 💾 Salvăm mutațiile în folderul temporar de pe Drive
+    salveaza_micro_index_temporar(service, flag_updates)
 
     cale_emitenti = f"lista_emitenti_{string_ani}.csv"
     cale_acte = f"lista_tip_acte_{string_ani}.csv"
