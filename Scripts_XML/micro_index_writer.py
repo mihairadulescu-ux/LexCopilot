@@ -1,14 +1,11 @@
-# Cum se apeleaza din alte scriptri
-# Importăm subrutina
-#from micro_index_writer import trimite_update_index_temporar, raporteaza_fisiere_sterse
-
-# ... codul tău care procesează fișierele ...
-#fisiere_finalizate = ["brut_legislatie_1970_pag1.xml", "brut_legislatie_1970_pag2.xml"]
-
-# La final sau la fiecare batch, apelezi o singură linie:
-#trimite_update_index_temporar(service, "Tags_extracted", fisiere_finalizate)
-# Sfarsit sablon
-
+# ==============================================================================
+# 📌 CUM SE APELEAZĂ DIN ALTE SCRIPTURI (QUICK REFERENCE):
+#
+# from micro_index_writer import trimite_update_index_temporar, raporteaza_fisiere_sterse
+# 
+# # La final sau per batch apelezi:
+# trimite_update_index_temporar(service, "downloaded", lista_fisiere_salvate)
+# ==============================================================================
 
 import os
 import json
@@ -17,27 +14,23 @@ from datetime import datetime, timezone
 from googleapiclient.http import MediaFileUpload
 
 CALE_TEMP_LOCAL = "temp_index_local.json"
+DEFAULT_TEMP_FOLDER_ID = "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
+
 
 def trimite_update_index_temporar(service, nume_flag, lista_fisiere, stare_flag=True):
     """
     Creează și încarcă un micro-index temporar în folderul 'TEMPORARY_XML_INDEXES' din Drive.
-    
-    Parametri:
-    - service: obiectul Google Drive API service.
-    - nume_flag: numele flag-ului de actualizat (ex: 'Tags_extracted', 'Dictionary_processed').
-    - lista_fisiere: listă de nume de fișiere XML (ex: ['brut_legislatie_1970_pag1.xml', ...])
-    - stare_flag: valoarea flag-ului (default: True).
     """
     if not lista_fisiere:
         print("ℹ️ [MicroIndex] Lista de fișiere este goală. Niciun micro-index generat.", flush=True)
         return
 
-    folder_temp_id = os.getenv("TEMPORARY_XML_INDEXES", "").strip()
+    folder_temp_id = os.getenv("TEMPORARY_XML_INDEXES", "").strip() or DEFAULT_TEMP_FOLDER_ID
     if not folder_temp_id:
         print("⚠️ [MicroIndex] Variabila 'TEMPORARY_XML_INDEXES' nu este setată! Micro-indexul nu a fost salvat.", flush=True)
         return
 
-    # Structurăm modificările de flag-uri conform regulii acceptate de Master Index Builder
+    # Structurăm modificările de flag-uri
     flag_updates = {}
     for nume_fisiere in lista_fisiere:
         flag_updates[nume_fisiere] = {nume_flag: stare_flag}
@@ -48,16 +41,13 @@ def trimite_update_index_temporar(service, nume_flag, lista_fisiere, stare_flag=
         "flag_updates": flag_updates
     }
 
-    # Generăm un nume unic pentru fișierul temporar (master builder-ul caută fișiere cu masca 'temp_index_')
     unique_id = str(uuid.uuid4())[:8]
     nume_fisier_remote = f"temp_index_{nume_flag}_{unique_id}.json"
 
     try:
-        # Salvare temporară locală
         with open(CALE_TEMP_LOCAL, "w", encoding="utf-8") as f:
             json.dump(date_micro_index, f, ensure_ascii=False, indent=2)
 
-        # Upload în Google Drive
         file_metadata = {
             'name': nume_fisier_remote,
             'parents': [folder_temp_id]
@@ -70,25 +60,23 @@ def trimite_update_index_temporar(service, nume_flag, lista_fisiere, stare_flag=
             supportsAllDrives=True
         ).execute()
 
-        print(f"✅ [MicroIndex] Creat și încărcat în Drive: {nume_fisier_remote} ({len(lista_fisiere)} fișiere cu {nume_flag}={stare_flag})", flush=True)
+        print(f"✅ [MicroIndex] Logat în Drive: {nume_fisier_remote} ({len(lista_fisiere)} fișiere cu {nume_flag}={stare_flag})", flush=True)
 
     except Exception as e:
         print(f"❌ [MicroIndex] Eroare la încărcarea micro-indexului în Drive: {e}", flush=True)
     finally:
-        # Curățăm fișierul temporar creat local
         if os.path.exists(CALE_TEMP_LOCAL):
             os.remove(CALE_TEMP_LOCAL)
 
 
 def raporteaza_fisiere_sterse(service, lista_fisiere_sterse):
     """
-    Trimite o notificare către Master Index Builder că anumite fișiere nu mai există pe Drive,
-    astfel încât să fie eliminate definitiv din indexul master.
+    Trimite o notificare către Master Index Builder că anumite fișiere nu mai există pe Drive.
     """
     if not lista_fisiere_sterse:
         return
 
-    folder_temp_id = os.getenv("TEMPORARY_XML_INDEXES", "").strip()
+    folder_temp_id = os.getenv("TEMPORARY_XML_INDEXES", "").strip() or DEFAULT_TEMP_FOLDER_ID
     if not folder_temp_id:
         return
 
@@ -118,6 +106,3 @@ def raporteaza_fisiere_sterse(service, lista_fisiere_sterse):
     finally:
         if os.path.exists(CALE_TEMP_LOCAL):
             os.remove(CALE_TEMP_LOCAL)
-
-
-
