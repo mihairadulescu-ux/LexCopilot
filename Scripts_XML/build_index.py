@@ -48,13 +48,19 @@ def get_drive_service():
 
 
 def descarca_index_master(service):
-    """Descărcare Master Index din Drive cu fallback pe căutare dinamică."""
+    """Descărcare Master Index din Drive cu suport complet pentru Shared Drives."""
     target_id = INDEX_FILE_ID
 
     if not target_id or target_id == "1OkPgwX_F6FKwupuhD9kO3rynj4zdel0N":
         try:
             query = f"'{FOLDER_METADATE_ID}' in parents and name = '{NUME_INDEX_DRIVE}' and trashed = false"
-            res = service.files().list(q=query, spaces='drive', fields='files(id)', supportsAllDrives=True).execute()
+            res = service.files().list(
+                q=query, 
+                spaces='drive', 
+                fields='files(id)', 
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
+            ).execute()
             files = res.get('files', [])
             if files:
                 target_id = files[0]['id']
@@ -84,8 +90,7 @@ def descarca_index_master(service):
 
 def aplica_micro_indecsi_si_curata(service, fisiere_master):
     """
-    Citește, aplică și ȘTERGE micro-indecșii temporari din TEMPORARY_XML_INDEXES.
-    Include tratare defensivă pentru fișierele șterse/inexistente (HTTP 404).
+    Citește, aplică și MARCHEAZĂ CA ȘTERSE (Trashed) micro-indecșii temporari din TEMPORARY_XML_INDEXES.
     """
     if not FOLDER_TEMP_INDEXES_ID:
         return fisiere_master, 0
@@ -109,11 +114,14 @@ def aplica_micro_indecsi_si_curata(service, fisiere_master):
         print(f"🔄 [Consolidare Mutații] Găsite {len(loguri_temp)} indexuri temporare în Drive. Se aplică...", flush=True)
 
         mutații_aplicate = 0
+        sterse_count = 0
+
         for log_file in loguri_temp:
             file_id = log_file['id']
             file_name = log_file.get('name', file_id)
 
             try:
+                # Descărcăm conținutul
                 cerere = service.files().get_media(fileId=file_id, supportsAllDrives=True)
                 fh = io.BytesIO()
                 downloader = MediaIoBaseDownload(fh, cerere)
@@ -137,21 +145,27 @@ def aplica_micro_indecsi_si_curata(service, fisiere_master):
                                 fisiere_master[nume_f] = modi_flags
                             mutații_aplicate += 1
 
-                # Curățăm micro-indexul temporar procesat
+                # 🧹 CURĂȚARE EFICIENTĂ: Mutăm în Trash (sau ștergem)
                 try:
-                    service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
+                    service.files().update(fileId=file_id, body={'trashed': True}, supportsAllDrives=True).execute()
+                    sterse_count += 1
                 except Exception:
-                    pass
+                    try:
+                        service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
+                        sterse_count += 1
+                    except Exception:
+                        pass
+
+                time.sleep(0.02)
 
             except HttpError as err:
-                # 🛡️ TRATARE DEFENSIVĂ 404: Fișierul a fost deja șters/mutat de un alt job
                 if err.resp.status in [404, 410]:
                     continue
                 print(f"   └─ ⚠️ Eroare procesare temporar {file_name}: {err}", flush=True)
             except Exception as e:
                 print(f"   └─ ⚠️ Eroare neașteptată temporar {file_name}: {e}", flush=True)
 
-        print(f"   └─ ✅ Consolidate cu succes {mutații_aplicate} mutații în baza master.", flush=True)
+        print(f"   └─ ✅ Consolidate cu succes {mutații_aplicate} mutații în baza master (curățate {sterse_count} fișiere temporare).", flush=True)
         return fisiere_master, mutații_aplicate
 
     except Exception as e:
@@ -190,7 +204,7 @@ def main():
 
     print(f"🧠 [Index Incremental] Încărcate {len(fisiere_master)} fișiere unice din master.", flush=True)
 
-    # 1. Consolidare micro-indecși temporari din TEMPORARY_XML_INDEXES
+    # 1. Consolidare micro-indecși temporari
     fisiere_master, mutatii = aplica_micro_indecsi_si_curata(service, fisiere_master)
 
     # 2. Salvare finală Master Index pe Drive
