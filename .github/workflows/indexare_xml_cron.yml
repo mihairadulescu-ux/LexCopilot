@@ -1,0 +1,41 @@
+name: 🔄 CRON - Indexare Incrementală XML (2 ore)
+
+on:
+  schedule:
+    # Rulează la fiecare 2 ore (la minutul 0)
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      pune_reset:
+        description: "Forțează reindexarea totală de la zero (True/False)"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  indexare_globala:
+    name: 🔍 Actualizare Index XML în Drive
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descărcare cod din repository
+        uses: actions/checkout@v4
+
+      - name: Configurare Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Instalare dependențe
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-api-python-client google-auth
+
+      - name: Executare Script Indexare
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DRIVE_FOLDER_XML: ${{ vars.DRIVE_FOLDER_XML }}
+          STRATEGIE_RESET: ${{ github.event.inputs.pune_reset }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python -u Scripts_XML/build_index.py
