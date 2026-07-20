@@ -13,6 +13,8 @@ GALBEN = "\033[93m"
 ROSU = "\033[91m"
 RESET = "\033[0m"
 
+CALE_INDEX_LOCAL = "index_xml.json"
+
 def get_drive_service():
     scopes = ["https://www.googleapis.com/auth/drive"]
     github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -29,66 +31,69 @@ def get_drive_service():
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 def extrage_taguri_din_matrice(service, ani_procesare):
-    if not os.path.exists("index_fisiere.json"):
-        print(f"{ROSU}🛑 Eroare Extragere: Nu s-a găsit fișierul 'index_fisiere.json'!{RESET}")
+    if not os.path.exists(CALE_INDEX_LOCAL):
+        print(f"{ROSU}🛑 Eroare Extragere: Nu s-a găsit fișierul '{CALE_INDEX_LOCAL}'!{RESET}")
         sys.exit(1)
 
-    with open("index_fisiere.json", "r", encoding="utf-8") as f:
-        index_data = json.load(f)
+    with open(CALE_INDEX_LOCAL, "r", encoding="utf-8") as f:
+        data_master = json.load(f)
+
+    fisiere_map = data_master.get("fisiere", {})
 
     emitenti_gasiti = set()
     tipuri_acte_gasite = set()
 
-    regex_emitent = re.compile(r"<[^:>]*:?Emitent>(.*?)</[^:>]*:?Emitent>", re.DOTALL)
-    regex_tip_act = re.compile(r"<[^:>]*:?TipAct>(.*?)</[^:>]*:?TipAct>", re.DOTALL)
+    # Regex mai permisiv pentru tag-uri cu atribute sau namespace-uri
+    regex_emitent = re.compile(r"<[^>]*?Emitent[^>]*?>(.*?)</[^>]*?Emitent>", re.DOTALL | re.IGNORECASE)
+    regex_tip_act = re.compile(r"<[^>]*?TipAct[^>]*?>(.*?)</[^>]*?TipAct>", re.DOTALL | re.IGNORECASE)
 
-    for target_year in ani_procesare:
-        fisiere_an = index_data.get(str(target_year), [])
-        print(f"\n{GALBEN}⚡ [Dictionare] Scanare rapidă pe index pentru anul {target_year} ({len(fisiere_an)} fișiere găsite)...{RESET}", flush=True)
-
-        contor_total_procesat = 0
-        for file_info in fisiere_an:
-            # Sărim peste ce e marcat deja ca procesat (dacă nu s-a dat reset)
-            if file_info.get('description', '') == 'processed=true':
-                continue
-
-            try:
-                cerere = service.files().get_media(fileId=file_info['id'])
-                fh = io.BytesIO()
-                descarcare = MediaIoBaseDownload(fh, cerere)
-                gata = False
-                while not gata:
-                    _, gata = descarcare.next_chunk()
-                
-                xml_text = fh.getvalue().decode("utf-8", errors="ignore")
-                
-                for em in regex_emitent.findall(xml_text):
-                    val = em.strip()
-                    if val: emitenti_gasiti.add(val)
-                    
-                for ta in regex_tip_act.findall(xml_text):
-                    val = ta.strip()
-                    if val: tipuri_acte_gasite.add(val)
-
-                # Marcare ca procesat pe Google Drive
-                service.files().update(
-                    fileId=file_info['id'],
-                    body={'description': 'processed=true'},
-                    fields='id',
-                    supportsAllDrives=True
-                ).execute()
-                
-                contor_total_procesat += 1
-
-                if contor_total_procesat % 100 == 0:
-                    print(f"   📊 [Progres An {target_year}] Procesate: {contor_total_procesat}/{len(fisiere_an)}", flush=True)
-
-            except Exception as e:
-                continue
-
-        print(f"✅ [An Gata {target_year}] Total procesat în această sesiune: {contor_total_procesat}", flush=True)
+    # Filtram fișierele din index care aparțin anilor ceruți
+    fisiere_tinta = [
+        (nume, info) for nume, info in fisiere_map.items() 
+        if info.get('an') in ani_procesare
+    ]
 
     string_ani = "_".join([str(a) for a in ani_procesare])
+    print(f"\n{GALBEN}⚡ [Dictionare] Scanare pe index pentru anii {string_ani} ({len(fisiere_tinta)} fișiere selectate)...{RESET}", flush=True)
+
+    contor_total_procesat = 0
+
+    for nume_fisier, info in fisiere_tinta:
+        file_id = info.get('id')
+        if not file_id:
+            continue
+
+        try:
+            cerere = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+            fh = io.BytesIO()
+            descarcare = MediaIoBaseDownload(fh, cerere)
+            gata = False
+            while not gata:
+                _, gata = descarcare.next_chunk()
+            
+            xml_text = fh.getvalue().decode("utf-8", errors="ignore")
+            
+            for em in regex_emitent.findall(xml_text):
+                val = em.strip()
+                if val: 
+                    emitenti_gasiti.add(val)
+                
+            for ta in regex_tip_act.findall(xml_text):
+                val = ta.strip()
+                if val: 
+                    tipuri_acte_gasite.add(val)
+
+            contor_total_procesat += 1
+
+            if contor_total_procesat % 100 == 0:
+                print(f"   📊 [Progres] Procesate: {contor_total_procesat}/{len(fisiere_tinta)} fișiere", flush=True)
+
+        except Exception as e:
+            print(f"⚠️ Eroare la fișierul {nume_fisier}: {e}", flush=True)
+            continue
+
+    print(f"\n✅ [Procesare Finalizată] Total fișiere scanate: {contor_total_procesat}", flush=True)
+
     cale_emitenti = f"lista_emitenti_{string_ani}.csv"
     cale_acte = f"lista_tip_acte_{string_ani}.csv"
     
@@ -104,7 +109,7 @@ def extrage_taguri_din_matrice(service, ani_procesare):
         for t in sorted(list(tipuri_acte_gasite)):
             writer.writerow([t])
             
-    print(f"{VERDE}✅ [Gata] Fragmentul pentru anii {string_ani} a fost salvat complet!{RESET}", flush=True)
+    print(f"{VERDE}✅ [Gata] Lista brute de emitenți și tipuri de acte salvată în '{cale_emitenti}' și '{cale_acte}'!{RESET}", flush=True)
 
 if __name__ == "__main__":
     argumente_numerice = []
@@ -119,7 +124,7 @@ if __name__ == "__main__":
     elif len(argumente_numerice) >= 2:
         ani_finali = list(range(argumente_numerice[0], argumente_numerice[1] + 1))
     else:
-        print(f"{ROSU}🛑 Eroare: Lipsesc anii ca parametru!{RESET}")
+        print(f"{ROSU}🛑 Eroare: Lipsesc anii ca parametru! (Exemplu: python script.py 2020 2024){RESET}")
         sys.exit(1)
         
     drive_service = get_drive_service()
