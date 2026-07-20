@@ -6,7 +6,7 @@ import re
 import io
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 VERDE = "\033[92m"
 GALBEN = "\033[93m"
@@ -14,6 +14,14 @@ ROSU = "\033[91m"
 RESET = "\033[0m"
 
 CALE_INDEX_LOCAL = "index_xml.json"
+
+# Folosim ID-ul din METADATA_FOLDER_ID sau fallback pe primul ID din DRIVE_FOLDER_XML
+FOLDER_METADATE_ID = os.getenv("METADATA_FOLDER_ID", "").strip()
+
+if not FOLDER_METADATE_ID:
+    FOLDERE_XML_RAW = os.getenv("DRIVE_FOLDER_XML", "").replace('"', '').replace("'", "").replace("\n", "").replace("\r", "")
+    FOLDERE_XML_IDS = [fid.strip() for fid in FOLDERE_XML_RAW.split(",") if fid.strip()]
+    FOLDER_METADATE_ID = FOLDERE_XML_IDS[0] if FOLDERE_XML_IDS else None
 
 def get_drive_service():
     scopes = ["https://www.googleapis.com/auth/drive"]
@@ -30,6 +38,32 @@ def get_drive_service():
         
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
+def incarca_pe_drive(service, cale_fisier_local, folder_id):
+    if not folder_id:
+        print(f"⚠️ Nu s-a specificat ID-ul folderului de destinație pe Drive pentru {cale_fisier_local}.", flush=True)
+        return
+
+    nume_fisier = os.path.basename(cale_fisier_local)
+    media = MediaFileUpload(cale_fisier_local, mimetype='text/csv', resumable=True)
+
+    try:
+        query = f"'{folder_id}' in parents and name = '{nume_fisier}' and trashed = false"
+        res = service.files().list(q=query, spaces='drive', fields='files(id)', supportsAllDrives=True).execute()
+        files = res.get('files', [])
+
+        if files:
+            file_id = files[0]['id']
+            service.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
+            print(f"{VERDE}✅ Sincronizat pe Drive (Update) în Metadate: {nume_fisier} (ID: {file_id}){RESET}", flush=True)
+            return
+
+        file_metadata = {'name': nume_fisier, 'parents': [folder_id]}
+        f_nou = service.files().create(body=file_metadata, media_body=media, supportsAllDrives=True, fields='id').execute()
+        print(f"{VERDE}🎉 Încarcat pe Drive (Nou) în Metadate: {nume_fisier} (ID: {f_nou.get('id')}){RESET}", flush=True)
+
+    except Exception as e:
+        print(f"{ROSU}❌ Eroare încărcare Drive {nume_fisier}:{RESET} {e}", flush=True)
+
 def extrage_taguri_din_matrice(service, ani_procesare):
     if not os.path.exists(CALE_INDEX_LOCAL):
         print(f"{ROSU}🛑 Eroare Extragere: Nu s-a găsit fișierul '{CALE_INDEX_LOCAL}'!{RESET}")
@@ -43,11 +77,9 @@ def extrage_taguri_din_matrice(service, ani_procesare):
     emitenti_gasiti = set()
     tipuri_acte_gasite = set()
 
-    # Regex mai permisiv pentru tag-uri cu atribute sau namespace-uri
     regex_emitent = re.compile(r"<[^>]*?Emitent[^>]*?>(.*?)</[^>]*?Emitent>", re.DOTALL | re.IGNORECASE)
     regex_tip_act = re.compile(r"<[^>]*?TipAct[^>]*?>(.*?)</[^>]*?TipAct>", re.DOTALL | re.IGNORECASE)
 
-    # Filtram fișierele din index care aparțin anilor ceruți
     fisiere_tinta = [
         (nume, info) for nume, info in fisiere_map.items() 
         if info.get('an') in ani_procesare
@@ -75,21 +107,18 @@ def extrage_taguri_din_matrice(service, ani_procesare):
             
             for em in regex_emitent.findall(xml_text):
                 val = em.strip()
-                if val: 
-                    emitenti_gasiti.add(val)
+                if val: emitenti_gasiti.add(val)
                 
             for ta in regex_tip_act.findall(xml_text):
                 val = ta.strip()
-                if val: 
-                    tipuri_acte_gasite.add(val)
+                if val: tipuri_acte_gasite.add(val)
 
             contor_total_procesat += 1
 
-            if contor_total_procesat % 100 == 0:
+            if contor_total_procesat % 500 == 0:
                 print(f"   📊 [Progres] Procesate: {contor_total_procesat}/{len(fisiere_tinta)} fișiere", flush=True)
 
-        except Exception as e:
-            print(f"⚠️ Eroare la fișierul {nume_fisier}: {e}", flush=True)
+        except Exception:
             continue
 
     print(f"\n✅ [Procesare Finalizată] Total fișiere scanate: {contor_total_procesat}", flush=True)
@@ -109,7 +138,10 @@ def extrage_taguri_din_matrice(service, ani_procesare):
         for t in sorted(list(tipuri_acte_gasite)):
             writer.writerow([t])
             
-    print(f"{VERDE}✅ [Gata] Lista brute de emitenți și tipuri de acte salvată în '{cale_emitenti}' și '{cale_acte}'!{RESET}", flush=True)
+    print(f"{VERDE}✅ [Salvat Local] '{cale_emitenti}' și '{cale_acte}'. Se încarcă pe Drive...{RESET}", flush=True)
+
+    incarca_pe_drive(service, cale_emitenti, FOLDER_METADATE_ID)
+    incarca_pe_drive(service, cale_acte, FOLDER_METADATE_ID)
 
 if __name__ == "__main__":
     argumente_numerice = []
@@ -124,7 +156,7 @@ if __name__ == "__main__":
     elif len(argumente_numerice) >= 2:
         ani_finali = list(range(argumente_numerice[0], argumente_numerice[1] + 1))
     else:
-        print(f"{ROSU}🛑 Eroare: Lipsesc anii ca parametru! (Exemplu: python script.py 2020 2024){RESET}")
+        print(f"{ROSU}🛑 Eroare: Lipsesc anii ca parametru!{RESET}")
         sys.exit(1)
         
     drive_service = get_drive_service()
