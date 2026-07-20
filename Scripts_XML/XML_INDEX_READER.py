@@ -1,7 +1,5 @@
 # ==============================================================================
-# Ofera indexul storage-ul de fisiere XML actualizat LIVE
-#
-#📌 CUM SE APELEAZĂ DIN ALTE SCRIPTURI (QUICK REFERENCE):
+# 📌 CUM SE APELEAZĂ DIN ALTE SCRIPTURI (QUICK REFERENCE):
 #
 # from XML_INDEX_READER import obtine_index_virtual, obtine_fisiere_neprocesate
 # 
@@ -12,8 +10,6 @@
 # de_procesat = obtine_fisiere_neprocesate(service, nume_flag="Tags_extracted")
 # ==============================================================================
 
-
-
 import os
 import json
 import io
@@ -21,8 +17,13 @@ import re
 from googleapiclient.http import MediaIoBaseDownload
 
 CALE_INDEX_LOCAL = "index_xml.json"
-INDEX_FILE_ID = os.getenv("XML_STORAGE_INDEX", "").strip()
-FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES", "").replace('"', '').replace("'", "").strip()
+
+# ID-uri de fallback extrase direct din configurarea proiectului
+DEFAULT_INDEX_FILE_ID = "1OkPgwX_F6FKwupuhD9kO3rynj4zdel0N"
+DEFAULT_TEMP_FOLDER_ID = "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
+
+INDEX_FILE_ID = os.getenv("XML_STORAGE_INDEX", "").strip() or DEFAULT_INDEX_FILE_ID
+FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES", "").replace('"', '').replace("'", "").strip() or DEFAULT_TEMP_FOLDER_ID
 
 # Citim folderele XML din mediu
 FOLDERE_XML_RAW = os.getenv("DRIVE_FOLDER_XML", "").replace('"', '').replace("'", "").replace("\n", "").replace("\r", "")
