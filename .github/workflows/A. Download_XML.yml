@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ani: ["1970 1974", "1975 1979", "1980 1989", "1990 1994", "195 1999", "2012 2013"]
+        ani: ["1970 1974", "1975 1979", "1980 1989", "1990 1994", "1995 1999", "2012 2013"]
 
     steps:
       - name: Verificare Cod Sursa (Checkout)
