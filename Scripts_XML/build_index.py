@@ -15,16 +15,9 @@ RESET = "\033[0m"
 
 CALE_INDEX_LOCAL = "index_xml.json"
 
-DEFAULT_INDEX_FILE_ID = "1OkPgwX_F6FKwupuhD9kO3rynj4zdel0N"
-DEFAULT_TEMP_FOLDER_ID = "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
+INDEX_FILE_ID = os.getenv("XML_STORAGE_INDEX", "").strip()
+FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES", "").replace('"', '').replace("'", "").strip()
 
-# 1. Variabila directă cu ID-ul fișierului index_xml.json
-INDEX_FILE_ID = os.getenv("XML_STORAGE_INDEX", "").strip() or DEFAULT_INDEX_FILE_ID
-
-# 2. Variabila pentru folderul cu indexuri temporare / mutații de flag-uri
-FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES", "").replace('"', '').replace("'", "").strip() or DEFAULT_TEMP_FOLDER_ID
-
-# 3. Variabila pentru folderele de stocare XML
 FOLDERE_XML_RAW = os.getenv("DRIVE_FOLDER_XML", "").replace('"', '').replace("'", "").replace("\n", "").replace("\r", "")
 FOLDERE_XML_IDS = [fid.strip() for fid in FOLDERE_XML_RAW.split(",") if fid.strip()] or [
     "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m",
@@ -54,10 +47,7 @@ def descarca_index_existenta_din_drive(service):
         return
 
     try:
-        cerere = service.files().get_media(
-            fileId=INDEX_FILE_ID,
-            supportsAllDrives=True
-        )
+        cerere = service.files().get_media(fileId=INDEX_FILE_ID, supportsAllDrives=True)
         fh = io.FileIO(CALE_INDEX_LOCAL, 'wb')
         downloader = MediaIoBaseDownload(fh, cerere)
         gata = False
@@ -68,33 +58,39 @@ def descarca_index_existenta_din_drive(service):
         print(f"⚠️ Nu s-a putut descărca fișierul index folosind XML_STORAGE_INDEX: {e}", flush=True)
 
 
-def salveaza_index_in_drive(service):
-    """Update direct pe fișierul de index master din Drive."""
-    if not os.path.exists(CALE_INDEX_LOCAL):
-        return
-        
-    media = MediaFileUpload(CALE_INDEX_LOCAL, mimetype='application/json', resumable=True)
+def salveaza_index_in_drive(service, fisiere_map, e_partial=False):
+    """Salvează starea pe disc și face update direct în Drive."""
+    acum_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    
+    structura_finala = {
+        "last_updated": acum_iso,
+        "total_fisiere": len(fisiere_map),
+        "fisiere": fisiere_map
+    }
 
-    if INDEX_FILE_ID:
-        try:
-            service.files().update(
-                fileId=INDEX_FILE_ID,
-                media_body=media,
-                supportsAllDrives=True
-            ).execute()
-            print(f"📤 [Cloud Sync] Indexul 'index_xml.json' a fost actualizat direct pe ID-ul: {INDEX_FILE_ID}!", flush=True)
-            return
-        except Exception as e:
-            print(f"⚠️ Eroare la update pe XML_STORAGE_INDEX ({INDEX_FILE_ID}): {e}", flush=True)
+    with open(CALE_INDEX_LOCAL, "w", encoding="utf-8") as f:
+        json.dump(structura_finala, f, ensure_ascii=False, indent=2)
+
+    if not INDEX_FILE_ID:
+        return
+
+    media = MediaFileUpload(CALE_INDEX_LOCAL, mimetype='application/json', resumable=True)
+    eticheta = "CHECKPOINT INTERMEDIAR (10k)" if e_partial else "MASTER INDEX FINAL"
+
+    try:
+        service.files().update(
+            fileId=INDEX_FILE_ID,
+            media_body=media,
+            supportsAllDrives=True
+        ).execute()
+        print(f"💾 [Cloud Checkpoint] {eticheta} salvat pe Drive! Total: {len(fisiere_map)} fișiere.", flush=True)
+    except Exception as e:
+        print(f"⚠️ Eroare la salvarea pe Drive ({INDEX_FILE_ID}): {e}", flush=True)
 
 
 def curata_cos_de_gunoi_targetat(service):
-    """
-    RUTINĂ SAFE DE CURĂȚARE:
-    Scanează strict cele 4 foldere noastre de stocare XML și șterge definitiv 
-    DOAR fișierele care se află deja în Coșul de Gunoi (trashed = true).
-    """
-    print(f"\n{GALBEN}🧹 [Rutină Curățare] Verificare fișiere în Coșul de Gunoi (Trash) pe folderele XML...{RESET}", flush=True)
+    """Șterge definitiv fișierele din Trash aparținând celor 4 foldere."""
+    print(f"\n{GALBEN}🧹 [Rutină Curățare] Verificare fișiere în Coșul de Gunoi (Trash)...{RESET}", flush=True)
     total_sterse = 0
 
     for idx_folder, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
@@ -138,15 +134,9 @@ def curata_cos_de_gunoi_targetat(service):
 
     if total_sterse > 0:
         print(f"{VERDE}✅ [Curățare Finalizată] Eliberate {total_sterse} noduri din Coșul de Gunoi!{RESET}", flush=True)
-    else:
-        print(f"✨ Coșul de Gunoi este curat. Niciun fișier de șters.", flush=True)
 
 
 def aplica_si_curata_indexuri_temporare(service, fisiere_map):
-    """
-    Scanează folderul TEMPORARY_XML_INDEXES, aplică actualizările de flag-uri 
-    ÎN ORDINE CRONOLOGICĂ (după createdTime) și elimină fișierele temporare după consumare.
-    """
     if not FOLDER_TEMP_INDEXES_ID:
         return fisiere_map
 
@@ -163,9 +153,7 @@ def aplica_si_curata_indexuri_temporare(service, fisiere_map):
         if not loguri_temp:
             return fisiere_map
 
-        # 🕒 SORTARE CRONOLOGICĂ EXPLICITĂ (de la cel mai vechi la cel mai nou)
         loguri_temp.sort(key=lambda x: x.get('createdTime', ''))
-
         print(f"\n{GALBEN}🔄 [Consolidare Mutații] Găsite {len(loguri_temp)} indexuri temporare în Drive. Se aplică cronologic...{RESET}", flush=True)
 
         for log_file in loguri_temp:
@@ -175,25 +163,21 @@ def aplica_si_curata_indexuri_temporare(service, fisiere_map):
             try:
                 content_bytes = service.files().get_media(fileId=file_id, supportsAllDrives=True).execute()
                 data_log = json.loads(content_bytes.decode('utf-8'))
-                
                 flag_updates = data_log.get('flag_updates', {})
                 numar_updateuri = 0
 
                 for nume_f, modi_flags in flag_updates.items():
                     if isinstance(modi_flags, dict):
-                        # Caz A: Worker-ul raportează că fișierul a fost șters din Drive
                         if modi_flags.get("_deleted") is True:
                             if nume_f in fisiere_map:
                                 del fisiere_map[nume_f]
                                 numar_updateuri += 1
-                        # Caz B: Worker-ul actualizează flag-urile normale
                         else:
                             if nume_f in fisiere_map:
                                 for key, val in modi_flags.items():
                                     fisiere_map[nume_f][key] = val
                                 numar_updateuri += 1
 
-                # Ștergem fișierul temporar din Drive după consumare
                 service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
                 print(f"   └─ ✅ Aplicat și șters din Drive: {file_name} ({numar_updateuri} mutații procesate)", flush=True)
 
@@ -209,10 +193,7 @@ def aplica_si_curata_indexuri_temporare(service, fisiere_map):
 def construieste_sau_actualizeaza_index():
     service = get_drive_service()
     
-    # 1. Descărcăm indexul existent
     descarca_index_existenta_din_drive(service)
-    
-    # 2. Executăm rutina safe de curățare a coșului de gunoi
     curata_cos_de_gunoi_targetat(service)
     
     pune_reset = os.getenv("STRATEGIE_RESET", "false").lower() == "true"
@@ -234,10 +215,12 @@ def construieste_sau_actualizeaza_index():
     else:
         print(f"🚀 [FULL INDEX] Se construiește indexul complet de la zero...", flush=True)
 
-    fisiere_noi_sau_modificate = 0
     pattern_nume = re.compile(r"brut_legislatie_(\d+)_pag(\d+)\.xml")
+    
+    # Contor global pentru verificat pragul de 10.000 fișiere adăugate/procesate
+    contor_fisiere_noi = 0
 
-    # STEP 1: Scanăm cele 4 foldere de XML pentru a adăuga EXCLUSIV fișiere noi
+    # STEP 1: Scanăm cele 4 foldere de XML pentru a adăuga fișiere
     for idx_folder, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
         print(f"\n{GALBEN}📂 Scanare Folder XML {idx_folder}/{len(FOLDERE_XML_IDS)} (ID: {folder_id[:8]}...){RESET}", flush=True)
         
@@ -254,7 +237,7 @@ def construieste_sau_actualizeaza_index():
                 response = service.files().list(
                     q=query,
                     spaces='drive',
-                    fields='nextPageToken, files(id, name, description)',
+                    fields='nextPageToken, files(id, name)',  # Fără 'description' (fără opțiunea processed)
                     pageSize=1000,
                     pageToken=page_token,
                     supportsAllDrives=True,
@@ -267,14 +250,11 @@ def construieste_sau_actualizeaza_index():
 
                 for f in files:
                     nume = f['name']
-                    desc = f.get('description', '')
-                    is_processed = (desc == 'processed=true' or 'processed=true' in desc)
                     
                     match = pattern_nume.search(nume)
                     an_val = int(match.group(1)) if match else None
                     pag_val = int(match.group(2)) if match else None
 
-                    # Păstrăm flag-ul 'Tags_extracted' dacă fișierul era deja în index
                     stare_tags_existenta = fisiere_map.get(nume, {}).get("Tags_extracted", False)
 
                     fisiere_map[nume] = {
@@ -282,14 +262,15 @@ def construieste_sau_actualizeaza_index():
                         'folder_id': folder_id,
                         'an': an_val,
                         'pagina': pag_val,
-                        'Tags_extracted': stare_tags_existenta,
-                        'processed': is_processed
+                        'Tags_extracted': stare_tags_existenta
                     }
+                    
                     contor_folder += 1
-                    fisiere_noi_sau_modificate += 1
+                    contor_fisiere_noi += 1
 
-                    if contor_folder % 1000 == 0:
-                        print(f"   ⚡ [Folder {folder_id[:8]}] Progres: {contor_folder} fișiere parcurse... (Total unice în index: {len(fisiere_map)})", flush=True)
+                    # 💾 SALVARE AUTOMATĂ PE DRIVE LA FIECARE 10.000 DE FIȘIERE
+                    if contor_fisiere_noi % 10000 == 0:
+                        salveaza_index_in_drive(service, fisiere_map, e_partial=True)
 
                 page_token = response.get('nextPageToken', None)
                 if not page_token:
@@ -303,21 +284,9 @@ def construieste_sau_actualizeaza_index():
     # STEP 2: Aplicăm toate actualizările din folderul TEMPORARY_XML_INDEXES (cronologic)
     fisiere_map = aplica_si_curata_indexuri_temporare(service, fisiere_map)
 
-    # STEP 3: Salvăm indexul master înapoi în Drive
-    acum_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    
-    structura_finala = {
-        "last_updated": acum_iso,
-        "total_fisiere": len(fisiere_map),
-        "fisiere": fisiere_map
-    }
-
-    with open(CALE_INDEX_LOCAL, "w", encoding="utf-8") as f:
-        json.dump(structura_finala, f, ensure_ascii=False, indent=2)
-
-    print(f"\n{VERDE}✅ [Master Index Salvat] Total în index: {len(fisiere_map)} fișiere unice. Ștampila: {acum_iso}{RESET}", flush=True)
-
-    salveaza_index_in_drive(service)
+    # STEP 3: Salvare finală completă
+    print(f"\n{VERDE}✅ [Master Index Salvat Final] Total în index: {len(fisiere_map)} fișiere unice.{RESET}", flush=True)
+    salveaza_index_in_drive(service, fisiere_map, e_partial=False)
 
 
 if __name__ == "__main__":
