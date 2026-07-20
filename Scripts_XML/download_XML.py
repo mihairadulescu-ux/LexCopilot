@@ -1,4 +1,3 @@
-# Culori pentru un log frumos în consolă
 VERDE = "\033[92m"
 GALBEN = "\033[93m"
 ROSU = "\033[91m"
@@ -75,6 +74,9 @@ def get_already_downloaded_pages(service, target_year):
 
     print(f"⚡ [Scanare Istoric] Colectare pagini existente pentru anul {target_year}...")
 
+    # Regex specific: extragem DOAR numărul aflat după '_pag'
+    pattern_pagina = re.compile(rf"brut_legislatie_{target_year}_pag(\d+)\.xml$")
+
     for folder_id in FOLDER_IDS:
         page_token = None
         query = f"'{folder_id}' in parents and name contains 'brut_legislatie_{target_year}_pag' and trashed = false"
@@ -94,7 +96,7 @@ def get_already_downloaded_pages(service, target_year):
                 for file in response.get('files', []):
                     name = file.get('name', '')
                     
-                    match = re.search(r"_pag(\d+)\.xml$", name)
+                    match = pattern_pagina.search(name)
                     if match:
                         valoare_pagina = int(match.group(1))
                         valid_pages.add(valoare_pagina)
@@ -151,7 +153,7 @@ def create_fresh_soap_client():
     Creează o instanță curată de client SOAP cu protecție anti-freeze.
     Forțează întreruperea rețelei la 45 secunde dacă serverul lasă canalul deschis fără să trimită date.
     """
-    socket.setDefaulttimeout(45.0)  # Protecție globală la nivel de socket Python
+    socket.setdefaulttimeout(45.0)  # CORECTAT: setdefaulttimeout cu 'd' mic
     
     history = HistoryPlugin()
     transport = Transport(timeout=45, operation_timeout=45)
