@@ -4,6 +4,7 @@ import json
 import time
 import io
 import hashlib
+import http.client
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
@@ -100,40 +101,58 @@ def obtine_folder_disponibil(service, foldere_candidate):
     """Determină primul folder din listă care nu a atins limita Drive."""
     for fid in foldere_candidate:
         try:
-            # Verificăm dacă putem scrie o interogare pe folder
             query = f"'{fid}' in parents and trashed = false"
-            res = service.files().list(q=query, pageSize=1, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+            service.files().list(q=query, pageSize=1, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
             return fid
         except Exception:
             print(f"⚠️ [Folder Inaccesibil/Saturat] ID: {fid}. Se trece la următorul...", flush=True)
     return foldere_candidate[0] if foldere_candidate else None
 
 
-def descarca_xml_pagina(an, pagina):
-    """Efectuează cererea HTTP către API-ul de legislație."""
+def descarca_xml_pagina(an, pagina, max_retries=4):
+    """
+    Efectuează cererea HTTP către API-ul de legislație cu sistem de Retry & Backoff Exponențial.
+    Returnează:
+      - bytes  -> XML valid descărcat
+      - "GOL"  -> Pagina este real vidă (răspuns HTTP OK dar fără conținut/404)
+      - None   -> Server picat/eroare persistentă de rețea (NU se contorizează ca pagină vidă!)
+    """
     url = f"http://legislatie.just.ro/api/getxml/{an}/{pagina}"
     req = urllib.request.Request(
         url, 
-        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Connection': 'keep-alive'
+        }
     )
     
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            continut = response.read()
-            text_str = continut.decode('utf-8', errors='ignore')
-            
-            # Verificăm dacă răspunsul este un XML valid și conține date
-            if "<xml" in text_str.lower() or "<acte" in text_str.lower() or "<legis" in text_str.lower():
-                return continut
-            return None
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return None
-        print(f"⚠️ HTTP Error {e.code} pe {an} pag {pagina}", flush=True)
-        return None
-    except Exception as e:
-        print(f"⚠️ Eroare rețea descărcare {an} pag {pagina}: {e}", flush=True)
-        return None
+    pauza = 3
+    for incercare in range(1, max_retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=45) as response:
+                continut = response.read()
+                text_str = continut.decode('utf-8', errors='ignore')
+                
+                # Verificăm dacă răspunsul este un XML valid și conține date
+                if "<xml" in text_str.lower() or "<acte" in text_str.lower() or "<legis" in text_str.lower():
+                    return continut
+                
+                return "GOL"
+
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return "GOL"
+            print(f"⚠️ [HTTP {e.code}] An {an} pag {pagina} (Încercarea {incercare}/{max_retries})", flush=True)
+
+        except (urllib.error.URLError, http.client.RemoteDisconnected, ConnectionResetError, Exception) as e:
+            print(f"⚠️ [Eroare Rețea/Server] {e} pe {an} pag {pagina} (Încercarea {incercare}/{max_retries}). Pauză {pauza}s...", flush=True)
+
+        time.sleep(pauza)
+        pauza *= 2  # Backoff exponențial: 3s, 6s, 12s, 24s...
+
+    # Dacă după toate reîncercările serverul tot nu a răspuns, raportăm eroare de rețea
+    return None
 
 
 def proceseaza_segment_ani(service, an_start, an_end):
@@ -171,13 +190,19 @@ def proceseaza_segment_ani(service, an_start, an_end):
                 continue
 
             print(f"--- [AVANS] An {an} / Pagina {pagina} ---", flush=True)
-            continut_bytes = descarca_xml_pagina(an, pagina)
+            continut_rezultat = descarca_xml_pagina(an, pagina)
 
-            if not continut_bytes:
+            # 1. EROARE REȚEA / SERVER PICAT -> Așteptăm și reîncercăm ACEEAȘI PAGINĂ
+            if continut_rezultat is None:
+                print(f"🛑 [Server Down] Serverul sursă nu răspunde. Așteptăm 30 de secunde înainte de a reîncerca pagina {pagina}...", flush=True)
+                time.sleep(30)
+                continue
+
+            # 2. PAGINĂ REAL VIDĂ -> Doar aici contorizăm finalul de an
+            if continut_rezultat == "GOL":
                 pagini_goale_consecutive += 1
-                print(f"ℹ️ [Pagina Vidă] An {an} / Pagina {pagina} (consecutive: {pagini_goale_consecutive})", flush=True)
+                print(f"ℹ️ [Pagina Vidă Confirmata] An {an} / Pagina {pagina} (consecutive: {pagini_goale_consecutive})", flush=True)
                 
-                # Dacă primim 3 pagini goale consecutive, considerăm că am terminat anul
                 if pagini_goale_consecutive >= 3:
                     print(f"✅ Anul {an} finalizat la pagina {pagina - 3}.", flush=True)
                     break
@@ -186,6 +211,8 @@ def proceseaza_segment_ani(service, an_start, an_end):
                 time.sleep(0.5)
                 continue
 
+            # 3. XML VALID DESCARCAT
+            continut_bytes = continut_rezultat
             pagini_goale_consecutive = 0
 
             # Salvare temporară locală
@@ -210,10 +237,10 @@ def proceseaza_segment_ani(service, an_start, an_end):
                 real_file_id = res.get('id')
                 print(f"{VERDE}✅ Fișier salvat pe Drive: {nume_xml} (ID: {real_file_id[:8]}...){RESET}", flush=True)
 
-                # 🎯 Salvare Micro-Index cu PAȘAPORT COMPLET
+                # Salvare Micro-Index cu PAȘAPORT COMPLET
                 salveaza_micro_index_download(service, nume_xml, real_file_id, folder_curent_id, an, pagina)
 
-                # Actualizăm și starea locală din memorie
+                # Actualizăm starea locală din memorie
                 fisiere_master[nume_xml] = {
                     "id": real_file_id,
                     "folder_id": folder_curent_id,
@@ -224,7 +251,6 @@ def proceseaza_segment_ani(service, an_start, an_end):
                 }
 
             except HttpError as err:
-                # Dacă folderul e plin (500k storage limit), trecem la următorul folder
                 if "numStorageBytes" in str(err) or "userRateLimitExceeded" in str(err) or err.resp.status in [403, 507]:
                     print(f"⚠️ [Folder Plin] ID: {folder_curent_id} e saturat. Îl schimbăm...", flush=True)
                     if len(foldere_active) > 1:
@@ -240,7 +266,7 @@ def proceseaza_segment_ani(service, an_start, an_end):
                     os.remove(nume_xml)
 
             pagina += 1
-            time.sleep(0.2)
+            time.sleep(0.3)
 
 
 if __name__ == "__main__":
