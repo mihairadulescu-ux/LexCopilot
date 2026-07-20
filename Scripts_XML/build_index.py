@@ -18,6 +18,7 @@ ROSU = "\033[91m"
 RESET = "\033[0m"
 
 CALE_INDEX_LOCAL = "index_xml.json"
+NUME_FISIER_DRIVE = "index_xml.json"
 
 INDEX_FILE_ID = os.getenv("XML_STORAGE_INDEX", "").strip()
 FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES", "").replace('"', '').replace("'", "").strip()
@@ -41,24 +42,37 @@ def get_drive_service():
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
-def descarca_index_existenta_din_drive(service):
+def cauta_sau_descarca_index_clasic(service):
     if os.path.exists(CALE_INDEX_LOCAL):
         return
-    
-    if not INDEX_FILE_ID:
-        print("ℹ️ 'XML_STORAGE_INDEX' nu este setat. Se va începe un index nou local.", flush=True)
+
+    target_id = INDEX_FILE_ID
+
+    if not target_id and FOLDERE_XML_IDS:
+        try:
+            folder_id = FOLDERE_XML_IDS[0]
+            query = f"'{folder_id}' in parents and name = '{NUME_FISIER_DRIVE}' and trashed = false"
+            res = service.files().list(q=query, spaces='drive', fields='files(id)', supportsAllDrives=True).execute()
+            files = res.get('files', [])
+            if files:
+                target_id = files[0]['id']
+        except Exception as e:
+            print(f"⚠️ Căutare clasică index eșuată: {e}", flush=True)
+
+    if not target_id:
+        print("ℹ️ Nu s-a găsit niciun index anterior pe Drive. Se începe un index local nou.", flush=True)
         return
 
     try:
-        cerere = service.files().get_media(fileId=INDEX_FILE_ID, supportsAllDrives=True)
+        cerere = service.files().get_media(fileId=target_id, supportsAllDrives=True)
         fh = io.FileIO(CALE_INDEX_LOCAL, 'wb')
         downloader = MediaIoBaseDownload(fh, cerere)
         gata = False
         while not gata:
             _, gata = downloader.next_chunk()
-        print(f"📥 [Cloud Sync] Încărcat 'index_xml.json' direct din Drive (ID: {INDEX_FILE_ID[:8]}...).", flush=True)
+        print(f"📥 [Cloud Sync] Încărcat '{NUME_FISIER_DRIVE}' din Drive (ID: {target_id[:8]}...).", flush=True)
     except Exception as e:
-        print(f"⚠️ Nu s-a putut descărca fișierul index folosind XML_STORAGE_INDEX: {e}", flush=True)
+        print(f"⚠️ Nu s-a putut descărca fișierul index: {e}", flush=True)
 
 
 def salveaza_local_checkpoint(fisiere_map, informatii=""):
@@ -76,23 +90,41 @@ def salveaza_local_checkpoint(fisiere_map, informatii=""):
 
 
 def salveaza_final_in_drive(service, fisiere_map):
-    salveaza_local_checkpoint(fisiere_map, informatii="Stare finală înainte de Upload")
+    salveaza_local_checkpoint(fisiere_map, informatii="Stare finală")
 
     folder_destinatie_id = FOLDERE_XML_IDS[0] if FOLDERE_XML_IDS else None
-
-    print(f"\n{GALBEN}📤 [Upload Drive] Se încearcă crearea/actualizarea pe Google Drive...{RESET}", flush=True)
+    print(f"\n{GALBEN}📤 [Upload Drive] Se salvează indexul pe Google Drive...{RESET}", flush=True)
     
-    if not os.path.exists(CALE_INDEX_LOCAL):
-        print(f"{ROSU}❌ FIȘIERUL LOCAL 'index_xml.json' NU EXISTĂ PE DISC! Upload anulat.{RESET}", flush=True)
-        return
-
     media = MediaFileUpload(CALE_INDEX_LOCAL, mimetype='application/json', resumable=True)
 
-    # 1. Încercăm FORȚAT crearea unui fișier NOU pentru a garanta generarea lui
-    print(f"🔄 [Creare Fișier Nou] Se încearcă crearea în folderul: {folder_destinatie_id}...", flush=True)
+    file_id_gasit = INDEX_FILE_ID
+
+    if not file_id_gasit and folder_destinatie_id:
+        try:
+            query = f"'{folder_destinatie_id}' in parents and name = '{NUME_FISIER_DRIVE}' and trashed = false"
+            res = service.files().list(q=query, spaces='drive', fields='files(id)', supportsAllDrives=True).execute()
+            files = res.get('files', [])
+            if files:
+                file_id_gasit = files[0]['id']
+        except Exception:
+            pass
+
+    if file_id_gasit:
+        try:
+            service.files().update(
+                fileId=file_id_gasit,
+                media_body=media,
+                supportsAllDrives=True
+            ).execute()
+            print(f"{VERDE}✅ [Master Index Sincronizat Clasici] Salvat pe ID existent: {file_id_gasit}{RESET}", flush=True)
+            print(f"🔗 Link: https://drive.google.com/file/d/{file_id_gasit}/view", flush=True)
+            return
+        except Exception as update_err:
+            print(f"⚠️ Update pe ID-ul {file_id_gasit} a eșuat ({update_err}). Se încearcă crearea unui fișier nou...", flush=True)
+
     try:
         file_metadata = {
-            'name': 'index_xml.json',
+            'name': NUME_FISIER_DRIVE,
             'parents': [folder_destinatie_id] if folder_destinatie_id else []
         }
         f_nou = service.files().create(
@@ -104,39 +136,23 @@ def salveaza_final_in_drive(service, fisiere_map):
         
         id_nou = f_nou.get('id')
 
-        # Setați permisiunea publică
         try:
             service.permissions().create(
                 fileId=id_nou,
                 body={'type': 'anyone', 'role': 'reader'},
                 supportsAllDrives=True
             ).execute()
-        except Exception as perm_err:
-            print(f"⚠️ Nu s-a putut seta permisiunea publică: {perm_err}", flush=True)
+        except Exception:
+            pass
 
         print(f"\n{VERDE}======================================================================{RESET}", flush=True)
-        print(f"{VERDE}🎉 REUȘITĂ! Fișier nou 'index_xml.json' creat pe Google Drive!{RESET}", flush=True)
+        print(f"{VERDE}🎉 Fișier nou '{NUME_FISIER_DRIVE}' creat cu succes pe Google Drive!{RESET}", flush=True)
         print(f"{VERDE}👉 NOUL ID PENTRU VARIABILĂ ESTE: {id_nou}{RESET}", flush=True)
         print(f"{VERDE}🔗 LINK DIRECT: https://drive.google.com/file/d/{id_nou}/view{RESET}", flush=True)
         print(f"{VERDE}======================================================================{RESET}\n", flush=True)
-        return
     except Exception as create_err:
-        print(f"{ROSU}❌ EROARE LA CREAREA FIȘIERULUI NOU:{RESET} {create_err}", flush=True)
+        print(f"{ROSU}❌ EROARE CRITICĂ LA SALVAREpe DRIVE:{RESET} {create_err}", flush=True)
         traceback.print_exc()
-
-    # 2. Dacă crearea a eșuat, încercăm update ca strategie de rezervă
-    if INDEX_FILE_ID:
-        print(f"🔄 [Update Backup] Se încearcă update pe ID-ul vechi: {INDEX_FILE_ID}...", flush=True)
-        try:
-            service.files().update(
-                fileId=INDEX_FILE_ID,
-                media_body=media,
-                supportsAllDrives=True
-            ).execute()
-            print(f"{VERDE}✅ [Update Successful] Fișier sincronizat pe ID: {INDEX_FILE_ID}!{RESET}", flush=True)
-        except Exception as update_err:
-            print(f"{ROSU}❌ EROARE ȘI LA UPDATE PE ID VECHI:{RESET} {update_err}", flush=True)
-            traceback.print_exc()
 
 
 def curata_cos_de_gunoi_targetat(service):
@@ -240,7 +256,7 @@ def aplica_si_curata_indexuri_temporare(service, fisiere_map):
 def construieste_sau_actualizeaza_index():
     service = get_drive_service()
     
-    descarca_index_existenta_din_drive(service)
+    cauta_sau_descarca_index_clasic(service)
     curata_cos_de_gunoi_targetat(service)
     
     pune_reset = os.getenv("STRATEGIE_RESET", "false").lower() == "true"
@@ -306,6 +322,10 @@ def construieste_sau_actualizeaza_index():
                     }
                     
                     contor_folder += 1
+
+                    # ✅ REPARAT: Printează și salvează checkpoint la fiecare 10.000 fișiere
+                    if contor_folder % 10000 == 0:
+                        salveaza_local_checkpoint(fisiere_map, informatii=f"Folder {idx_folder}: {contor_folder} procesate")
 
                 page_token = response.get('nextPageToken', None)
                 if not page_token:
