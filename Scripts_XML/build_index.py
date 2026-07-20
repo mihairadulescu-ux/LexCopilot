@@ -85,6 +85,62 @@ def salveaza_index_in_drive(service):
             print(f"⚠️ Eroare la update pe XML_STORAGE_INDEX ({INDEX_FILE_ID}): {e}", flush=True)
 
 
+def curata_cos_de_gunoi_targetat(service):
+    """
+    RUTINĂ SAFE DE CURĂȚARE:
+    Scanează strict cele 4 foldere noastre de stocare XML și șterge definitiv 
+    DOAR fișierele care se află deja în Coșul de Gunoi (trashed = true).
+    """
+    print(f"\n{GALBEN}🧹 [Rutină Curățare] Verificare fișiere în Coșul de Gunoi (Trash) pe folderele XML...{RESET}", flush=True)
+    total_sterse = 0
+
+    for idx_folder, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
+        # Query strict de siguranță: doar în folderul respectiv ȘI doar cele șterse
+        query = f"'{folder_id}' in parents and trashed = true"
+        page_token = None
+        sterse_folder = 0
+
+        try:
+            while True:
+                response = service.files().list(
+                    q=query,
+                    spaces='drive',
+                    fields='nextPageToken, files(id, name)',
+                    pageSize=1000,
+                    pageToken=page_token,
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True
+                ).execute()
+
+                files = response.get('files', [])
+                if not files:
+                    break
+
+                for f in files:
+                    try:
+                        # Ștergere definitivă per fișier
+                        service.files().delete(fileId=f['id'], supportsAllDrives=True).execute()
+                        sterse_folder += 1
+                        total_sterse += 1
+                    except Exception:
+                        pass  # Ignorăm erorile individuale dacă nu există permisiune pe un fișier specific
+
+                page_token = response.get('nextPageToken', None)
+                if not page_token:
+                    break
+
+            if sterse_folder > 0:
+                print(f"   🗑️ Folder {folder_id[:8]}: Eliminat definitiv {sterse_folder} fișiere din Trash.", flush=True)
+
+        except Exception as e:
+            print(f"   ⚠️ Folder {folder_id[:8]}: Eroare la scanarea Trash-ului: {e}", flush=True)
+
+    if total_sterse > 0:
+        print(f"{VERDE}✅ [Curățare Finalizată] Eliberate {total_sterse} noduri din Coșul de Gunoi!{RESET}", flush=True)
+    else:
+        print(f"✨ Coșul de Gunoi este deja curat. Niciun fișier de șters.", flush=True)
+
+
 def aplica_si_curata_indexuri_temporare(service, fisiere_map):
     """
     Scanează folderul TEMPORARY_XML_INDEXES, extrage doar actualizările de flag-uri,
@@ -143,6 +199,9 @@ def aplica_si_curata_indexuri_temporare(service, fisiere_map):
 def construieste_sau_actualizeaza_index():
     service = get_drive_service()
     descarca_index_existenta_din_drive(service)
+    
+    # Executăm rutina safe de curățare a coșului de gunoi înainte de scanare
+    curata_cos_de_gunoi_targetat(service)
     
     pune_reset = os.getenv("STRATEGIE_RESET", "false").lower() == "true"
     
