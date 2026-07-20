@@ -1,7 +1,9 @@
 # ==============================================================================
-# 📌 CUM SE APELEAZĂ DIN ALTE SCRIPTURI (QUICK REFERENCE):
+# Ofera indexul storage-ul de fisiere XML actualizat LIVE
 #
-# from index_reader import obtine_index_virtual, obtine_fisiere_neprocesate
+#📌 CUM SE APELEAZĂ DIN ALTE SCRIPTURI (QUICK REFERENCE):
+#
+# from XML_INDEX_READER import obtine_index_virtual, obtine_fisiere_neprocesate
 # 
 # # Opțiunea A: Obții dicționarul complet actualizat la secundă
 # index_virtual = obtine_index_virtual(service)
@@ -9,6 +11,8 @@
 # # Opțiunea B: Obții direct lista de fișiere neprocesate pentru un flag (ex: 'Tags_extracted')
 # de_procesat = obtine_fisiere_neprocesate(service, nume_flag="Tags_extracted")
 # ==============================================================================
+
+
 
 import os
 import json
