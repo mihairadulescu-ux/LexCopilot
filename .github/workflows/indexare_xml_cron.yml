@@ -1,7 +1,8 @@
-name: 🔄 CRON - Indexare Incrementală XML (2 ore)
+name: 🔄 CRON - Indexare XML (Incremental / Daily Full)
 
 on:
   schedule:
+    # Rulează din 2 în 2 ore
     - cron: '0 */2 * * *'
   workflow_dispatch:
     inputs:
@@ -30,12 +31,29 @@ jobs:
           python -m pip install --upgrade pip
           pip install google-api-python-client google-auth
 
+      - name: Determinare Strategie (Daily Full la ora 07:00 vs Incremental)
+        id: check_reset
+        run: |
+          # Obținem ora curentă în UTC
+          ORA_CURENTA=$(date -u +'%H')
+          PUNE_RESET_INPUT="${{ github.event.inputs.pune_reset }}"
+          
+          # Dacă e ora 07:00 UTC SAU s-a declanșat manual cu reset=true
+          if [ "$ORA_CURENTA" -eq "07" ] || [ "$PUNE_RESET_INPUT" == "true" ]; then
+            echo "FORTEAZA_RESET=true" >> $GITHUB_ENV
+            echo "🚀 [Strategie] Se execută FULL INDEX (Reindexare completă)."
+          else
+            echo "FORTEAZA_RESET=false" >> $GITHUB_ENV
+            echo "⚡ [Strategie] Se execută INCREMENTAL INDEX (Delta)."
+          fi
+
       - name: Executare Script Indexare
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRIVE_FOLDER_XML: ${{ vars.DRIVE_FOLDER_XML }}
           XML_STORAGE_INDEX: ${{ vars.XML_STORAGE_INDEX }}
-          STRATEGIE_RESET: ${{ github.event.inputs.pune_reset }}
+          TEMPORARY_XML_INDEXES: ${{ vars.TEMPORARY_XML_INDEXES }}
+          STRATEGIE_RESET: ${{ env.FORTEAZA_RESET }}
           PYTHONUNBUFFERED: "1"
         run: |
           python -u Scripts_XML/build_index.py
