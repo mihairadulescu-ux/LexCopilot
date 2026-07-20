@@ -17,18 +17,9 @@ RESET = "\033[0m"
 CALE_INDEX_LOCAL = "index_xml.json"
 NUME_INDEX_DRIVE = "index_xml.json"
 
-# ID-uri configurare mediu
 INDEX_FILE_ID = os.getenv("XML_STORAGE_INDEX", "").strip()
 FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES", "").replace('"', '').replace("'", "").strip() or "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
 FOLDER_METADATE_ID = os.getenv("METADATA_FOLDER_ID", "").strip() or "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
-
-FOLDERE_XML_RAW = os.getenv("DRIVE_FOLDER_XML", "").replace('"', '').replace("'", "").replace("\n", "").replace("\r", "")
-FOLDERE_XML_IDS = [fid.strip() for fid in FOLDERE_XML_RAW.split(",") if fid.strip()] or [
-    "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m",
-    "1G7CkaoivnTR0O8mZceB0143Q6956C1-1",
-    "1T2N_v81889Y7tyHUbrTSLR073YC7mGk5",
-    "1NWe4JKhhaQ4HxFGs7FfhxnlemE0ZM2E2"
-]
 
 
 def get_drive_service():
@@ -48,7 +39,6 @@ def get_drive_service():
 
 
 def descarca_index_master(service):
-    """Descărcare Master Index din Drive cu suport complet pentru Shared Drives."""
     target_id = INDEX_FILE_ID
 
     if not target_id or target_id == "1OkPgwX_F6FKwupuhD9kO3rynj4zdel0N":
@@ -90,8 +80,8 @@ def descarca_index_master(service):
 
 def aplica_micro_indecsi_si_curata(service, fisiere_master):
     """
-    Citește, aplică și MUTĂ ÎN TRASH micro-indecșii temporari din TEMPORARY_XML_INDEXES.
-    Această abordare previne bucla infinită de re-procesare.
+    Citește, aplică și MUTĂ ÎN TRASH micro-indecșii temporari.
+    Efectuează merge complet pe proprietățile fișierelor.
     """
     if not FOLDER_TEMP_INDEXES_ID:
         return fisiere_master, 0
@@ -110,19 +100,17 @@ def aplica_micro_indecsi_si_curata(service, fisiere_master):
             print("ℹ️ Nu există micro-indecși temporari de consolidat.", flush=True)
             return fisiere_master, 0
 
-        # Sortăm cronologic pentru aplicare ordonată
         loguri_temp.sort(key=lambda x: x.get('createdTime', ''))
         print(f"🔄 [Consolidare Mutații] Găsite {len(loguri_temp)} indexuri temporare în Drive. Se procesează...", flush=True)
 
         mutații_aplicate = 0
-        sterse_count = 0
+        curatate_count = 0
 
         for log_file in loguri_temp:
             file_id = log_file['id']
             file_name = log_file.get('name', file_id)
 
             try:
-                # 1. Descărcăm conținutul micro-indexului
                 cerere = service.files().get_media(fileId=file_id, supportsAllDrives=True)
                 fh = io.BytesIO()
                 downloader = MediaIoBaseDownload(fh, cerere)
@@ -140,24 +128,20 @@ def aplica_micro_indecsi_si_curata(service, fisiere_master):
                                 del fisiere_master[nume_f]
                                 mutații_aplicate += 1
                         else:
-                            if nume_f in fisiere_master:
-                                fisiere_master[nume_f].update(modi_flags)
-                            else:
-                                fisiere_master[nume_f] = modi_flags
+                            if nume_f not in fisiere_master:
+                                fisiere_master[nume_f] = {}
+                            # 🚀 Merge complet de atribute (păstrează ID, an, pagina)
+                            fisiere_master[nume_f].update(modi_flags)
                             mutații_aplicate += 1
 
-                # 2. CURĂȚARE GARANTATĂ: Mutăm în Trash (permis pentru Writer)
+                # 🧹 Mutăm în Trash pentru a rupe bucla infinită
                 try:
-                    service.files().update(
-                        fileId=file_id, 
-                        body={'trashed': True}, 
-                        supportsAllDrives=True
-                    ).execute()
-                    sterse_count += 1
+                    service.files().update(fileId=file_id, body={'trashed': True}, supportsAllDrives=True).execute()
+                    curatate_count += 1
                 except Exception:
                     try:
                         service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
-                        sterse_count += 1
+                        curatate_count += 1
                     except Exception:
                         pass
 
@@ -170,7 +154,7 @@ def aplica_micro_indecsi_si_curata(service, fisiere_master):
             except Exception as e:
                 print(f"   └─ ⚠️ Eroare neașteptată temporar {file_name}: {e}", flush=True)
 
-        print(f"   └─ ✅ Consolidate cu succes {mutații_aplicate} mutații în baza master (curățate {sterse_count} fișiere temporare).", flush=True)
+        print(f"   └─ ✅ Consolidate cu succes {mutații_aplicate} mutații în baza master (curățate {curatate_count} fișiere temporare).", flush=True)
         return fisiere_master, mutații_aplicate
 
     except Exception as e:
@@ -179,7 +163,6 @@ def aplica_micro_indecsi_si_curata(service, fisiere_master):
 
 
 def salveaza_index_master(service, data_master, target_id):
-    """Salvează și urcă indexul master actualizat în Google Drive."""
     data_master["last_updated"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     data_master["total_fisiere"] = len(data_master.get("fisiere", {}))
 
@@ -209,10 +192,8 @@ def main():
 
     print(f"🧠 [Index Incremental] Încărcate {len(fisiere_master)} fișiere unice din master.", flush=True)
 
-    # 1. Consolidare micro-indecși temporari
     fisiere_master, mutatii = aplica_micro_indecsi_si_curata(service, fisiere_master)
 
-    # 2. Salvare finală Master Index pe Drive
     data_master["fisiere"] = fisiere_master
     salveaza_index_master(service, data_master, target_id)
 
