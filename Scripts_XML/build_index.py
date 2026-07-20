@@ -142,7 +142,7 @@ def curata_cos_de_gunoi_targetat(service):
 def aplica_si_curata_indexuri_temporare(service, fisiere_map):
     """
     Scanează folderul TEMPORARY_XML_INDEXES, aplică actualizările de flag-uri 
-    și elimina fișierele marcate ca șterse, apoi elimină fișierele temporare.
+    ÎN ORDINE CRONOLOGICĂ (după createdTime) și elimină fișierele temporare după consumare.
     """
     if not FOLDER_TEMP_INDEXES_ID:
         return fisiere_map
@@ -151,7 +151,7 @@ def aplica_si_curata_indexuri_temporare(service, fisiere_map):
     try:
         resp = service.files().list(
             q=query, 
-            fields="files(id, name)", 
+            fields="files(id, name, createdTime)", 
             supportsAllDrives=True, 
             includeItemsFromAllDrives=True
         ).execute()
@@ -160,7 +160,10 @@ def aplica_si_curata_indexuri_temporare(service, fisiere_map):
         if not loguri_temp:
             return fisiere_map
 
-        print(f"\n{GALBEN}🔄 [Consolidare Mutații] Găsite {len(loguri_temp)} indexuri temporare în Drive. Se aplică mutațiile...{RESET}", flush=True)
+        # 🕒 SORTARE CRONOLOGICĂ EXPLICITĂ (de la cel mai vechi la cel mai nou)
+        loguri_temp.sort(key=lambda x: x.get('createdTime', ''))
+
+        print(f"\n{GALBEN}🔄 [Consolidare Mutații] Găsite {len(loguri_temp)} indexuri temporare în Drive. Se aplică cronologic...{RESET}", flush=True)
 
         for log_file in loguri_temp:
             file_id = log_file['id']
@@ -180,14 +183,14 @@ def aplica_si_curata_indexuri_temporare(service, fisiere_map):
                             if nume_f in fisiere_map:
                                 del fisiere_map[nume_f]
                                 numar_updateuri += 1
-                        # Caz B: Worker-ul actualizează flag-urile normale (ex: Tags_extracted = True)
+                        # Caz B: Worker-ul actualizează flag-urile normale
                         else:
                             if nume_f in fisiere_map:
                                 for key, val in modi_flags.items():
                                     fisiere_map[nume_f][key] = val
                                 numar_updateuri += 1
 
-                # Ștergem fișierul temporar din Drive după aplicarea modificărilor
+                # Ștergem fișierul temporar din Drive după consumare
                 service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
                 print(f"   └─ ✅ Aplicat și șters din Drive: {file_name} ({numar_updateuri} mutații procesate)", flush=True)
 
@@ -294,7 +297,7 @@ def construieste_sau_actualizeaza_index():
         except Exception as e:
             print(f"{ROSU}⚠️ Eroare scanare folder {folder_id[:8]}: {e}{RESET}", flush=True)
 
-    # STEP 2: Aplicăm toate actualizările din folderul TEMPORARY_XML_INDEXES
+    # STEP 2: Aplicăm toate actualizările din folderul TEMPORARY_XML_INDEXES (cronologic)
     fisiere_map = aplica_si_curata_indexuri_temporare(service, fisiere_map)
 
     # STEP 3: Salvăm indexul master înapoi în Drive
