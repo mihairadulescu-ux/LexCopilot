@@ -1,15 +1,3 @@
-# ==============================================================================
-# 📌 CUM SE APELEAZĂ DIN ALTE SCRIPTURI (QUICK REFERENCE):
-#
-# from XML_INDEX_READER import obtine_index_virtual, obtine_fisiere_neprocesate
-# 
-# # Opțiunea A: Obții dicționarul complet actualizat la secundă
-# index_virtual = obtine_index_virtual(service)
-# 
-# # Opțiunea B: Obții direct lista de fișiere neprocesate pentru un flag (ex: 'Tags_extracted')
-# de_procesat = obtine_fisiere_neprocesate(service, nume_flag="Tags_extracted")
-# ==============================================================================
-
 import os
 import json
 import io
@@ -18,11 +6,10 @@ from googleapiclient.http import MediaIoBaseDownload
 
 CALE_INDEX_LOCAL = "index_xml.json"
 
-# ID-uri de fallback extrase direct din configurarea proiectului
-DEFAULT_INDEX_FILE_ID = "1OkPgwX_F6FKwupuhD9kO3rynj4zdel0N"
+# ID-uri de fallback
 DEFAULT_TEMP_FOLDER_ID = "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
 
-INDEX_FILE_ID = os.getenv("XML_STORAGE_INDEX", "").strip() or DEFAULT_INDEX_FILE_ID
+INDEX_FILE_ID = os.getenv("XML_STORAGE_INDEX", "").strip()
 FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES", "").replace('"', '').replace("'", "").strip() or DEFAULT_TEMP_FOLDER_ID
 
 # Citim folderele XML din mediu
@@ -36,13 +23,28 @@ FOLDERE_XML_IDS = [fid.strip() for fid in FOLDERE_XML_RAW.split(",") if fid.stri
 
 
 def descarca_index_master(service):
-    """PASUL 1: Descărcare directă a indexului master prin ID-ul fix furnizat în XML_STORAGE_INDEX."""
-    if not INDEX_FILE_ID:
-        print("ℹ️ 'XML_STORAGE_INDEX' nu este setat. Se începe cu un index vid local.", flush=True)
+    """PASUL 1: Descărcare directă sau auto-descoperire dinamică a indexului master."""
+    target_id = INDEX_FILE_ID
+
+    # Dacă variabila lipsește sau conține ID-ul vechi, căutăm dinamic index_xml.json în folderul de metadate
+    if not target_id or target_id == "1OkPgwX_F6FKwupuhD9kO3rynj4zdel0N":
+        folder_meta = os.getenv("METADATA_FOLDER_ID", "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR").strip()
+        try:
+            query = f"'{folder_meta}' in parents and name = 'index_xml.json' and trashed = false"
+            res = service.files().list(q=query, spaces='drive', fields='files(id)', supportsAllDrives=True).execute()
+            files = res.get('files', [])
+            if files:
+                target_id = files[0]['id']
+                print(f"🔍 [Index Master] Identificat dinamic pe Drive în Metadate (ID: {target_id[:8]}...)", flush=True)
+        except Exception as e:
+            print(f"⚠️ Căutare dinamică index eșuată: {e}", flush=True)
+
+    if not target_id:
+        print("ℹ️ 'XML_STORAGE_INDEX' nu este accesibil. Se începe cu un index vid local.", flush=True)
         return {"last_updated": None, "total_fisiere": 0, "fisiere": {}}
 
     try:
-        cerere = service.files().get_media(fileId=INDEX_FILE_ID, supportsAllDrives=True)
+        cerere = service.files().get_media(fileId=target_id, supportsAllDrives=True)
         fh = io.FileIO(CALE_INDEX_LOCAL, 'wb')
         downloader = MediaIoBaseDownload(fh, cerere)
         gata = False
@@ -54,14 +56,14 @@ def descarca_index_master(service):
             print(f"📥 [Index Master] Descărcat cu succes! ({len(data.get('fisiere', {}))} fișiere în baza master)", flush=True)
             return data
     except Exception as e:
-        print(f"⚠️ Nu s-a putut descărca indexul master din Drive: {e}", flush=True)
+        print(f"⚠️ Nu s-a putut descărca indexul master din Drive (ID: {target_id}): {e}", flush=True)
         return {"last_updated": None, "total_fisiere": 0, "fisiere": {}}
 
 
 def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
     """
-    PASUL 2: CITEȘTE și aplică micro-indecșii existenți în TEMPORARY_XML_INDEXES 
-    ÎN ORDINE CRONOLOGICĂ (după createdTime), actualizând starea în memorie.
+    PASUL 2: Citește și aplică micro-indecșii existenți în TEMPORARY_XML_INDEXES 
+    în ordine cronologică (după createdTime), actualizând starea în memorie.
     """
     if not FOLDER_TEMP_INDEXES_ID:
         return fisiere_map
@@ -79,7 +81,6 @@ def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
         if not loguri_temp:
             return fisiere_map
 
-        # 🕒 SORTARE CRONOLOGICĂ EXPLICITĂ (de la cel mai vechi la cel mai nou)
         loguri_temp.sort(key=lambda x: x.get('createdTime', ''))
 
         print(f"⚡ [Index Virtual] Citire {len(loguri_temp)} micro-indecși temporari în ordine cronologică...", flush=True)
@@ -94,19 +95,17 @@ def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
 
                 for nume_f, modi_flags in flag_updates.items():
                     if isinstance(modi_flags, dict):
-                        # Dacă e marcat ca șters, îl scoatem din indexul virtual
                         if modi_flags.get("_deleted") is True:
                             if nume_f in fisiere_map:
                                 del fisiere_map[nume_f]
                                 mutații_aplicate += 1
                         else:
-                            # Altfel actualizăm/suprascriem flag-urile în ordine cronologică
                             if nume_f in fisiere_map:
                                 for key, val in modi_flags.items():
                                     fisiere_map[nume_f][key] = val
                                 mutații_aplicate += 1
             except Exception:
-                pass  # Ignorăm fișierele în curs de scriere
+                pass
 
         print(f"   └─ ✅ Aplicat în memorie {mutații_aplicate} mutații ordonate cronologic.", flush=True)
 
@@ -120,19 +119,16 @@ def obtine_index_virtual(service):
     """
     SECVENȚA EXACTĂ DE EXECUȚIE:
     1. Descarcă Master Index (index_xml.json).
-    2. CITEȘTE și aplică toți micro-indecșii temporari neconsolidați (cronologic).
-    3. [ULTIMA ETAPĂ] Verificarea Fulger Delta: Scanează noutățile (XML-uri noi) apărute pe Drive până la această secundă.
-    4. Returnează Indexul Virtual perfect.
+    2. Citește și aplică toți micro-indecșii temporari neconsolidați.
+    3. Verificarea Delta: Scanează XML-urile noi apărute pe Drive până la această secundă.
+    4. Returnează Indexul Virtual.
     """
-    # Pasul 1: Descărcăm starea de bază din master
     data_master = descarca_index_master(service)
     fisiere_map = data_master.get("fisiere", {})
     last_updated = data_master.get("last_updated")
 
-    # Pasul 2: Aplicăm mutațiile recente din micro-indecșii temporari
     fisiere_map = aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map)
 
-    # Pasul 3 (ULTIMUL): Verificarea Fulger Delta pe Google Drive după fișiere XML ultra-noi
     pattern_nume = re.compile(r"brut_legislatie_(\d+)_pag(\d+)\.xml")
     noutati_gasite = 0
 
@@ -156,7 +152,6 @@ def obtine_index_virtual(service):
                     files = response.get('files', [])
                     for f in files:
                         nume = f['name']
-                        # Adăugăm fișierul nou doar dacă nu există deja în hartă
                         if nume not in fisiere_map:
                             desc = f.get('description', '')
                             match = pattern_nume.search(nume)
@@ -188,10 +183,6 @@ def obtine_index_virtual(service):
 
 
 def obtine_fisiere_neprocesate(service, nume_flag="Tags_extracted"):
-    """
-    Subrutină helper: Returnează o listă de fișiere neprocesate, 
-    garantat curate (luând în calcul master-ul + micro-indecșii + noutățile ultimei secunde).
-    """
     index_v = obtine_index_virtual(service)
     fisiere_map = index_v.get("fisiere", {})
     
