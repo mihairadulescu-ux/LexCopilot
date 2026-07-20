@@ -94,11 +94,12 @@ def salveaza_final_in_drive(service, fisiere_map):
                 supportsAllDrives=True
             ).execute()
             print(f"{VERDE}✅ [Master Index Update Successful] Fișier sincronizat pe ID: {INDEX_FILE_ID}!{RESET}", flush=True)
+            print(f"🔗 Link vizualizare: https://drive.google.com/file/d/{INDEX_FILE_ID}/view", flush=True)
             return
         except Exception as e:
-            print(f"⚠️ ID-ul existent ({INDEX_FILE_ID}) nu este valid pe Drive: {e}. Se creează un fișier NOU...", flush=True)
+            print(f"⚠️ ID-ul existent ({INDEX_FILE_ID}) nu este accesibil/valid: {e}. Se creează un fișier NOU...", flush=True)
 
-    # Încercare 2: Creare fișier NOU pe Drive dacă cel vechi nu mai există/dă eroare
+    # Încercare 2: Creare fișier NOU pe Drive + Oferire Permisiuni de vizualizare
     try:
         file_metadata = {
             'name': 'index_xml.json',
@@ -112,9 +113,21 @@ def salveaza_final_in_drive(service, fisiere_map):
         ).execute()
         
         id_nou = f_nou.get('id')
+
+        # Acordăm drepturi de citire globale pe fișier pentru a fi vizibil în interfața web
+        try:
+            service.permissions().create(
+                fileId=id_nou,
+                body={'type': 'anyone', 'role': 'reader'},
+                supportsAllDrives=True
+            ).execute()
+        except Exception as perm_err:
+            print(f"⚠️ Nu s-a putut seta permisiunea publică: {perm_err}", flush=True)
+
         print(f"\n{VERDE}======================================================================{RESET}", flush=True)
         print(f"{VERDE}🎉 Fișier nou 'index_xml.json' creat cu succes pe Google Drive!{RESET}", flush=True)
         print(f"{VERDE}👉 NOUL ID PENTRU VARIABILĂ ESTE: {id_nou}{RESET}", flush=True)
+        print(f"{VERDE}🔗 LINK DIRECT PENTRU VIZUALIZARE: https://drive.google.com/file/d/{id_nou}/view{RESET}", flush=True)
         print(f"{VERDE}======================================================================{RESET}\n", flush=True)
     except Exception as create_err:
         print(f"{ROSU}❌ Eroare critică la crearea indexului pe Drive: {create_err}{RESET}", flush=True)
