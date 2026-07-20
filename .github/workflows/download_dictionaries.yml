@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       start_year:
-        description: 'Anul de început (ex: 2020)'
+        description: 'Anul de început (ex: 2000)'
         required: true
         default: '2020'
       end_year:
