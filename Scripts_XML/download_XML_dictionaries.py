@@ -8,12 +8,13 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
+# Importăm cititorul de index virtual actualizat la secundă
+from XML_INDEX_READER import obtine_index_virtual
+
 VERDE = "\033[92m"
 GALBEN = "\033[93m"
 ROSU = "\033[91m"
 RESET = "\033[0m"
-
-CALE_INDEX_LOCAL = "index_xml.json"
 
 # Folosim ID-ul din METADATA_FOLDER_ID sau fallback pe primul ID din DRIVE_FOLDER_XML
 FOLDER_METADATE_ID = os.getenv("METADATA_FOLDER_ID", "").strip()
@@ -22,6 +23,7 @@ if not FOLDER_METADATE_ID:
     FOLDERE_XML_RAW = os.getenv("DRIVE_FOLDER_XML", "").replace('"', '').replace("'", "").replace("\n", "").replace("\r", "")
     FOLDERE_XML_IDS = [fid.strip() for fid in FOLDERE_XML_RAW.split(",") if fid.strip()]
     FOLDER_METADATE_ID = FOLDERE_XML_IDS[0] if FOLDERE_XML_IDS else None
+
 
 def get_drive_service():
     scopes = ["https://www.googleapis.com/auth/drive"]
@@ -37,6 +39,7 @@ def get_drive_service():
         creds = service_account.Credentials.from_service_account_file(credentials_path, scopes=scopes)
         
     return build("drive", "v3", credentials=creds, cache_discovery=False)
+
 
 def incarca_pe_drive(service, cale_fisier_local, folder_id):
     if not folder_id:
@@ -64,15 +67,11 @@ def incarca_pe_drive(service, cale_fisier_local, folder_id):
     except Exception as e:
         print(f"{ROSU}❌ Eroare încărcare Drive {nume_fisier}:{RESET} {e}", flush=True)
 
+
 def extrage_taguri_din_matrice(service, ani_procesare):
-    if not os.path.exists(CALE_INDEX_LOCAL):
-        print(f"{ROSU}🛑 Eroare Extragere: Nu s-a găsit fișierul '{CALE_INDEX_LOCAL}'!{RESET}")
-        sys.exit(1)
-
-    with open(CALE_INDEX_LOCAL, "r", encoding="utf-8") as f:
-        data_master = json.load(f)
-
-    fisiere_map = data_master.get("fisiere", {})
+    # 🚀 Obținem indexul virtual ultra-actualizat (master + micro-indecși + delta)
+    index_v = obtine_index_virtual(service)
+    fisiere_map = index_v.get("fisiere", {})
 
     emitenti_gasiti = set()
     tipuri_acte_gasite = set()
@@ -86,7 +85,7 @@ def extrage_taguri_din_matrice(service, ani_procesare):
     ]
 
     string_ani = "_".join([str(a) for a in ani_procesare])
-    print(f"\n{GALBEN}⚡ [Dictionare] Scanare pe index pentru anii {string_ani} ({len(fisiere_tinta)} fișiere selectate)...{RESET}", flush=True)
+    print(f"\n{GALBEN}⚡ [Dictionare] Scanare pe indexul virtual pentru anii {string_ani} ({len(fisiere_tinta)} fișiere selectate)...{RESET}", flush=True)
 
     contor_total_procesat = 0
 
@@ -107,11 +106,13 @@ def extrage_taguri_din_matrice(service, ani_procesare):
             
             for em in regex_emitent.findall(xml_text):
                 val = em.strip()
-                if val: emitenti_gasiti.add(val)
+                if val: 
+                    emitenti_gasiti.add(val)
                 
             for ta in regex_tip_act.findall(xml_text):
                 val = ta.strip()
-                if val: tipuri_acte_gasite.add(val)
+                if val: 
+                    tipuri_acte_gasite.add(val)
 
             contor_total_procesat += 1
 
@@ -138,10 +139,11 @@ def extrage_taguri_din_matrice(service, ani_procesare):
         for t in sorted(list(tipuri_acte_gasite)):
             writer.writerow([t])
             
-    print(f"{VERDE}✅ [Salvat Local] '{cale_emitenti}' și '{cale_acte}'. Se încarcă pe Drive...{RESET}", flush=True)
+    print(f"{VERDE}✅ [Salvat Local] '{cale_emitenti}' și '{cale_acte}'. Se încarcă în folderul Metadate...{RESET}", flush=True)
 
     incarca_pe_drive(service, cale_emitenti, FOLDER_METADATE_ID)
     incarca_pe_drive(service, cale_acte, FOLDER_METADATE_ID)
+
 
 if __name__ == "__main__":
     argumente_numerice = []
