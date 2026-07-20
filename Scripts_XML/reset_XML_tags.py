@@ -9,21 +9,6 @@ GALBEN = "\033[93m"
 ROSU = "\033[91m"
 RESET = "\033[0m"
 
-TARGET_FOLDERS_RAW = os.getenv("DRIVE_FOLDER_XML", "")
-FOLDER_IDS = []
-
-if TARGET_FOLDERS_RAW.strip():
-    clean_raw = TARGET_FOLDERS_RAW.replace('"', '').replace("'", "").replace("\n", "").replace("\r", "").strip()
-    FOLDER_IDS = [fid.strip() for fid in clean_raw.split(",") if fid.strip()]
-
-if not FOLDER_IDS:
-    FOLDER_IDS = [
-        "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m",
-        "1G7CkaoivnTR0O8mZceB0143Q6956C1-1",
-        "1T2N_v81889Y7tyHUbrTSLR073YC7mGk5",
-        "1NWe4JKhhaQ4HxFGs7FfhxnlemE0ZM2E2"
-    ]
-
 def get_drive_service():
     scopes = ["https://www.googleapis.com/auth/drive"]
     github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -39,63 +24,47 @@ def get_drive_service():
         
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
-def ruleaza_reset_flaguri(service, eticheta_sesiune):
-    CHUNK_SIZE = 250
-    print(f"\n{GALBEN}⚙️ [Reset] Pornire resetare globală pentru sesiunea {eticheta_sesiune}...{RESET}", flush=True)
+def ruleaza_reset_flaguri(service, ani_procesare):
+    if not os.path.exists("index_fisiere.json"):
+        print(f"{ROSU}🛑 Eroare Reset: Nu s-a găsit fișierul 'index_fisiere.json'!{RESET}")
+        sys.exit(1)
+
+    with open("index_fisiere.json", "r", encoding="utf-8") as f:
+        index_data = json.load(f)
+
+    print(f"\n{GALBEN}⚙️ [Reset] Pornire resetare pe bază de index pentru anii {ani_procesare}...{RESET}", flush=True)
     
-    for folder_id in FOLDER_IDS:
-        page_token = None
-        # Reset total pe folder, aduce doar XML-urile
-        query = f"'{folder_id}' in parents and mimeType = 'text/xml' and trashed = false"
+    contor_reset = 0
+    for target_year in ani_procesare:
+        fisiere_an = index_data.get(str(target_year), [])
         
-        contor_reset_folder = 0
-        try:
-            while True:
-                response = service.files().list(
-                    q=query, 
-                    spaces='drive', 
-                    fields='nextPageToken, files(id, name, description)',
-                    pageSize=CHUNK_SIZE,
-                    pageToken=page_token,
-                    supportsAllDrives=True, 
-                    includeItemsFromAllDrives=True
-                ).execute()
+        for file_info in fisiere_an:
+            # Resetăm doar ce este deja marcat ca processed=true în descriere (sau în index)
+            if file_info.get("description") == "processed=true":
+                try:
+                    service.files().update(
+                        fileId=file_info["id"],
+                        body={"description": "processed=false"},
+                        fields="id",
+                        supportsAllDrives=True
+                    ).execute()
+                    contor_reset += 1
+                except Exception as e:
+                    print(f"{ROSU}⚠️ Eroare reset pe fișierul {file_info['name']}: {e}{RESET}", flush=True)
 
-                all_files = response.get('files', [])
-                if not all_files:
-                    break
-
-                # Resetăm doar ce este marcat ca fiind procesat
-                micro_task_files = [f for f in all_files if f.get('description', '') == 'processed=true']
-
-                if micro_task_files:
-                    for f in micro_task_files:
-                        try:
-                            service.files().update(
-                                fileId=f['id'],
-                                body={'description': 'processed=false'},
-                                fields='id',
-                                supportsAllDrives=True
-                            ).execute()
-                            contor_reset_folder += 1
-                        except Exception:
-                            continue
-                    
-                    print(f"   🔄 [Progres Reset] Curățat {contor_reset_folder} fișiere în folderul {folder_id[:8]}...", flush=True)
-                
-                page_token = response.get('nextPageToken', None)
-                if not page_token:
-                    break
-                    
-            print(f"✅ [Folder Gata] Total fișiere resetate în {folder_id[:8]}: {contor_reset_folder}", flush=True)
-
-        except Exception as e:
-            print(f"{ROSU}⚠️ Eroare critică la reset pe folderul {folder_id[:8]}: {e}{RESET}", flush=True)
-            continue
-
-    print(f"{VERDE}🏁 Resetarea globală a fost finalizată pentru această sesiune!{RESET}", flush=True)
+    print(f"{VERDE}✅ [Reset Gata] Pentru anii {ani_procesare} au fost resetate {contor_reset} fișiere.{RESET}", flush=True)
 
 if __name__ == "__main__":
-    eticheta = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "sesiune_generica"
+    argumente_numerice = []
+    for arg in sys.argv[1:]:
+        piese = arg.split()
+        for piesa in piese:
+            if piesa.isdigit():
+                argumente_numerice.append(int(piesa))
+
+    if not argumente_numerice:
+        print(f"{ROSU}🛑 Eroare Reset: Lipsesc anii ca parametru!{RESET}")
+        sys.exit(1)
+
     drive_service = get_drive_service()
-    ruleaza_reset_flaguri(drive_service, eticheta)
+    ruleaza_reset_flaguri(drive_service, argumente_numerice)
