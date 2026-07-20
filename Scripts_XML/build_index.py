@@ -88,9 +88,9 @@ def descarca_index_master(service):
         return {"last_updated": None, "total_fisiere": 0, "fisiere": {}}, target_id
 
 
-def aplica_micro_indecsi_si_curata(service, fisiere_master):
+def aplica_micro_indecsi_si_curata(service, fisiere_master, max_batch=150):
     """
-    Citește, aplică și MARCHEAZĂ CA ȘTERSE (Trashed) micro-indecșii temporari din TEMPORARY_XML_INDEXES.
+    Citește, aplică și ȘTERGE (via trashed=True) micro-indecșii temporari în BATCH-URI sigure.
     """
     if not FOLDER_TEMP_INDEXES_ID:
         return fisiere_master, 0
@@ -100,6 +100,7 @@ def aplica_micro_indecsi_si_curata(service, fisiere_master):
         resp = service.files().list(
             q=query,
             fields="files(id, name, createdTime)",
+            pageSize=max_batch,  # Limităm numărul de fișiere procesate per rundă pentru viteză
             supportsAllDrives=True,
             includeItemsFromAllDrives=True
         ).execute()
@@ -111,17 +112,17 @@ def aplica_micro_indecsi_si_curata(service, fisiere_master):
 
         # Sortăm cronologic pentru aplicare ordonată
         loguri_temp.sort(key=lambda x: x.get('createdTime', ''))
-        print(f"🔄 [Consolidare Mutații] Găsite {len(loguri_temp)} indexuri temporare în Drive. Se aplică...", flush=True)
+        print(f"🔄 [Consolidare Mutații] Se procesează un batch de {len(loguri_temp)} indexuri temporare...", flush=True)
 
         mutații_aplicate = 0
-        sterse_count = 0
+        curatate_count = 0
 
-        for log_file in loguri_temp:
+        for idx, log_file in enumerate(loguri_temp, start=1):
             file_id = log_file['id']
             file_name = log_file.get('name', file_id)
 
             try:
-                # Descărcăm conținutul
+                # 🚀 Descărcare conținut
                 cerere = service.files().get_media(fileId=file_id, supportsAllDrives=True)
                 fh = io.BytesIO()
                 downloader = MediaIoBaseDownload(fh, cerere)
@@ -145,18 +146,21 @@ def aplica_micro_indecsi_si_curata(service, fisiere_master):
                                 fisiere_master[nume_f] = modi_flags
                             mutații_aplicate += 1
 
-                # 🧹 CURĂȚARE EFICIENTĂ: Mutăm în Trash (sau ștergem)
+                # 🧹 CURĂȚARE GARANTATĂ: Mutare în Trash
                 try:
                     service.files().update(fileId=file_id, body={'trashed': True}, supportsAllDrives=True).execute()
-                    sterse_count += 1
+                    curatate_count += 1
                 except Exception:
                     try:
                         service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
-                        sterse_count += 1
+                        curatate_count += 1
                     except Exception:
                         pass
 
-                time.sleep(0.02)
+                time.sleep(0.01)  # Prevenire rate limit
+
+                if idx % 50 == 0:
+                    print(f"   📊 [Progres Consolidare] {idx}/{len(loguri_temp)} micro-indecși curățați...", flush=True)
 
             except HttpError as err:
                 if err.resp.status in [404, 410]:
@@ -165,7 +169,7 @@ def aplica_micro_indecsi_si_curata(service, fisiere_master):
             except Exception as e:
                 print(f"   └─ ⚠️ Eroare neașteptată temporar {file_name}: {e}", flush=True)
 
-        print(f"   └─ ✅ Consolidate cu succes {mutații_aplicate} mutații în baza master (curățate {sterse_count} fișiere temporare).", flush=True)
+        print(f"   └─ ✅ Consolidate cu succes {mutații_aplicate} mutații în baza master (curățate {curatate_count} fișiere).", flush=True)
         return fisiere_master, mutații_aplicate
 
     except Exception as e:
