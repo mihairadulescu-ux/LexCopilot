@@ -15,11 +15,14 @@ RESET = "\033[0m"
 
 CALE_INDEX_LOCAL = "index_xml.json"
 
+DEFAULT_INDEX_FILE_ID = "1OkPgwX_F6FKwupuhD9kO3rynj4zdel0N"
+DEFAULT_TEMP_FOLDER_ID = "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
+
 # 1. Variabila directă cu ID-ul fișierului index_xml.json
-INDEX_FILE_ID = os.getenv("XML_STORAGE_INDEX", "").strip()
+INDEX_FILE_ID = os.getenv("XML_STORAGE_INDEX", "").strip() or DEFAULT_INDEX_FILE_ID
 
 # 2. Variabila pentru folderul cu indexuri temporare / mutații de flag-uri
-FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES", "").replace('"', '').replace("'", "").strip()
+FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES", "").replace('"', '').replace("'", "").strip() or DEFAULT_TEMP_FOLDER_ID
 
 # 3. Variabila pentru folderele de stocare XML
 FOLDERE_XML_RAW = os.getenv("DRIVE_FOLDER_XML", "").replace('"', '').replace("'", "").replace("\n", "").replace("\r", "")
