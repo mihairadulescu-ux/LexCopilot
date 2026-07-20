@@ -1,4 +1,4 @@
-ame: Extract XML Dictionaries
+name: Extract XML Dictionaries
 
 on:
   workflow_dispatch:
@@ -33,8 +33,8 @@ jobs:
       - name: Run Dictionary Extractor
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
-          XML_STORAGE_INDEX: ${{ secrets.XML_STORAGE_INDEX }}
-          METADATA_FOLDER_ID: ${{ secrets.METADATA_FOLDER_ID }}
+          DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML || vars.DRIVE_FOLDER_XML }}
+          XML_STORAGE_INDEX: ${{ secrets.XML_STORAGE_INDEX || vars.XML_STORAGE_INDEX }}
+          METADATA_FOLDER_ID: ${{ secrets.METADATA_FOLDER_ID || vars.METADATA_FOLDER_ID }}
         run: |
           python -u Scripts_XML/download_XML_dictionaries.py ${{ inputs.start_year }} ${{ inputs.end_year }}
