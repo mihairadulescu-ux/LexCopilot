@@ -50,7 +50,7 @@ def construieste_index():
     for folder_id in FOLDER_IDS:
         page_token = None
         # FIX: Folosim 'startsWith' în loc de 'sw' (sintaxa oficială Google Drive API v3)
-        query = f"'{folder_id}' in parents and name startsWith 'brut_legislatie_' and trashed = false"
+        query = f"'{folder_id}' in parents and name contains 'brut_legislatie_' and trashed = false"
 
         try:
             while True:
