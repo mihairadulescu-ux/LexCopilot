@@ -79,24 +79,45 @@ def salveaza_final_in_drive(service, fisiere_map):
     """Upload-ul final master pe Google Drive la finalizarea completă a scanării."""
     salveaza_local_checkpoint(fisiere_map)
 
-    if not INDEX_FILE_ID:
-        print("⚠️ 'XML_STORAGE_INDEX' nu este configurat. Salvat doar pe disc local.", flush=True)
-        return
+    folder_destinatie_id = FOLDERE_XML_IDS[0] if FOLDERE_XML_IDS else None
 
     print(f"\n{GALBEN}📤 [Upload Drive] Se încarcă varianta finală a indexului pe Google Drive...{RESET}", flush=True)
     
-    for incercare in range(1, 4):
+    media = MediaFileUpload(CALE_INDEX_LOCAL, mimetype='application/json', resumable=True)
+
+    # Încercare 1: Update direct pe ID-ul existent din variabilă
+    if INDEX_FILE_ID:
         try:
-            media = MediaFileUpload(CALE_INDEX_LOCAL, mimetype='application/json', resumable=True)
             service.files().update(
                 fileId=INDEX_FILE_ID,
                 media_body=media,
                 supportsAllDrives=True
             ).execute()
             print(f"{VERDE}✅ [Master Index Update Successful] Fișier sincronizat pe ID: {INDEX_FILE_ID}!{RESET}", flush=True)
-            break
+            return
         except Exception as e:
-            print(f"⚠️ Eroare upload master pe Drive (încercarea {incercare}/3): {e}", flush=True)
+            print(f"⚠️ ID-ul existent ({INDEX_FILE_ID}) nu este valid pe Drive: {e}. Se creează un fișier NOU...", flush=True)
+
+    # Încercare 2: Creare fișier NOU pe Drive dacă cel vechi nu mai există/dă eroare
+    try:
+        file_metadata = {
+            'name': 'index_xml.json',
+            'parents': [folder_destinatie_id] if folder_destinatie_id else []
+        }
+        f_nou = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            supportsAllDrives=True,
+            fields='id'
+        ).execute()
+        
+        id_nou = f_nou.get('id')
+        print(f"\n{VERDE}======================================================================{RESET}", flush=True)
+        print(f"{VERDE}🎉 Fișier nou 'index_xml.json' creat cu succes pe Google Drive!{RESET}", flush=True)
+        print(f"{VERDE}👉 NOUL ID PENTRU VARIABILĂ ESTE: {id_nou}{RESET}", flush=True)
+        print(f"{VERDE}======================================================================{RESET}\n", flush=True)
+    except Exception as create_err:
+        print(f"{ROSU}❌ Eroare critică la crearea indexului pe Drive: {create_err}{RESET}", flush=True)
 
 
 def curata_cos_de_gunoi_targetat(service):
@@ -276,7 +297,6 @@ def construieste_sau_actualizeaza_index():
                     contor_folder += 1
                     contor_fisiere_noi += 1
 
-                    # Anunță exact în consolă când se face salvarea intermediară la fiecare 10k
                     if contor_fisiere_noi % 10000 == 0:
                         salveaza_local_checkpoint(fisiere_map)
 
