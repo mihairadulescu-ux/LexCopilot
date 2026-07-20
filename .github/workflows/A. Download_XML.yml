@@ -1,4 +1,4 @@
-name: Executie Descarcare Industriala XML
+name: 1. Executie Descarcare Industriala XML
 
 on:
   workflow_dispatch:
