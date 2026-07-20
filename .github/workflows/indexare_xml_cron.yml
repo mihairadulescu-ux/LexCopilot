@@ -2,7 +2,6 @@ name: 🔄 CRON - Indexare Incrementală XML (2 ore)
 
 on:
   schedule:
-    # Rulează la fiecare 2 ore (la minutul 0)
     - cron: '0 */2 * * *'
   workflow_dispatch:
     inputs:
