@@ -1,4 +1,5 @@
 name: Creare dictionare
+
 on:
   workflow_dispatch:
     inputs:
@@ -9,7 +10,38 @@ on:
         default: false
 
 jobs:
+  indexare_drive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verificare Cod Sursa
+        uses: actions/checkout@v4
+
+      - name: Configurare Mediu Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Instalare Dependinte
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-auth google-api-python-client
+
+      - name: 🗂️ Generare Index Global Fisiere Drive
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DRIVE_FOLDER_XML: ${{ vars.DRIVE_FOLDER_XML }}
+        run: |
+          python Scripts_XML/build_index.py
+
+      - name: 📤 Salvare Index ca Artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: index-fisiere-drive
+          path: index_fisiere.json
+          retention-days: 1
+
   procesare_paralela:
+    needs: indexare_drive
     runs-on: ubuntu-latest
     
     strategy:
@@ -31,13 +63,18 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Instalare Dependinte Industriale
+      - name: Instalare Dependinte
         run: |
           python -m pip install --upgrade pip
           pip install google-auth google-api-python-client
 
+      - name: 📥 Descarcare Index Fisiere
+        uses: actions/download-artifact@v4
+        with:
+          name: index-fisiere-drive
+
       # ======================================================================
-      # PASUL 1: RESETARE FLAGURI XML OPTIONALA
+      # PASUL 1: RESETARE FLAGURI XML OPTIONALA (PE ANII PROPRII)
       # ======================================================================
       - name: ⚙️ Resetare flaguri XML
         if: ${{ github.event.inputs.ruleaza_reset == 'true' }}
