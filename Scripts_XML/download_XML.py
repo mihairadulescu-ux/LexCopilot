@@ -224,9 +224,9 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
         if m:
             pagini_existente.add(int(m.group(1)))
 
-    max_pag_existenta = max(pagini_existente) if pagini_existente else -1
+    max_pag_existenta = max(pagini_existente) if pagini_existente else 0
     print(
-        f"📦 {len(pagini_existente)} pagini VALIDE în index pentru {an_tinta}. (Ultima scanată: {max_pag_existenta if max_pag_existenta >= 0 else 'Niciuna'})",
+        f"📦 {len(pagini_existente)} pagini VALIDE în index pentru {an_tinta}. (Ultima scanată: {max_pag_existenta if max_pag_existenta > 0 else 'Niciuna'})",
         flush=True,
     )
 
@@ -238,7 +238,7 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
         print(f"❌ Eroare la obținerea token-ului WSDL: {e}", flush=True)
         return
 
-    # Dacă anul nu exista în index, începem de la 0
+    # Începem de la pagina 1 dacă nu avem nicio pagină scanată în index
     pagina_curenta = max_pag_existenta + 1
     folder_idx = 0
     folder_curent_id = foldere_drive[folder_idx]
@@ -253,11 +253,11 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
 
         for incercare in range(1, 6):
             try:
-                # Construim apelul CĂUTARE oficial conform WSDL
+                # Construim obiectul SearchModel compatibil cu WSDL-ul Just.ro
                 search_model = {
                     "NumarPagina": pagina_curenta,
                     "RezultatePagina": 50,
-                    "SearchAn": an_tinta,
+                    "SearchAn": int(an_tinta),
                     "SearchNumar": None,
                     "SearchText": None,
                     "SearchTitlu": None,
@@ -274,16 +274,14 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
                 if isinstance(dict_res, dict):
                     legi_gasite = dict_res.get("Legi") or dict_res.get("SearchResult", {}).get("Legi")
 
-                # Tratare caz an nou unde pagina 0 poate fi goală și încercăm pagina 1
-                if not legi_gasite and pagina_curenta == 0:
-                    print("   ℹ️ Pagina 0 e goală. Încercăm fallback pe Pagina 1...", flush=True)
-                    search_model["NumarPagina"] = 1
+                # Dacă prima pagină e goală, încercăm indexare de la 0
+                if not legi_gasite and pagina_curenta == 1 and max_pag_existenta == 0:
+                    print("   ℹ️ Pagina 1 e goală. Încercăm fallback pe Pagina 0...", flush=True)
+                    search_model["NumarPagina"] = 0
                     raspuns_soap = client.service.Search(SearchModel=search_model, tokenKey=token)
                     dict_res = serialize_object(raspuns_soap) if raspuns_soap else {}
                     if isinstance(dict_res, dict):
                         legi_gasite = dict_res.get("Legi") or dict_res.get("SearchResult", {}).get("Legi")
-                    if legi_gasite:
-                        pagina_curenta = 1
 
                 if not legi_gasite:
                     print(
