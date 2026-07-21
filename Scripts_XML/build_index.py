@@ -3,6 +3,8 @@ import sys
 import time
 import json
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 # ==============================================================================
@@ -18,7 +20,7 @@ if str(DIRECTOR_CURENT) not in sys.path:
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload
 import io
 
 from drive_config import (
@@ -70,10 +72,9 @@ def get_drive_service():
 
 
 # ==============================================================================
-# OPERAȚIUNI CU MASTER INDEX (DELEGAT CĂTRE XML_INDEX_READER)
+# OPERAȚIUNI CU MASTER INDEX
 # ==============================================================================
 def descarca_master_index(service):
-    """Descarcă index_xml.json din Google Drive în memorie."""
     print("📥 Descărcare conținut Master Index (index_xml.json)...", flush=True)
     try:
         if hasattr(XML_INDEX_READER, "descarca_index_master"):
@@ -83,14 +84,12 @@ def descarca_master_index(service):
         print(f"✅ [Master Index] Încărcate {len(master_data.get('fisiere', {}))} fișiere.", flush=True)
         return master_data
     except Exception as e:
-        print(f"⚠️ Nu s-a putut descărca Master Index-ul (posibil fișier nou sau eroare): {e}", flush=True)
+        print(f"⚠️ Nu s-a putut descărca Master Index-ul: {e}", flush=True)
         return {"fisiere": {}, "last_updated": ""}
 
 
 def salveaza_master_index(service, master_data):
-    """Suprascrie Master Index-ul (index_xml.json) pe Google Drive."""
     master_data["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    
     try:
         if hasattr(XML_INDEX_READER, "salveaza_master_index"):
             res = XML_INDEX_READER.salveaza_master_index(service, master_data)
@@ -108,39 +107,56 @@ def salveaza_master_index(service, master_data):
 
 
 # ==============================================================================
-# CURĂȚARE DUPLICATE / FIȘIERE NEINDEXATE FOLOSIND BATCH REQUESTS (ULTRA-RAPID)
+# CURĂȚARE DUPLICATE MULTI-THREADED (VITEZĂ MAXIMĂ)
 # ==============================================================================
-def curata_duplicate_drive(service, master_data):
-    """
-    Scanează folderele Shared Drive și mută în Trash fișierele fizice neindexate
-    folosind BATCH HTTP REQUESTS (pachete de 100 de cereri într-un singur apel).
-    """
+def curata_duplicate_drive_multithreaded(service, master_data, max_workers=15):
     print("\n" + "=" * 60, flush=True)
-    print("⚡ ÎNCEPERE ETAPĂ MUTARE ULTRA-RAPIDĂ ÎN TRASH (BATCH API)...", flush=True)
+    print(f"🚀 ÎNCEPERE CURĂȚARE TURBO MULTI-THREADED ({max_workers} FIRE PARALELE)...", flush=True)
     print("=" * 60, flush=True)
 
     fisiere_valide = master_data.get("fisiere", {})
     id_uri_oficiale = {meta["id"] for meta in fisiere_valide.values() if "id" in meta}
     
-    print(f"🛡️ Total ID-uri oficiale protejate în Master Index: {len(id_uri_oficiale):,}", flush=True)
+    print(f"🛡️ Total ID-uri oficiale protejate: {len(id_uri_oficiale):,}", flush=True)
 
+    counter_lock = threading.Lock()
     total_fisiere_verificate = 0
     total_duplicate_gunoi = 0
     erori_gunoi = 0
     timp_start = time.time()
 
-    # Dimensiunea maximă recomandată pentru un pachet batch de la Google Drive API este 100
-    LUNGIME_BATCH = 100
-
-    def batch_callback(request_id, response, exception):
+    def trashing_worker(file_id):
         nonlocal total_duplicate_gunoi, erori_gunoi
-        if exception is not None:
+        # Fiecare thread folosește o instanță de API pentru siguranță
+        thread_service = get_drive_service()
+        for incercare in range(3):
+            try:
+                params = get_file_params(fileId=file_id)
+                params["body"] = {"trashed": True}
+                thread_service.files().update(**params).execute()
+                
+                with counter_lock:
+                    total_duplicate_gunoi += 1
+                    if total_duplicate_gunoi % 500 == 0:
+                        durata = round(time.time() - timp_start, 1)
+                        viteză = round(total_duplicate_gunoi / (durata if durata > 0 else 1), 1)
+                        print(
+                            f"⚡ [TURBO Trash] Mutate la coș #{total_duplicate_gunoi:,} fișiere... | Ritm: {viteză} fișiere/sec ({durata}s)",
+                            flush=True,
+                        )
+                return True
+            except Exception as e:
+                if "429" in str(e) or "rateLimitExceeded" in str(e):
+                    time.sleep(1.5 * (incercare + 1)) # Backoff la cota depășită
+                else:
+                    time.sleep(0.5)
+
+        with counter_lock:
             erori_gunoi += 1
-        else:
-            total_duplicate_gunoi += 1
+        return False
 
     for folder_idx, folder_id in enumerate(FOLDERE_XML_IDS, 1):
-        print(f"\n📂 [{folder_idx}/{len(FOLDERE_XML_IDS)}] Scanare folder pentru curățare batch: {folder_id[:8]}...", flush=True)
+        print(f"\n📂 [{folder_idx}/{len(FOLDERE_XML_IDS)}] Scanare folder pentru curățare: {folder_id[:8]}...", flush=True)
         page_token = None
         query = f"'{folder_id}' in parents and trashed = false"
 
@@ -160,64 +176,38 @@ def curata_duplicate_drive(service, master_data):
                 )
 
                 files = response.get("files", [])
-                batch = service.new_batch_http_request(callback=batch_callback)
-                fisiere_in_batch = 0
+                total_fisiere_verificate += len(files)
+                
+                # Colectăm ID-urile neindexate din pagina curentă de 1.000
+                ids_de_sters = [f["id"] for f in files if f["id"] not in id_uri_oficiale]
 
-                for f in files:
-                    total_fisiere_verificate += 1
-                    file_id = f["id"]
-
-                    # Dacă ID-ul fișierului NU este în Master Index, îl adăugăm în lotul batch curent
-                    if file_id not in id_uri_oficiale:
-                        params = get_file_params(fileId=file_id)
-                        params["body"] = {"trashed": True}
-                        
-                        batch.add(service.files().update(**params))
-                        fisiere_in_batch += 1
-
-                        # Când lotul atinge 100 de fișiere, executăm întregul pachet dintr-o singură cerere
-                        if fisiere_in_batch >= LUNGIME_BATCH:
-                            batch.execute()
-                            batch = service.new_batch_http_request(callback=batch_callback)
-                            fisiere_in_batch = 0
-
-                            # Afișăm progresul la fiecare 1.000 de fișiere procesate
-                            if total_duplicate_gunoi > 0 and total_duplicate_gunoi % 1000 < LUNGIME_BATCH:
-                                durata = round(time.time() - timp_start, 1)
-                                viteză = round(total_duplicate_gunoi / (durata if durata > 0 else 1), 1)
-                                print(
-                                    f"🚀 [Batch Progress] Mutate la Trash: {total_duplicate_gunoi:,} fișiere | Ritm: {viteză} fișiere/sec ({durata}s)",
-                                    flush=True,
-                                )
-                            time.sleep(0.1) # Micro-pauză între batch-uri pentru a respecta cotele per minut
-
-                # Executăm restul de fișiere rămase în pachetul parțial
-                if fisiere_in_batch > 0:
-                    batch.execute()
+                # Rulăm ștergerea în paralel pe 15 fire simultane
+                if ids_de_sters:
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        executor.map(trashing_worker, ids_de_sters)
 
                 page_token = response.get("nextPageToken")
                 if not page_token:
                     break
             except Exception as e:
-                print(f"⚠️ Eroare la procesarea lotului din folderul {folder_id[:8]}: {e}", flush=True)
+                print(f"⚠️ Eroare la scanarea folderului {folder_id[:8]}: {e}", flush=True)
                 time.sleep(1)
                 break
 
     durata_totala = round(time.time() - timp_start, 1)
     print("\n" + "=" * 60, flush=True)
-    print(f"🏁 CURĂȚARE BATCH FINALIZATĂ în {durata_totala}s!", flush=True)
+    print(f"🏁 CURĂȚARE MULTI-THREADED FINALIZATĂ în {durata_totala}s!", flush=True)
     print(f"📊 Fișiere verificate: {total_fisiere_verificate:,}", flush=True)
     print(f"🗑️ Duplicate mutate în Trash: {total_duplicate_gunoi:,}", flush=True)
     if erori_gunoi > 0:
-        print(f"⚠️ Erori întâmpinate în pachete: {erori_gunoi}", flush=True)
+        print(f"⚠️ Erori întâmpinate: {erori_gunoi}", flush=True)
     print("=" * 60 + "\n", flush=True)
 
 
 # ==============================================================================
-# EXECUȚIE STRATEGII (FULL VS INCREMENTAL)
+# EXECUȚIE STRATEGII
 # ==============================================================================
 def executa_full_index(service):
-    """Scanează integral toate folderele, reconstruiește Master Index-ul și mută fișierele neindexate în Trash."""
     print("🚀 Reconstrucție completă index (FULL INDEX)...", flush=True)
     master_data = {"fisiere": {}, "last_updated": ""}
     pattern_xml = re.compile(r"brut_legislatie_(\d{4})_pag(\d+)\.xml")
@@ -266,7 +256,6 @@ def executa_full_index(service):
                         total_fisiere += 1
 
                         if total_fisiere - ultimul_checkpoint >= PAS_CHECKPOINT:
-                            durata = round(time.time() - timp_start, 1)
                             print(
                                 f"📊 [Status Update] Progres scanare: {total_fisiere:,} fișiere fizice parcurse...",
                                 flush=True,
@@ -278,22 +267,21 @@ def executa_full_index(service):
                 if not page_token:
                     break
             except Exception as e:
-                print(f"⚠️ Eroare la scanarea paginii din folderul {folder_id[:8]}: {e}", flush=True)
+                print(f"⚠️ Eroare la scanare {folder_id[:8]}: {e}", flush=True)
                 break
 
     durata_totala = round(time.time() - timp_start, 1)
     print(
-        f"🏁 Reindexare completă finalizată! Total fișiere unice indexate: {len(master_data['fisiere']):,} (Timp total scanare: {durata_totala}s)",
+        f"🏁 Reindexare completă finalizată! Total fișiere unice indexate: {len(master_data['fisiere']):,} ({durata_totala}s)",
         flush=True,
     )
     salveaza_master_index(service, master_data)
 
-    # Executăm curățarea BATCH
-    curata_duplicate_drive(service, master_data)
+    # Executăm curățarea pe 25 fire paralele
+    curata_duplicate_drive_multithreaded(service, master_data, max_workers=25)
 
 
 def executa_incremental_index(service):
-    """Consolidează micro-indecșii temporari în Master Index."""
     print("⚡ Consolidare incrementală index...", flush=True)
     master_data = descarca_master_index(service)
     fisiere_dict = master_data.get("fisiere", {})
@@ -356,16 +344,13 @@ def executa_incremental_index(service):
         print(f"❌ Eroare la consolidarea incrementală: {e}", flush=True)
 
 
-# ==============================================================================
-# MAIN ENTRY POINT
-# ==============================================================================
 def main():
     is_full = "--full" in sys.argv or os.getenv("FORCE_FULL_INDEX", "").lower() == "true"
 
     if is_full:
-        print("🚀 [Strategie] Se execută FULL INDEX (Reindexare completă + Mutare fișiere neindexate în Trash BATCH).", flush=True)
+        print("🚀 [Strategie] Se execută FULL INDEX (Multi-Threaded Turbo Trash).", flush=True)
     else:
-        print("⚡ [Strategie] Se execută INCREMENTAL INDEX (Delta & Consolidare).", flush=True)
+        print("⚡ [Strategie] Se execută INCREMENTAL INDEX.", flush=True)
 
     service = get_drive_service()
 
