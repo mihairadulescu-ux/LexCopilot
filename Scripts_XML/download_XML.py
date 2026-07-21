@@ -5,13 +5,15 @@ import json
 import traceback
 import subprocess
 
-# Auto-instalare dinamică pentru curl_cffi dacă nu este găsit în mediu
+# Auto-instalare dinamică și import pentru curl_cffi + CurlHttpVersion
 try:
     from curl_cffi import requests
+    from curl_cffi.requests import CurlHttpVersion
 except ImportError:
     print("📦 Pachetul 'curl_cffi' nu a fost găsit. Se instalează automat...", flush=True)
     subprocess.check_call([sys.executable, "-m", "pip", "install", "curl_cffi"])
     from curl_cffi import requests
+    from curl_cffi.requests import CurlHttpVersion
     print("✅ 'curl_cffi' a fost instalat cu succes!", flush=True)
 
 
@@ -64,13 +66,14 @@ def logheaza_pagina_saltata(an, pagina, url, motiv_detaliat):
 def descarca_pagina_cu_debug(url, timeout=30):
     """
     Execută request-ul HTTP folosind curl_cffi cu impresie de Chrome 120
-    pentru a evita blocajele la nivel de TLS fingerprinting.
+    și forțează protocolul HTTP/1.1 pentru a evita erorile de stream HTTP/2.
     """
     try:
         response = requests.get(
             url, 
             headers=DEFAULT_HEADERS, 
             impersonate="chrome120", 
+            http_version=CurlHttpVersion.V1_1,  # <--- FORȚARE HTTP/1.1
             timeout=timeout
         )
         
@@ -164,7 +167,7 @@ def proceseaza_descarcare_an(an, pagina_start=1):
 # MAIN ENTRYPOINT
 # ==========================================
 def main():
-    print("🚀 Script de descărcare XML pornit (cu impresie Chrome via curl_cffi).", flush=True)
+    print("🚀 Script de descărcare XML pornit (HTTP/1.1 via curl_cffi).", flush=True)
     
     # Preluare argumente din linia de comandă (ex: python download_XML.py 2012 2013)
     ani_de_procesat = [2012, 2013]
