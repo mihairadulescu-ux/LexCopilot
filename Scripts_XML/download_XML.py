@@ -39,9 +39,9 @@ from googleapiclient.http import MediaFileUpload
 from zeep import Client, Transport
 
 # ==============================================================================
-# CONFIGURARE SERVICIU WSDL (JUST.RO) - STRICT HTTP
+# CONFIGURARE SERVICIU WSDL (JUST.RO) - URL-UL OFICIAL SI CORECT
 # ==============================================================================
-WSDL_URL = "http://legislatie.just.ro/api/serviciu.wsdl"
+WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
 
 def creeaza_client_zeep_securizat(wsdl_url, retries=5, backoff=2):
@@ -72,7 +72,7 @@ def creeaza_client_zeep_securizat(wsdl_url, retries=5, backoff=2):
     for incercare in range(1, retries + 1):
         try:
             print(
-                f"🌐 Conectare la serviciul WSDL Just.ro (Încercarea {incercare}/{retries})...",
+                f"🌐 Conectare la serviciul WSDL Just.ro ({wsdl_url}) (Încercarea {incercare}/{retries})...",
                 flush=True,
             )
             client = Client(wsdl_url, transport=transport)
