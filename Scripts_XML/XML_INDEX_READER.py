@@ -9,7 +9,7 @@ CALE_INDEX_LOCAL = "index_xml.json"
 
 DEFAULT_TEMP_FOLDER_ID = "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
 
-# 1. TEMPORARY_XML_INDEXES -> Găleata/Folderul unde stau micro-indecșii temp
+# 1. TEMPORARY_XML_INDEXES -> Găleata (Folder ID) unde stau micro-indecșii temp
 FOLDER_TEMP_INDEXES_ID = (
     os.getenv("TEMPORARY_XML_INDEXES", "")
     .replace('"', "")
@@ -18,8 +18,8 @@ FOLDER_TEMP_INDEXES_ID = (
     or DEFAULT_TEMP_FOLDER_ID
 )
 
-# 2. XML_STORAGE_INDEX -> ID-ul direct al fișierului 'index_xml.json' (Main Index)
-INDEX_FILE_ID = (
+# 2. XML_STORAGE_INDEX -> ID-ul direct al fișierului 'index_xml.json' (sau URL-ul)
+INDEX_FILE_RAW = (
     os.getenv("XML_STORAGE_INDEX", "").replace('"', "").replace("'", "").strip()
 )
 
@@ -40,45 +40,65 @@ FOLDERE_XML_IDS = [
 ]
 
 
+def extras_id_drive(valoare):
+    """Extrage ID-ul curat de Google Drive chiar dacă valoarea transmisă este un URL complet."""
+    if not valoare:
+        return ""
+    val = valoare.replace('"', "").replace("'", "").strip()
+    # Dacă valoarea este un URL de Drive (ex: https://drive.google.com/file/d/ID_AICI/view)
+    match = re.search(r"/d/([a-zA-Z0-9_-]+)", val)
+    if match:
+        return match.group(1)
+    # Dacă conține id= (ex: https://drive.google.com/open?id=ID_AICI)
+    match_id = re.search(r"id=([a-zA-Z0-9_-]+)", val)
+    if match_id:
+        return match_id.group(1)
+    return val
+
+
 def descarca_index_master(service):
     """Descărcare directă sau căutare dinamică a fișierului Main Index."""
-    target_id = INDEX_FILE_ID
+    target_id = extras_id_drive(INDEX_FILE_RAW)
 
-    # Fallback: Dacă ID-ul direct nu e transmis în mediu, îl căutăm după nume în găleata de micro-indecși
-    if not target_id and FOLDER_TEMP_INDEXES_ID:
-        try:
-            query = f"'{FOLDER_TEMP_INDEXES_ID}' in parents and name = 'index_xml.json' and trashed = false"
-            res = (
-                service.files()
-                .list(
-                    q=query,
-                    spaces="drive",
-                    fields="files(id, name)",
-                    supportsAllDrives=True,
-                    includeItemsFromAllDrives=True,
+    # Fallback: Dacă ID-ul nu a putut fi extras direct sau este numele fișierului, căutăm după nume în găleata temp
+    if not target_id or "index_xml" in target_id.lower():
+        if FOLDER_TEMP_INDEXES_ID:
+            try:
+                query = f"'{FOLDER_TEMP_INDEXES_ID}' in parents and name = 'index_xml.json' and trashed = false"
+                res = (
+                    service.files()
+                    .list(
+                        q=query,
+                        spaces="drive",
+                        fields="files(id, name)",
+                        supportsAllDrives=True,
+                        includeItemsFromAllDrives=True,
+                    )
+                    .execute()
                 )
-                .execute()
-            )
 
-            files = res.get("files", [])
-            if files:
-                target_id = files[0]["id"]
-                print(
-                    f"🔍 [Main Index] Detectat 'index_xml.json' în găleata temp (ID: {target_id[:8]}...)",
-                    flush=True,
-                )
-        except Exception as e:
-            print(f"⚠️ Căutare dinamică Main Index eșuată: {e}", flush=True)
+                files = res.get("files", [])
+                if files:
+                    target_id = files[0]["id"]
+                    print(
+                        f"🔍 [Main Index] Identificat dinamic 'index_xml.json' în găleată (ID: {target_id[:8]}...)",
+                        flush=True,
+                    )
+            except Exception as e:
+                print(f"⚠️ Căutare dinamică Main Index eșuată: {e}", flush=True)
 
     if not target_id:
         print(
-            "ℹ️ 'XML_STORAGE_INDEX' nu este setat. Se începe cu un index vid local.",
+            "ℹ️ 'XML_STORAGE_INDEX' nu a putut fi extras/localizat. Se începe cu un index vid local.",
             flush=True,
         )
         return {"last_updated": None, "total_fisiere": 0, "fisiere": {}}
 
     try:
-        # Descărcare Main Index direct cu supportsAllDrives=True
+        print(
+            f"📥 [Main Index] Încercare descărcare fișier Master (ID: {target_id[:8]}...)...",
+            flush=True,
+        )
         cerere = service.files().get_media(
             fileId=target_id, supportsAllDrives=True
         )
@@ -91,7 +111,7 @@ def descarca_index_master(service):
         with open(CALE_INDEX_LOCAL, "r", encoding="utf-8") as f:
             data = json.load(f)
             print(
-                f"📥 [Main Index] Descărcat cu succes! ({len(data.get('fisiere', {}))} fișiere în baza master)",
+                f"✅ [Main Index] Descărcat cu succes! ({len(data.get('fisiere', {}))} fișiere în baza master)",
                 flush=True,
             )
             return data
@@ -174,12 +194,12 @@ def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
 
 
 def obtine_index_virtual(service):
-    # Step 1: Încarcă fișierul principal (Main Index)
+    # Pasul 1: Încarcă fișierul principal (Main Index)
     data_master = descarca_index_master(service)
     fisiere_map = data_master.get("fisiere", {})
     last_updated = data_master.get("last_updated")
 
-    # Step 2: Aplică peste el toate micro-indecșii din găleată
+    # Pasul 2: Aplică peste el toate micro-indecșii din găleată
     fisiere_map = aplica_micro_indecsi_temporari_in_memorie(
         service, fisiere_map
     )
@@ -187,7 +207,7 @@ def obtine_index_virtual(service):
     pattern_nume = re.compile(r"brut_legislatie_(\d+)_pag(\d+)\.xml")
     noutati_gasite = 0
 
-    # Step 3: Verificare Delta rapidă pe fișierele noi apărute direct pe Drive după last_updated
+    # Pasul 3: Verificare Delta rapidă pe fișierele noi apărute direct pe Drive după last_updated
     if last_updated:
         for folder_id in FOLDERE_XML_IDS:
             query = f"'{folder_id}' in parents and name contains 'brut_legislatie_' and modifiedTime > '{last_updated}' and trashed = false"
