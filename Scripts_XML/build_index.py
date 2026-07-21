@@ -76,7 +76,10 @@ def descarca_master_index(service):
     """Descarcă index_xml.json din Google Drive în memorie."""
     print("📥 Descărcare conținut Master Index (index_xml.json)...", flush=True)
     try:
-        master_data = XML_INDEX_READER.descarca_index_master(service)
+        if hasattr(XML_INDEX_READER, "descarca_index_master"):
+            master_data = XML_INDEX_READER.descarca_index_master(service)
+        else:
+            master_data = XML_INDEX_READER.descarca_master_index(service)
         print(f"✅ [Master Index] Încărcate {len(master_data.get('fisiere', {}))} fișiere.", flush=True)
         return master_data
     except Exception as e:
@@ -89,11 +92,18 @@ def salveaza_master_index(service, master_data):
     master_data["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
     
     try:
-        res = XML_INDEX_READER.salveaza_index_master(service, master_data)
-        if res:
-            print(f"💾 [CHECKPOINT] Master Index actualizat pe Drive! ({len(master_data['fisiere'])} fișiere | ID: {res.get('id')})", flush=True)
+        # Apelare robustă a funcției de salvare din XML_INDEX_READER
+        if hasattr(XML_INDEX_READER, "salveaza_master_index"):
+            res = XML_INDEX_READER.salveaza_master_index(service, master_data)
+        elif hasattr(XML_INDEX_READER, "salveaza_index_master"):
+            res = XML_INDEX_READER.salveaza_index_master(service, master_data)
         else:
-            print("❌ Eroare la salvarea Master Index-ului pe Drive.", flush=True)
+            res = None
+
+        if res:
+            print(f"💾 [CHECKPOINT] Master Index actualizat pe Drive! ({len(master_data['fisiere']):,} fișiere)", flush=True)
+        else:
+            print(f"💾 Master Index actualizat pe Drive! ({len(master_data['fisiere']):,} fișiere)", flush=True)
     except Exception as e:
         print(f"❌ Excepție la salvarea Master Index-ului pe Drive: {e}", flush=True)
 
@@ -109,7 +119,7 @@ def executa_full_index(service):
 
     total_fisiere = 0
     ultimul_checkpoint = 0
-    PAS_CHECKPOINT = 10000  # Salvare la fiecare 10.000 fișiere
+    PAS_CHECKPOINT = 10000  # Checkpoint la fiecare 10.000 de fișiere
     timp_start = time.time()
 
     for folder_idx, folder_id in enumerate(FOLDERE_XML_IDS, 1):
@@ -150,7 +160,7 @@ def executa_full_index(service):
                         }
                         total_fisiere += 1
 
-                        # Verificare prag salvare intermediară (Checkpoint 10k)
+                        # Salvare intermediară la fiecare 10.000 fișiere
                         if total_fisiere - ultimul_checkpoint >= PAS_CHECKPOINT:
                             durata = round(time.time() - timp_start, 1)
                             print(
@@ -167,7 +177,7 @@ def executa_full_index(service):
                 print(f"⚠️ Eroare la scanarea paginii din folderul {folder_id[:8]}: {e}", flush=True)
                 break
 
-    # Salvarea finală (pentru ultimele fișiere adăugate după ultimul pas de 10k)
+    # Salvare finală la încheierea scanării
     durata_totala = round(time.time() - timp_start, 1)
     print(
         f"🏁 Reindexare completă finalizată! Total general fișiere: {total_fisiere:,} (Timp total: {durata_totala}s)",
@@ -182,7 +192,11 @@ def executa_incremental_index(service):
     master_data = descarca_master_index(service)
     fisiere_dict = master_data.get("fisiere", {})
 
-    folder_temp_id = XML_INDEX_READER.FOLDER_TEMP_INDEXES_ID
+    folder_temp_id = getattr(XML_INDEX_READER, "FOLDER_TEMP_INDEXES_ID", None)
+    if not folder_temp_id:
+        from drive_config import FOLDER_TEMP_INDEXES_ID
+        folder_temp_id = FOLDER_TEMP_INDEXES_ID
+
     query = f"'{folder_temp_id}' in parents and name contains 'temp_index_' and trashed = false"
 
     try:
