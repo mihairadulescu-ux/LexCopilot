@@ -37,10 +37,9 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 from zeep import Client, Transport
-from zeep.exceptions import Fault, TransportError
 
 # ==============================================================================
-# CONFIGURARE SERVICIU WSDL (JUST.RO)
+# CONFIGURARE SERVICIU WSDL (JUST.RO) - URL OFICIAL FREEWEBSERVICE
 # ==============================================================================
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
@@ -213,47 +212,36 @@ def genereaza_si_salveaza_micro_index(service, log_mutații):
 
 def apeleaza_descarcare_paginata_soap(client, token, an_tinta, pagina_curenta):
     """
-    Execută interogarea paginată cu logare de debug a excepțiilor SOAP.
+    Execută interogarea CĂUTARE conform DCOUMENTAȚIEI OFICIALE FreeWebService:
+    Metoda: Search(SearchModel, tokenKey)
     """
-    service = client.service
-    ultimul_error_msg = ""
+    # Construim structura SearchModel cerută de WSDL
+    search_model = {
+        "NumarPagina": pagina_curenta,
+        "RezultatePagina": 10,  # Paginație standard
+        "SearchAn": an_tinta,
+        "SearchNumar": None,
+        "SearchText": None,
+        "SearchTitlu": None,
+    }
 
-    # 1. Încercări direct pe GetLegiPaginat
-    if hasattr(service, "GetLegiPaginat"):
-        incercari_parametri = [
-            {"token": token, "an": an_tinta, "pagina": pagina_curenta},
-            {"token": token, "an": an_tinta, "numarPagina": pagina_curenta},
-            {"token": token, "an": an_tinta, "page": pagina_curenta},
-            {"token": token, "An": an_tinta, "Pagina": pagina_curenta},
-        ]
-        for params in incercari_parametri:
-            try:
-                res = service.GetLegiPaginat(**params)
-                if res is not None:
-                    return res
-            except Exception as ex:
-                ultimul_error_msg = f"{type(ex).__name__}: {ex}"
-                print(f"   [DEBUG SOAP GetLegiPaginat] {ultimul_error_msg}", flush=True)
-
-    # 2. Încercăm pe GetLegiPaginatText
-    if hasattr(service, "GetLegiPaginatText"):
+    try:
+        # Apel oficial exact conform WSDL Documentat
+        raspuns = client.service.Search(
+            SearchModel=search_model,
+            tokenKey=token
+        )
+        return raspuns
+    except Exception as ex:
+        # Încercăm varianta alternativă de numire a parametrilor dacă Zeep cere cu litere mici
         try:
-            return service.GetLegiPaginatText(token=token, an=an_tinta, pagina=pagina_curenta)
-        except Exception as ex:
-            ultimul_error_msg = f"{type(ex).__name__}: {ex}"
-            print(f"   [DEBUG SOAP GetLegiPaginatText] {ultimul_error_msg}", flush=True)
-
-    # 3. Încercăm pe SearchLegiPaginat / Search
-    if hasattr(service, "SearchLegiPaginat"):
-        try:
-            return service.SearchLegiPaginat(token=token, an=an_tinta, pagina=pagina_curenta)
-        except Exception as ex:
-            ultimul_error_msg = f"{type(ex).__name__}: {ex}"
-            print(f"   [DEBUG SOAP SearchLegiPaginat] {ultimul_error_msg}", flush=True)
-
-    raise RuntimeError(
-        f"Eroare SOAP la interogarea An {an_tinta}, Pagina {pagina_curenta}. Detalii: {ultimul_error_msg}"
-    )
+            raspuns = client.service.Search(
+                searchModel=search_model,
+                tokenKey=token
+            )
+            return raspuns
+        except Exception as ex2:
+            raise RuntimeError(f"Eroare la apelul Search SOAP: {ex2}")
 
 
 def proceseaza_an(service, client, an_tinta, foldere_drive):
@@ -298,16 +286,22 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
         print(f"--- [AVANS] An {an_tinta} / Pagina {pagina_curenta} ---", flush=True)
 
         try:
-            raspuns_xml = apeleaza_descarcare_paginata_soap(
+            raspuns_soap = apeleaza_descarcare_paginata_soap(
                 client, token, an_tinta, pagina_curenta
             )
 
-            str_raspuns = str(raspuns_xml) if raspuns_xml else ""
-            if not str_raspuns or len(str_raspuns.encode("utf-8")) < 200:
+            # Verificăm dacă răspunsul conține legi
+            if not raspuns_soap or not getattr(raspuns_soap, 'Legi', None):
                 print(
-                    f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta}.",
+                    f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta} (Nu mai există rezultate).",
                     flush=True,
                 )
+                break
+
+            # Serializăm răspunsul SOAP / XML în text UTF-8 pentru stocare
+            str_raspuns = str(raspuns_soap)
+            if len(str_raspuns.encode("utf-8")) < 50:
+                print(f"🏁 Conținut insuficient la pagina {pagina_curenta}. Oprire an {an_tinta}.", flush=True)
                 break
 
             bytes_xml = str_raspuns.encode("utf-8")
@@ -353,21 +347,6 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
         except Exception as e:
             err_str = str(e)
             
-            # Verificăm dacă eroarea indică atragerea capătului bazei de date (End of Data)
-            motive_final_date = [
-                "no results", "fara rezultate", "invalid page", 
-                "out of range", "index was outside", "null reference", 
-                "fault", "object reference not set"
-            ]
-            
-            if any(m in err_str.lower() for m in motive_final_date):
-                print(
-                    f"🏁 [CAPĂT AN DETECTAT] Anul {an_tinta} este complet! (Nicio pagină nouă la {pagina_curenta}).",
-                    flush=True,
-                )
-                print(f"   └─ Mesaj detaliat de la Just.ro: {err_str}", flush=True)
-                break
-
             if "token" in err_str.lower() or "invalid" in err_str.lower():
                 print("🔄 Token expirat. Re-generare token...", flush=True)
                 try:
