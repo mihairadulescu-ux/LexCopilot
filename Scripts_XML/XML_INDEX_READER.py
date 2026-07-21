@@ -10,17 +10,18 @@ CALE_INDEX_LOCAL = "index_xml.json"
 DEFAULT_TEMP_FOLDER_ID = "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
 
 # ==========================================
-# VARIABILE DE MEDIU
+# PRELUARE VARIABILE PUBLICE DIN MEDIU
 # ==========================================
-# 1. Main Index (opțional / dacă e disponibil)
 INDEX_FILE_ID = os.getenv("XML_STORAGE_INDEX", "").strip()
 
-# 2. Găleata cu Micro-Indecși Temporari
 FOLDER_TEMP_INDEXES_ID = (
     os.getenv("TEMPORARY_XML_INDEXES", "").strip() or DEFAULT_TEMP_FOLDER_ID
 )
 
-# 3. Lista Shared Drives cu XML-urile brute
+FOLDER_METADATA_ID = (
+    os.getenv("METADATA_FOLDER_ID", "").strip() or DEFAULT_TEMP_FOLDER_ID
+)
+
 FOLDERE_XML_RAW = os.getenv("DRIVE_FOLDER_XML", "").strip()
 FOLDERE_XML_IDS = [
     fid.strip()
@@ -35,24 +36,39 @@ FOLDERE_XML_IDS = [
 
 
 def descarca_index_master(service):
-    """
-    Descarcă Master Index dacă 'XML_STORAGE_INDEX' este definit.
-    Dacă nu este setat sau eșuează, returnează o structură vidă
-    peste care se vor aplica micro-indecșii și delta.
-    """
-    if not INDEX_FILE_ID:
+    """Descărcare directă a fișierului Main Index din Shared Drive."""
+    target_id = INDEX_FILE_ID
+
+    if not target_id:
+        print(
+            "ℹ️ [Index Reader] Variabila 'XML_STORAGE_INDEX' nu este furnizată. Se continuă pe micro-indecși.",
+            flush=True,
+        )
         return {"last_updated": None, "total_fisiere": 0, "fisiere": {}}
 
     try:
+        # Pasul 1: Confirmare metadate pentru Shared Drive
+        meta = (
+            service.files()
+            .get(fileId=target_id, fields="id, name, size", supportsAllDrives=True)
+            .execute()
+        )
+
+        size_mb = round(int(meta.get("size", 0)) / (1024 * 1024), 2)
         print(
-            f"📥 [Index Reader] Descărcare Master Index (ID: {INDEX_FILE_ID[:8]}...)...",
+            f"📥 [Index Reader] Descărcare Master Index '{meta.get('name')}' ({size_mb} MB)...",
             flush=True,
         )
-        cerere = service.files().get_media(
-            fileId=INDEX_FILE_ID, supportsAllDrives=True
+
+        # Pasul 2: Descărcare conținut media
+        request = service.files().get_media(
+            fileId=target_id, supportsAllDrives=True
         )
         fh = io.FileIO(CALE_INDEX_LOCAL, "wb")
-        downloader = MediaIoBaseDownload(fh, cerere)
+        downloader = MediaIoBaseDownload(
+            fh, request, chunksize=10 * 1024 * 1024
+        )
+
         gata = False
         while not gata:
             _, gata = downloader.next_chunk()
@@ -60,13 +76,14 @@ def descarca_index_master(service):
         with open(CALE_INDEX_LOCAL, "r", encoding="utf-8") as f:
             data = json.load(f)
             print(
-                f"✅ [Index Reader] Master Index încărcat cu succes ({len(data.get('fisiere', {}))} fișiere).",
+                f"✅ [Index Reader] Master Index încărcat cu succes! ({len(data.get('fisiere', {}))} fișiere în baza master)",
                 flush=True,
             )
             return data
+
     except Exception as e:
         print(
-            f"⚠️ [Index Reader] Master Index indisponibil ({e}). Se continuă doar cu micro-indecșii.",
+            f"⚠️ [Index Reader] Master Index indisponibil pe Drive (ID: {target_id}): {e}",
             flush=True,
         )
         return {"last_updated": None, "total_fisiere": 0, "fisiere": {}}
@@ -94,10 +111,9 @@ def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
         if not loguri_temp:
             return fisiere_map
 
-        # Ordonăm micro-indecșii după data creării pentru replay corect în memorie
         loguri_temp.sort(key=lambda x: x.get("createdTime", ""))
         print(
-            f"⚡ [Index Reader] Aplicare {len(loguri_temp)} micro-indecși din găleata temporară...",
+            f"⚡ [Index Reader] Aplicare {len(loguri_temp)} micro-indecși din TEMPORARY_XML_INDEXES...",
             flush=True,
         )
 
@@ -145,21 +161,15 @@ def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
 
 
 def obtine_index_virtual(service):
-    """
-    FUNCȚIA PRINCIPALĂ DE INTERFAȚĂ:
-    Construiește în memorie starea 100% la zi a tuturor fișierelor XML.
-    """
-    # 1. Baza fixă (Master)
+    """Construiește în memorie starea unificată la zi a tuturor fișierelor XML."""
     data_master = descarca_index_master(service)
     fisiere_map = data_master.get("fisiere", {})
     last_updated = data_master.get("last_updated")
 
-    # 2. Mutațiile recente (Micro-indecși)
     fisiere_map = aplica_micro_indecsi_temporari_in_memorie(
         service, fisiere_map
     )
 
-    # 3. Noutățile absolute neînregistrate încă (Delta direct pe Drive)
     pattern_nume = re.compile(r"brut_legislatie_(\d+)_pag(\d+)\.xml")
     noutati_gasite = 0
 
@@ -227,7 +237,7 @@ def obtine_index_virtual(service):
 
 
 def obtine_fisiere_neprocesate(service, nume_flag="Tags_extracted"):
-    """Filtrează rapid Indexul Virtual pentru a returna doar fișierele ce necesită procesare."""
+    """Filtrează Indexul Virtual pentru a returna fișierele neprocesate."""
     index_v = obtine_index_virtual(service)
     fisiere_map = index_v.get("fisiere", {})
 
