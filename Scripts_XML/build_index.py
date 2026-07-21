@@ -91,7 +91,7 @@ def salveaza_master_index(service, master_data):
     try:
         res = XML_INDEX_READER.salveaza_index_master(service, master_data)
         if res:
-            print(f"✅ Master Index actualizat pe Drive cu succes! (ID: {res.get('id')})", flush=True)
+            print(f"💾 [CHECKPOINT] Master Index actualizat pe Drive! ({len(master_data['fisiere'])} fișiere | ID: {res.get('id')})", flush=True)
         else:
             print("❌ Eroare la salvarea Master Index-ului pe Drive.", flush=True)
     except Exception as e:
@@ -99,17 +99,21 @@ def salveaza_master_index(service, master_data):
 
 
 # ==============================================================================
-# EXECUȚIE STRATEGII
+# EXECUȚIE STRATEGII (CU CHECKPOINT LA FIECARE 10.000 DE FIȘIERE)
 # ==============================================================================
 def executa_full_index(service):
-    """Scanează integral toate folderele și reconstruiește Master Index-ul de la zero."""
+    """Scanează integral toate folderele și reconstruiește Master Index-ul cu salvări intermediare."""
     print("🚀 Reconstrucție completă index (FULL INDEX)...", flush=True)
     master_data = {"fisiere": {}, "last_updated": ""}
     pattern_xml = re.compile(r"brut_legislatie_(\d{4})_pag(\d+)\.xml")
 
     total_fisiere = 0
-    for folder_id in FOLDERE_XML_IDS:
-        print(f"📂 Scanare folder Shared Drive ID: {folder_id[:8]}...", flush=True)
+    ultimul_checkpoint = 0
+    PAS_CHECKPOINT = 10000  # Salvare la fiecare 10.000 fișiere
+    timp_start = time.time()
+
+    for folder_idx, folder_id in enumerate(FOLDERE_XML_IDS, 1):
+        print(f"📂 [{folder_idx}/{len(FOLDERE_XML_IDS)}] Scanare Shared Drive Folder ID: {folder_id[:8]}...", flush=True)
         page_token = None
         query = f"'{folder_id}' in parents and trashed = false"
 
@@ -146,6 +150,16 @@ def executa_full_index(service):
                         }
                         total_fisiere += 1
 
+                        # Verificare prag salvare intermediară (Checkpoint 10k)
+                        if total_fisiere - ultimul_checkpoint >= PAS_CHECKPOINT:
+                            durata = round(time.time() - timp_start, 1)
+                            print(
+                                f"📊 [Status Update] Progres: {total_fisiere:,} fișiere identificate... (Timp scurs: {durata}s)",
+                                flush=True,
+                            )
+                            salveaza_master_index(service, master_data)
+                            ultimul_checkpoint = total_fisiere
+
                 page_token = response.get("nextPageToken")
                 if not page_token:
                     break
@@ -153,7 +167,12 @@ def executa_full_index(service):
                 print(f"⚠️ Eroare la scanarea paginii din folderul {folder_id[:8]}: {e}", flush=True)
                 break
 
-    print(f"📊 Reindexare completă finalizată. Total fișiere identificate: {total_fisiere}", flush=True)
+    # Salvarea finală (pentru ultimele fișiere adăugate după ultimul pas de 10k)
+    durata_totala = round(time.time() - timp_start, 1)
+    print(
+        f"🏁 Reindexare completă finalizată! Total general fișiere: {total_fisiere:,} (Timp total: {durata_totala}s)",
+        flush=True,
+    )
     salveaza_master_index(service, master_data)
 
 
