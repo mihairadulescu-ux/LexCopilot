@@ -37,10 +37,9 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 from zeep import Client, Transport
-from zeep.helpers import serialize_object
 
 # ==============================================================================
-# CONFIGURARE SERVICIU WSDL (JUST.RO) - URL OFICIAL FREEWEBSERVICE
+# CONFIGURARE SERVICIU WSDL ORIGINAL (JUST.RO)
 # ==============================================================================
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
@@ -207,6 +206,27 @@ def genereaza_si_salveaza_micro_index(service, log_mutații):
             os.remove(cale_temp)
 
 
+def executa_get_legi_paginat_raw(client, token, an_tinta, pagina_curenta):
+    """
+    Execută apelul SOAP exact pentru XML-ul brut de legislație paginată.
+    Inspecționează dinamic metodele disponibile ale serviciului pentru compatibilitate maximă.
+    """
+    service = client.service
+
+    # Inspecție sigură a numelui metodei SOAP
+    metoda = getattr(service, "GetLegiPaginat", None) or getattr(service, "GetLegiPaginatText", None)
+
+    if metoda:
+        return metoda(token=token, an=an_tinta, pagina=pagina_curenta)
+
+    # Fallback prin apel de operatie direct pe port-ul WSDL (dacă Zeep nu a expus direct metoda pe service)
+    try:
+        op = client.bind('FreeWebService', 'BasicHttpBinding_IFreeWebService')
+        return op.GetLegiPaginat(token=token, an=an_tinta, pagina=pagina_curenta)
+    except Exception as ex:
+        raise AttributeError(f"Nu s-a putut apela GetLegiPaginat pe serviciul WSDL Just.ro: {ex}")
+
+
 def proceseaza_an(service, client, an_tinta, foldere_drive):
     """Descarcă paginile din API-ul Just.ro pentru anul specificat și le salvează în Drive."""
     print("=" * 70, flush=True)
@@ -249,43 +269,23 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
         print(f"--- [AVANS] An {an_tinta} / Pagina {pagina_curenta} ---", flush=True)
 
         succes_pagina = False
-        
-        # BUCULĂ DE RETRY PER PAGINĂ (până la 5 încercări)
+
         for incercare in range(1, 6):
             try:
-                # Construim obiectul SearchModel cerut oficial de WSDL
-                search_model = {
-                    "NumarPagina": pagina_curenta,
-                    "RezultatePagina": 10,
-                    "SearchAn": an_tinta,
-                    "SearchNumar": None,
-                    "SearchText": None,
-                    "SearchTitlu": None,
-                }
+                # PreLuare XML brut exact ca în descărcările originale
+                raspuns_xml = executa_get_legi_paginat_raw(client, token, an_tinta, pagina_curenta)
 
-                # Apelul SOAP nativ cu metoda Search
-                raspuns_soap = client.service.Search(
-                    SearchModel=search_model,
-                    tokenKey=token
-                )
-
-                # Verificăm dacă există rezultate în răspuns
-                dict_res = serialize_object(raspuns_soap) if raspuns_soap else {}
-                legi_gasite = None
-                
-                if isinstance(dict_res, dict):
-                    legi_gasite = dict_res.get("Legi") or dict_res.get("SearchResult", {}).get("Legi")
-
-                if not legi_gasite:
+                # Când se termină paginile pentru anul respectiv, serverul returnează răspuns gol / None / sub 200 octeți
+                str_xml = str(raspuns_xml) if raspuns_xml else ""
+                if not str_xml or len(str_xml.encode("utf-8")) < 200:
                     print(
-                        f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta} (Lista Legi este goală).",
+                        f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta}.",
                         flush=True,
                     )
                     succes_pagina = False
-                    break  # Ieșim din retry, e capăt de an real
+                    break
 
-                str_data = json.dumps(dict_res, ensure_ascii=False, indent=2)
-                bytes_xml = str_data.encode("utf-8")
+                bytes_xml = str_xml.encode("utf-8")
 
                 fid = salveaza_sau_actualizeaza_in_drive(
                     service, nume_xml, bytes_xml, folder_curent_id
@@ -320,12 +320,12 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
                     }
 
                 succes_pagina = True
-                break  # Pagina descărcată cu succes
+                break
 
             except Exception as e:
                 err_str = str(e)
                 print(f"⚠️ Încercarea {incercare}/5 a eșuat la Pagina {pagina_curenta}: {err_str}", flush=True)
-                
+
                 if "token" in err_str.lower() or "invalid" in err_str.lower():
                     try:
                         print("🔄 Regenerare token...", flush=True)
@@ -335,7 +335,6 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
 
                 time.sleep(2 * incercare)
 
-        # Dacă după 5 încercări nu am avut succes sau am ajuns la finalul datelor
         if not succes_pagina:
             print(f"🏁 Oprire scanare pentru anul {an_tinta} la pagina {pagina_curenta}.", flush=True)
             break
