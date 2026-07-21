@@ -92,7 +92,6 @@ def salveaza_master_index(service, master_data):
     master_data["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
     
     try:
-        # Apelare robustă a funcției de salvare din XML_INDEX_READER
         if hasattr(XML_INDEX_READER, "salveaza_master_index"):
             res = XML_INDEX_READER.salveaza_master_index(service, master_data)
         elif hasattr(XML_INDEX_READER, "salveaza_index_master"):
@@ -101,25 +100,109 @@ def salveaza_master_index(service, master_data):
             res = None
 
         if res:
-            print(f"💾 [CHECKPOINT] Master Index actualizat pe Drive! ({len(master_data['fisiere']):,} fișiere)", flush=True)
+            print(f"💾 [CHECKPOINT] Master Index actualizat pe Drive! ({len(master_data['fisiere']):,} fișiere unice)", flush=True)
         else:
-            print(f"💾 Master Index actualizat pe Drive! ({len(master_data['fisiere']):,} fișiere)", flush=True)
+            print(f"💾 Master Index actualizat pe Drive! ({len(master_data['fisiere']):,} fișiere unice)", flush=True)
     except Exception as e:
         print(f"❌ Excepție la salvarea Master Index-ului pe Drive: {e}", flush=True)
 
 
 # ==============================================================================
-# EXECUȚIE STRATEGII (CU CHECKPOINT LA FIECARE 10.000 DE FIȘIERE)
+# CURĂȚARE DUPLICATE DIN DRIVE (PERMISIUNI EDITOR: MUTARE ÎN TRASH)
+# ==============================================================================
+def curata_duplicate_drive(service, master_data):
+    """
+    Scanează folderele Shared Drive și mută în Trash fișierele fizice 
+    ale căror ID-uri nu figurează în Master Index (operațiune compatibilă cu rolul de Editor).
+    """
+    print("\n" + "=" * 60, flush=True)
+    print("🗑️ ÎNCEPERE ETAPĂ MUTARE DUPLICATE ÎN COȘUL DE GUNOI (TRASH)...", flush=True)
+    print("=" * 60, flush=True)
+
+    fisiere_valide = master_data.get("fisiere", {})
+    id_uri_oficiale = {meta["id"] for meta in fisiere_valide.values() if "id" in meta}
+    
+    print(f"🛡️ Total ID-uri oficiale protejate în Master Index: {len(id_uri_oficiale):,}", flush=True)
+
+    total_fisiere_verificate = 0
+    total_duplicate_gunoi = 0
+    erori_gunoi = 0
+    timp_start = time.time()
+
+    for folder_idx, folder_id in enumerate(FOLDERE_XML_IDS, 1):
+        print(f"\n📂 [{folder_idx}/{len(FOLDERE_XML_IDS)}] Scanare folder pentru curățare: {folder_id[:8]}...", flush=True)
+        page_token = None
+        # Interogăm doar fișierele care NU sunt deja în Trash
+        query = f"'{folder_id}' in parents and trashed = false"
+
+        while True:
+            try:
+                response = (
+                    service.files()
+                    .list(
+                        **get_list_params(
+                            q=query,
+                            fields="nextPageToken, files(id, name)",
+                            pageToken=page_token,
+                            pageSize=1000,
+                        )
+                    )
+                    .execute()
+                )
+
+                files = response.get("files", [])
+                for f in files:
+                    total_fisiere_verificate += 1
+                    file_id = f["id"]
+
+                    # Dacă ID-ul fișierului NU este în Master Index, îl mutăm în Trash
+                    if file_id not in id_uri_oficiale:
+                        try:
+                            params = get_file_params(fileId=file_id)
+                            params["body"] = {"trashed": True}
+                            service.files().update(**params).execute()
+                            total_duplicate_gunoi += 1
+
+                            if total_duplicate_gunoi % 1000 == 0:
+                                durata = round(time.time() - timp_start, 1)
+                                print(
+                                    f"🗑️ [Progres Trash] Trimise în Coșul de Gunoi {total_duplicate_gunoi:,} duplicate... ({durata}s)",
+                                    flush=True,
+                                )
+                        except Exception as ex_del:
+                            erori_gunoi += 1
+                            if erori_gunoi <= 5:
+                                print(f"⚠️ Nu s-a putut muta în Trash fișierul {f['name']} ({file_id}): {ex_del}", flush=True)
+
+                page_token = response.get("nextPageToken")
+                if not page_token:
+                    break
+            except Exception as e:
+                print(f"⚠️ Eroare la scanarea folderului {folder_id[:8]}: {e}", flush=True)
+                break
+
+    durata_totala = round(time.time() - timp_start, 1)
+    print("\n" + "=" * 60, flush=True)
+    print(f"🏁 CURĂȚARE DUPLICATE FINALIZATĂ în {durata_totala}s!", flush=True)
+    print(f"📊 Fișiere totale verificate: {total_fisiere_verificate:,}", flush=True)
+    print(f"🗑️ Duplicate mutate în Trash: {total_duplicate_gunoi:,}", flush=True)
+    if erori_gunoi > 0:
+        print(f"⚠️ Erori întâmpinate (permisiuni / fișiere blocate): {erori_gunoi}", flush=True)
+    print("=" * 60 + "\n", flush=True)
+
+
+# ==============================================================================
+# EXECUȚIE STRATEGII (FULL VS INCREMENTAL)
 # ==============================================================================
 def executa_full_index(service):
-    """Scanează integral toate folderele și reconstruiește Master Index-ul cu salvări intermediare."""
+    """Scanează integral toate folderele, reconstruiește Master Index-ul și trimite duplicatele în Trash."""
     print("🚀 Reconstrucție completă index (FULL INDEX)...", flush=True)
     master_data = {"fisiere": {}, "last_updated": ""}
     pattern_xml = re.compile(r"brut_legislatie_(\d{4})_pag(\d+)\.xml")
 
     total_fisiere = 0
     ultimul_checkpoint = 0
-    PAS_CHECKPOINT = 10000  # Checkpoint la fiecare 10.000 de fișiere
+    PAS_CHECKPOINT = 10000
     timp_start = time.time()
 
     for folder_idx, folder_id in enumerate(FOLDERE_XML_IDS, 1):
@@ -160,11 +243,10 @@ def executa_full_index(service):
                         }
                         total_fisiere += 1
 
-                        # Salvare intermediară la fiecare 10.000 fișiere
                         if total_fisiere - ultimul_checkpoint >= PAS_CHECKPOINT:
                             durata = round(time.time() - timp_start, 1)
                             print(
-                                f"📊 [Status Update] Progres: {total_fisiere:,} fișiere identificate... (Timp scurs: {durata}s)",
+                                f"📊 [Status Update] Progres scanare: {total_fisiere:,} fișiere fizice parcurse...",
                                 flush=True,
                             )
                             salveaza_master_index(service, master_data)
@@ -177,13 +259,15 @@ def executa_full_index(service):
                 print(f"⚠️ Eroare la scanarea paginii din folderul {folder_id[:8]}: {e}", flush=True)
                 break
 
-    # Salvare finală la încheierea scanării
     durata_totala = round(time.time() - timp_start, 1)
     print(
-        f"🏁 Reindexare completă finalizată! Total general fișiere: {total_fisiere:,} (Timp total: {durata_totala}s)",
+        f"🏁 Reindexare completă finalizată! Total fișiere unice indexate: {len(master_data['fisiere']):,} (Timp total scanare: {durata_totala}s)",
         flush=True,
     )
     salveaza_master_index(service, master_data)
+
+    # Executăm mutarea duplicatelor în Trash
+    curata_duplicate_drive(service, master_data)
 
 
 def executa_incremental_index(service):
@@ -234,8 +318,10 @@ def executa_incremental_index(service):
                     fisiere_dict[nume_xml] = meta
                     modificari = True
 
-                service.files().delete(**get_file_params(fileId=file_id)).execute()
-                print(f"   └─ Consolidat și șters micro-index: {nume_temp}", flush=True)
+                params_del = get_file_params(fileId=file_id)
+                params_del["body"] = {"trashed": True}
+                service.files().update(**params_del).execute()
+                print(f"   └─ Consolidat și mutat în Trash micro-index: {nume_temp}", flush=True)
 
             except Exception as ex:
                 print(f"⚠️ Eroare procesare micro-index {nume_temp}: {ex}", flush=True)
@@ -255,7 +341,7 @@ def main():
     is_full = "--full" in sys.argv or os.getenv("FORCE_FULL_INDEX", "").lower() == "true"
 
     if is_full:
-        print("🚀 [Strategie] Se execută FULL INDEX (Reindexare completă).", flush=True)
+        print("🚀 [Strategie] Se execută FULL INDEX (Reindexare completă + Mutare duplicate în Trash).", flush=True)
     else:
         print("⚡ [Strategie] Se execută INCREMENTAL INDEX (Delta & Consolidare).", flush=True)
 
