@@ -1,4 +1,4 @@
-import sys
+vimport sys
 import os
 import time
 import json
@@ -20,43 +20,130 @@ except ImportError:
 
 
 # ==========================================
-# CONFIGURĂRI DINAMICE ȘI CONSTANTE (JUST.RO)
+# CONFIGURĂRI SI ENDPOINT OFICIAL
 # ==========================================
-MAX_RETRIES_PER_PAGE = 4      # Încercări rapide per ciclu (3s, 6s, 12s, 24s)
-MAX_FAILED_CYCLES = 3          # Câte cicluri de eșec permitem înainte să SĂRTIM pagina
-PAUSE_BETWEEN_RETRIES = 3      # Pauza de start (secunde)
+MAX_RETRIES_PER_PAGE = 4
+MAX_FAILED_CYCLES = 3
+PAUSE_BETWEEN_RETRIES = 3
 LOG_ERRORS_FILE = "pagini_saltate_erori.json"
 
 SOAP_ENDPOINT_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc"
-WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
-# HEADERE STRICT ASCII (Fără diacritice în SOAPAction)
-SOAP_HEADERS = {
+HEADERS_BASE = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Content-Type': 'text/xml; charset=utf-8',
-    'SOAPAction': 'http://tempuri.org/IFreeWebService/GetLegislatie'
+    'Content-Type': 'text/xml; charset=utf-8'
 }
 
 
-def construieste_plic_soap(an, pagina):
-    """
-    Construiește corpul XML SOAP fără diacritice în nume de metode/taguri.
-    """
-    soap_body = f"""<?xml version="1.0" encoding="utf-8"?>
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:temp="http://tempuri.org/">
-   <soapenv:Header/>
-   <soapenv:Body>
-      <temp:GetLegislatie>
-         <temp:an>{an}</temp:an>
-         <temp:pagina>{pagina}</temp:pagina>
-      </temp:GetLegislatie>
-   </soapenv:Body>
-</soapenv:Envelope>"""
-    return soap_body
+# ==========================================
+# FUNCȚII GENERARE PLICURI SOAP
+# ==========================================
+def construieste_plic_get_token():
+    return """<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Header>
+    <Action s:mustUnderstand="1" xmlns="http://schemas.microsoft.com/ws/2005/05/addressing/none">http://tempuri.org/IFreeWebService/GetToken</Action>
+  </s:Header>
+  <s:Body>
+    <GetToken xmlns="http://tempuri.org/" />
+  </s:Body>
+</s:Envelope>"""
+
+
+def construieste_plic_search(token_key, an, pagina, rezultate_per_pagina=10):
+    return f"""<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Header>
+    <Action s:mustUnderstand="1" xmlns="http://schemas.microsoft.com/ws/2005/05/addressing/none">http://tempuri.org/IFreeWebService/Search</Action>
+  </s:Header>
+  <s:Body>
+    <Search xmlns="http://tempuri.org/">
+      <SearchModel xmlns:d4p1="http://schemas.datacontract.org/2004/07/FreeWebService" xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+        <d4p1:NumarPagina>{pagina}</d4p1:NumarPagina>
+        <d4p1:RezultatePagina>{rezultate_per_pagina}</d4p1:RezultatePagina>
+        <d4p1:SearchAn>{an}</d4p1:SearchAn>
+        <d4p1:SearchNumar i:nil="true" />
+        <d4p1:SearchText i:nil="true" />
+        <d4p1:SearchTitlu i:nil="true" />
+      </SearchModel>
+      <tokenKey>{token_key}</tokenKey>
+    </Search>
+  </s:Body>
+</s:Envelope>"""
+
+
+# ==========================================
+# LOGICĂ REȚEA ȘI MANAGEMENT TOKEN
+# ==========================================
+def obtine_token():
+    """Apelează GetToken doar când este necesar un token nou."""
+    print("🔑 [TOKEN] Solicităm un token nou de la serviciul web...", flush=True)
+    payload = construieste_plic_get_token()
+    
+    headers = HEADERS_BASE.copy()
+    headers['SOAPAction'] = 'http://tempuri.org/IFreeWebService/GetToken'
+    
+    try:
+        response = requests.post(
+            SOAP_ENDPOINT_URL,
+            data=payload.encode('utf-8'),
+            headers=headers,
+            impersonate="chrome120",
+            http_version=CurlHttpVersion.V1_1,
+            timeout=20
+        )
+        
+        if response.status_code == 200:
+            text = response.text
+            if "<GetTokenResult>" in text and "</GetTokenResult>" in text:
+                token = text.split("<GetTokenResult>")[1].split("</GetTokenResult>")[0].strip()
+                print(f"✅ [TOKEN OK] Token activat: {token[:15]}...", flush=True)
+                return token
+        
+        print(f"❌ [TOKEN ERROR] Cod HTTP {response.status_code}: {response.text[:200]}", flush=True)
+        return None
+    except Exception as e:
+        print(f"💥 [TOKEN EXCEPTION] {type(e).__name__}: {e}", flush=True)
+        return None
+
+
+def trimite_search_soap(token_key, an, pagina, timeout=30):
+    payload = construieste_plic_search(token_key, an, pagina)
+    headers = HEADERS_BASE.copy()
+    headers['SOAPAction'] = 'http://tempuri.org/IFreeWebService/Search'
+    
+    try:
+        response = requests.post(
+            SOAP_ENDPOINT_URL,
+            data=payload.encode('utf-8'),
+            headers=headers,
+            impersonate="chrome120",
+            http_version=CurlHttpVersion.V1_1,
+            timeout=timeout
+        )
+        
+        if response.status_code == 200:
+            # Verificăm dacă răspunsul conține erori specifice de token nevalid/expirat
+            if "Invalid Token" in response.text or "Token Expired" in response.text:
+                return False, None, "TOKEN_EXPIRED"
+            return True, response.content, "OK"
+        
+        if response.status_code in (401, 403):
+            return False, None, "TOKEN_EXPIRED"
+
+        motiv = f"HTTP {response.status_code} ({response.reason})"
+        print(f"\n   ⚠️ [HTTP STATUS ERROR] Cod {response.status_code} pe URL: {SOAP_ENDPOINT_URL}", flush=True)
+        return False, None, motiv
+
+    except requests.errors.RequestsError as e:
+        motiv = f"curl_cffi Error ({type(e).__name__}): {e}"
+        print(f"\n   ❌ [cURL Error Exact]: {type(e).__name__} -> {e}", flush=True)
+        return False, None, motiv
+    except Exception as e:
+        motiv = f"Eroare Necunoscută ({type(e).__name__}): {e}"
+        print(f"\n   💥 [Eroare Generală]: {type(e).__name__} -> {e}", flush=True)
+        return False, None, motiv
 
 
 def logheaza_pagina_saltata(an, pagina, url, motiv_detaliat):
-    """Salvează incremental paginile care au eșuat definitiv într-un fișier JSON."""
     entry = {
         "an": an,
         "pagina": pagina,
@@ -83,69 +170,46 @@ def logheaza_pagina_saltata(an, pagina, url, motiv_detaliat):
         print(f"   ⚠️ Nu s-a putut scrie în fișierul de log: {e}", flush=True)
 
 
-def trimite_cerere_soap_cu_debug(url, xml_payload, timeout=30):
-    """
-    Execută cererea HTTP POST cu plic SOAP via curl_cffi pe serviciul WCF.
-    """
-    try:
-        response = requests.post(
-            url, 
-            data=xml_payload.encode('utf-8'),
-            headers=SOAP_HEADERS, 
-            impersonate="chrome120", 
-            http_version=CurlHttpVersion.V1_1,
-            timeout=timeout
-        )
-        
-        # 1. Răspuns Successful (200 OK)
-        if response.status_code == 200:
-            return True, response.content, "OK"
-        
-        # 2. Cod HTTP de eroare sau SOAP Fault
-        motiv = f"HTTP {response.status_code} ({response.reason})"
-        print(f"\n   ⚠️ [HTTP STATUS ERROR] Cod {response.status_code} ({response.reason}) pe URL: {url}", flush=True)
-        if response.text:
-            print(f"      📄 Preview Răspuns SOAP (200 chars): {response.text[:200]!r}", flush=True)
-        return False, None, motiv
-
-    except requests.errors.RequestsError as e:
-        motiv = f"curl_cffi Error ({type(e).__name__}): {e}"
-        print(f"\n   ❌ [cURL Error Exact]: {type(e).__name__} -> {e}", flush=True)
-        return False, None, motiv
-
-    except Exception as e:
-        motiv = f"Eroare Necunoscută ({type(e).__name__}): {e}"
-        print(f"\n   💥 [Eroare Generală]: {type(e).__name__} -> {e}", flush=True)
-        return False, None, motiv
-
-
-def proceseaza_descarcare_an(an, pagina_start=1):
-    """Procesează descărcarea paginilor pentru un an specific, cu tratare de erori și Skip."""
-    print(f"\n=== AN INDUSTRIAL XML (SOAP WCF): {an} ===", flush=True)
-    print(f"🆕 An {an}: Începem de la pagina {pagina_start}.", flush=True)
+# ==========================================
+# BUCLA PRINCIPALĂ PER AN/PAGINĂ
+# ==========================================
+def proceseaza_descarcare_an(an, pagina_start=1, token_salvat=None):
+    print(f"\n=== AN INDUSTRIAL XML (SOAP OFICIAL): {an} ===", flush=True)
     
+    # Folosim token-ul existent sau obținem unul nou doar dacă nu există
+    token_curent = token_salvat or obtine_token()
+    if not token_curent:
+        print("❌ Nu s-a putut obține token-ul inițial. Abandonăm anul curent.", flush=True)
+        return None
+
     pagina_curenta = pagina_start
     cicluri_esuate_consecutive = 0
     
     while True:
-        xml_payload = construieste_plic_soap(an, pagina_curenta)
-        
-        print(f"--- [AVANS SOAP] An {an} / Pagina {pagina_curenta} ---", flush=True)
+        print(f"--- [AVANS SEARCH] An {an} / Pagina {pagina_curenta} ---", flush=True)
         
         succes = False
         ultimul_motiv_esec = ""
         
         for incercare in range(1, MAX_RETRIES_PER_PAGE + 1):
-            pauza = PAUSE_BETWEEN_RETRIES * (2 ** (incercare - 1))  # Backoff: 3s, 6s, 12s, 24s
+            pauza = PAUSE_BETWEEN_RETRIES * (2 ** (incercare - 1))
             
-            ok, continut_xml_raspuns, motiv = trimite_cerere_soap_cu_debug(SOAP_ENDPOINT_URL, xml_payload)
+            ok, continut_xml, motiv = trimite_search_soap(token_curent, an, pagina_curenta)
             
             if ok:
                 succes = True
                 cicluri_esuate_consecutive = 0
+                # Aici salvezi conținutul XML
                 break
             else:
                 ultimul_motiv_esec = motiv
+                # Re-generare token DOAR dacă serverul indică explicit că primul a expirat
+                if motiv == "TOKEN_EXPIRED":
+                    print("🔄 [TOKEN EXPIRED] Tokenul curent a expirat. Obținem un token nou...", flush=True)
+                    token_nou = obtine_token()
+                    if token_nou:
+                        token_curent = token_nou
+
                 print(f"   ⚠️ Încercarea {incercare}/{MAX_RETRIES_PER_PAGE} eșuată pe pagina {pagina_curenta}. Pauză {pauza}s...", flush=True)
                 time.sleep(pauza)
         
@@ -156,24 +220,19 @@ def proceseaza_descarcare_an(an, pagina_start=1):
             print(f"\n🛑 [Pagină Eșuată] Pagina {pagina_curenta} a eșuat în ciclul {cicluri_esuate_consecutive}/{MAX_FAILED_CYCLES}.", flush=True)
             
             if cicluri_esuate_consecutive >= MAX_FAILED_CYCLES:
-                print(f"⚠️ [SKIP PAGINĂ] Pagina {pagina_curenta} eșuează sistematic! O salvăm în log și SĂRTIM la pagina {pagina_curenta + 1}...", flush=True)
-                
-                logheaza_pagina_saltata(
-                    an=an, 
-                    pagina=pagina_curenta, 
-                    url=SOAP_ENDPOINT_URL, 
-                    motiv_detaliat=ultimul_motiv_esec
-                )
-                
+                print(f"⚠️ [SKIP PAGINĂ] Pagina {pagina_curenta} eșuează sistematic! O salvăm în log și SĂRTIM...", flush=True)
+                logheaza_pagina_saltata(an, pagina_curenta, SOAP_ENDPOINT_URL, ultimul_motiv_esec)
                 pagina_curenta += 1
                 cicluri_esuate_consecutive = 0
             else:
-                print("   ⏸️ Așteptăm 30 de secunde înainte de a reîncerca aceeași pagină...", flush=True)
+                print("   ⏸️ Așteptăm 30 de secunde înainte de a reîncerca...", flush=True)
                 time.sleep(30)
+                
+    return token_curent
 
 
 def main():
-    print("🚀 Script de descărcare SOAP XML pornit (FreeWebService.svc via curl_cffi).", flush=True)
+    print("🚀 Script de descărcare conform documentației oficiale legislatie.just.ro", flush=True)
     
     ani_de_procesat = [2012, 2013]
     if len(sys.argv) >= 3:
@@ -182,24 +241,26 @@ def main():
             an_stop = int(sys.argv[2])
             ani_de_procesat = list(range(an_start, an_stop + 1))
         except ValueError:
-            print("⚠️ Argumentele din linia de comandă nu sunt numere valide. Folosim valorile default.", flush=True)
+            print("⚠️ Argumentele din linia de comandă nu sunt valide. Folosim valorile default.", flush=True)
 
+    token_activ = None
     for an in ani_de_procesat:
-        proceseaza_descarcare_an(an, pagina_start=2480 if an == 2012 else 1)
+        token_activ = proceseaza_descarcare_an(
+            an, 
+            pagina_start=2480 if an == 2012 else 1, 
+            token_salvat=token_activ
+        )
 
-    print("\n✅ Descărcare încheiată cu succes pentru toți anii specificați!", flush=True)
+    print("\n✅ Descărcare încheiată cu succes!", flush=True)
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n🛑 Procesul a fost întrerupt manual de utilizator (Ctrl+C). Exiting cleanly...", flush=True)
+        print("\n🛑 Proces întrerupt manual de utilizator.", flush=True)
         sys.exit(0)
     except Exception as e:
-        print(f"\n💥 [CRITICAL SCRIPT ERROR] A apărut o eroare fatală neprinsă:", flush=True)
-        print(f"   Tip Eroare: {type(e).__name__}", flush=True)
-        print(f"   Mesaj: {e}", flush=True)
-        print("\n📜 Traceback complet:", flush=True)
+        print(f"\n💥 [CRITICAL ERROR]: {e}", flush=True)
         traceback.print_exc()
         sys.exit(0)
