@@ -109,6 +109,7 @@ def salveaza_master_index(service, master_data):
 
 # ==============================================================================
 # CURĂȚARE DUPLICATE / FIȘIERE NEINDEXATE (MUTARE ÎN TRASH)
+# RULATĂ EXCLUSIV PE RAMURA FULL INDEX
 # ==============================================================================
 def curata_duplicate_drive(service, master_data):
     """
@@ -157,28 +158,40 @@ def curata_duplicate_drive(service, master_data):
 
                     # Dacă ID-ul fișierului NU este în Master Index, îl mutăm în Coșul de Gunoi
                     if file_id not in id_uri_oficiale:
-                        try:
-                            params = get_file_params(fileId=file_id)
-                            params["body"] = {"trashed": True}
-                            service.files().update(**params).execute()
-                            total_duplicate_gunoi += 1
+                        succes = False
+                        for incercare in range(3):
+                            try:
+                                params = get_file_params(fileId=file_id)
+                                params["body"] = {"trashed": True}
+                                service.files().update(**params).execute()
+                                total_duplicate_gunoi += 1
+                                succes = True
+                                break
+                            except Exception:
+                                time.sleep(1.5 * (incercare + 1))
 
-                            # Logare explicită pentru fiecare fișier neindexat aruncat la coș (sau sumariat la 1000)
-                            if total_duplicate_gunoi <= 10 or total_duplicate_gunoi % 1000 == 0:
-                                print(
-                                    f"🗑️ [Trash #{total_duplicate_gunoi:,}] Aruncat la coș fișierul neindexat: {nume_fisier} (ID: {file_id})",
-                                    flush=True,
-                                )
-                        except Exception as ex_del:
+                        if not succes:
                             erori_gunoi += 1
                             if erori_gunoi <= 5:
-                                print(f"⚠️ Nu s-a putut muta în Trash fișierul {nume_fisier} ({file_id}): {ex_del}", flush=True)
+                                print(f"⚠️ Nu s-a putut muta în Trash fișierul {nume_fisier} ({file_id})", flush=True)
+
+                        # PAUZĂ DE 1 SECUNDĂ LA FIECARE 50 DE FIȘIERE MUTATE ÎN TRASH
+                        if total_duplicate_gunoi > 0 and total_duplicate_gunoi % 50 == 0:
+                            time.sleep(1.0)
+
+                        if total_duplicate_gunoi % 1000 == 0:
+                            durata = round(time.time() - timp_start, 1)
+                            print(
+                                f"🗑️ [Trash #{total_duplicate_gunoi:,}] Aruncate la coș {total_duplicate_gunoi:,} fișiere... ({durata}s)",
+                                flush=True,
+                            )
 
                 page_token = response.get("nextPageToken")
                 if not page_token:
                     break
             except Exception as e:
                 print(f"⚠️ Eroare la scanarea folderului {folder_id[:8]}: {e}", flush=True)
+                time.sleep(2)
                 break
 
     durata_totala = round(time.time() - timp_start, 1)
@@ -266,12 +279,12 @@ def executa_full_index(service):
     )
     salveaza_master_index(service, master_data)
 
-    # Executăm curățarea fișierelor neindexate direct după salvarea indexului oficial
+    # CURĂȚAREA SE EXECUTĂ EXCLUSIV AICI (PE RAMURA FULL INDEX)
     curata_duplicate_drive(service, master_data)
 
 
 def executa_incremental_index(service):
-    """Consolidează micro-indecșii temporari în Master Index."""
+    """Consolidează micro-indecșii temporari în Master Index (fără curățare duplicate)."""
     print("⚡ Consolidare incrementală index...", flush=True)
     master_data = descarca_master_index(service)
     fisiere_dict = master_data.get("fisiere", {})
