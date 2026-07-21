@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import json
 import requests
 from pathlib import Path
@@ -24,16 +25,12 @@ from drive_config import (
     get_file_params,
 )
 
+# Endpoint-ul OFICIAL pe HTTP
+URL_GET_LEGI_HTTP = "http://legislatie.just.ro/api/Search/GetLegi"
+
 AN_TEST = 1990
 PAGINA_TEST = 1
 REZULTATE_PER_PAGINA = 10
-
-# URL-urile WSDL specifice Just.ro
-URL_URI_WSDL = [
-    "http://legislatie.just.ro/api/CautareService.svc?wsdl",
-    "http://legislatie.just.ro/Services/CautareService.svc?wsdl",
-    "http://legislatie.just.ro/api/CautareService.svc",
-]
 
 
 # ==============================================================================
@@ -81,52 +78,63 @@ def incarca_fisier_in_drive(service, cale_locala, nume_fisier_drive):
         params["body"] = file_metadata
         params["media_body"] = media
         res_file = service.files().create(**params).execute()
-        print(f"💾 Salvat cu succes în Google Drive: {nume_fisier_drive} (ID: {res_file.get('id')})", flush=True)
+        file_id = res_file.get("id")
+        print(f"💾 Salvat cu succes în Folderul de Indecși Google Drive: {nume_fisier_drive} (ID: {file_id})", flush=True)
+        return file_id
     except Exception as e:
-        print(f"❌ Eroare încărcare Drive: {e}", flush=True)
+        print(f"❌ Eroare la încărcarea în Google Drive: {e}", flush=True)
+        return None
 
 
 # ==============================================================================
-# INTEROGARE WSDL / SOAP
+# EXECUȚIE TEST PE GETLEGI
 # ==============================================================================
-def test_wsdl_endpoint(service, url_wsdl):
-    print(f"\n🔍 Încercare interogare WSDL pe: {url_wsdl}...", flush=True)
+def test_get_legi_http(service):
+    print(f"\n🔍 Interogare HTTP oficială pe: {URL_GET_LEGI_HTTP}...", flush=True)
 
+    session = requests.Session()
+
+    # Antete HTTP complete pentru a evita respingerea de către IIS/ASP.NET
     headers = {
-        "Content-Type": "text/xml; charset=utf-8",
-        "SOAPAction": "http://tempuri.org/ICautareService/GetLegi",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json; charset=utf-8",
+        "Origin": "http://legislatie.just.ro",
+        "Referer": "http://legislatie.just.ro/",
+        "Connection": "keep-alive"
     }
 
-    # Plicul SOAP standard pentru serviciul de căutare Just.ro
-    soap_payload = f"""<?xml version="1.0" encoding="utf-8"?>
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:temp="http://tempuri.org/">
-   <soapenv:Header/>
-   <soapenv:Body>
-      <temp:GetLegi>
-         <temp:searchAn>{AN_TEST}</temp:searchAn>
-         <temp:numarPagina>{PAGINA_TEST}</temp:numarPagina>
-         <temp:rezultatePagina>{REZULTATE_PER_PAGINA}</temp:rezultatePagina>
-      </temp:GetLegi>
-   </soapenv:Body>
-</soapenv:Envelope>"""
+    # Structura clasică de căutare pe an și pagină
+    payload = {
+        "SearchAn": str(AN_TEST),
+        "NumarPagina": PAGINA_TEST,
+        "RezultatePagina": REZULTATE_PER_PAGINA
+    }
 
     try:
-        response = requests.post(url_wsdl, data=soap_payload, headers=headers, timeout=20)
-        print(f"📡 Status HTTP: {response.status_code}", flush=True)
+        # 1. Trecem mai întâi prin pagina de bază HTTP pentru inițializarea cookie-urilor de sesiune
+        print("🌐 Inițializare sesiune HTTP pe http://legislatie.just.ro/...", flush=True)
+        session.get("http://legislatie.just.ro/", headers={"User-Agent": headers["User-Agent"]}, timeout=10)
+        time.sleep(1)
+
+        # 2. Trimitem cererea POST de căutare
+        print(f"📡 Trimitem POST la GetLegi (An: {AN_TEST}, Pagina: {PAGINA_TEST})...", flush=True)
+        response = session.post(URL_GET_LEGI_HTTP, json=payload, headers=headers, timeout=20)
+
+        print(f"📡 Status Code HTTP: {response.status_code}", flush=True)
         print(f"📊 Dimensiune răspuns: {len(response.content):,} octeți", flush=True)
-        
+
         text_raw = response.text or ""
 
         print("\n" + "=" * 50, flush=True)
-        print("📄 PRIMELE 500 CARACTERE DIN RĂSPUNSUL SOAP/WSDL:", flush=True)
+        print("📄 PRIMELE 500 CARACTERE DIN RĂSPUNSUL PRIMIT:", flush=True)
         print("=" * 50, flush=True)
         print(text_raw[:500], flush=True)
         print("=" * 50 + "\n", flush=True)
 
-        if response.status_code == 200 and text_raw.strip():
-            nume_local = f"TEST_WSDL_{AN_TEST}_pag{PAGINA_TEST}.xml"
-            nume_drive = f"TEST_WSDL_brut_legislatie_{AN_TEST}_pag{PAGINA_TEST}.xml"
+        if text_raw.strip():
+            nume_local = f"TEST_GETLEGI_{AN_TEST}_pag{PAGINA_TEST}.xml"
+            nume_drive = f"TEST_GETLEGI_brut_legislatie_{AN_TEST}_pag{PAGINA_TEST}.xml"
 
             with open(nume_local, "w", encoding="utf-8") as f:
                 f.write(text_raw)
@@ -135,24 +143,18 @@ def test_wsdl_endpoint(service, url_wsdl):
 
             if os.path.exists(nume_local):
                 os.remove(nume_local)
-            return True
 
     except Exception as e:
-        print(f"❌ Excepție la interogare WSDL pe {url_wsdl}: {e}", flush=True)
-        return False
+        print(f"❌ Excepție la interogarea GetLegi: {e}", flush=True)
 
 
 def main():
     print("============================================================", flush=True)
-    print("🚀 TEST INTEROGARE WSDL / SOAP JUST.RO", flush=True)
+    print("🚀 TEST INTEROGARE DIRECTĂ GETLEGI (HTTP PORT 80)", flush=True)
     print("============================================================", flush=True)
 
     service = get_drive_service()
-
-    for url_wsdl in URL_URI_WSDL:
-        succes = test_wsdl_endpoint(service, url_wsdl)
-        if succes:
-            break
+    test_get_legi_http(service)
 
     print("============================================================", flush=True)
     print("🏁 TEST FINALIZAT!", flush=True)
