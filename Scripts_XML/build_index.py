@@ -2,9 +2,9 @@ import os
 import sys
 import time
 import json
-import re
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import socket
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # ==============================================================================
@@ -20,26 +20,28 @@ if str(DIRECTOR_CURENT) not in sys.path:
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.errors import HttpError
 import io
 
 from drive_config import (
     FOLDERE_XML_IDS,
+    FOLDER_TEMP_INDEXES_ID,
     get_file_params,
     get_list_params,
 )
 
-try:
-    import XML_INDEX_READER
-except ImportError:
-    from Scripts_XML import XML_INDEX_READER
+NUME_MASTER_INDEX = "master_index.json"
 
 
 # ==============================================================================
-# AUTENTIFICARE GOOGLE DRIVE API
+# AUTENTIFICARE GOOGLE DRIVE API (CU RECONECTARE LA BROKEN PIPE)
 # ==============================================================================
 def get_drive_service():
-    """Autentificare în Google Drive API folosind GOOGLE_SERVICE_ACCOUNT_JSON."""
+    """Creează un client Drive API robust cu timeout setat pentru prevenirea Broken Pipe."""
+    # Setăm un default socket timeout global pentru a preveni blocajele nedefinite
+    socket.setdefaulttimeout(60)
+
     creds_json = (
         os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
         or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
@@ -52,7 +54,7 @@ def get_drive_service():
             creds = service_account.Credentials.from_service_account_info(
                 info, scopes=["https://www.googleapis.com/auth/drive"]
             )
-            return build("drive", "v3", credentials=creds)
+            return build("drive", "v3", credentials=creds, cache_discovery=False)
         except Exception as e:
             print(f"❌ Eroare la citirea secretului JSON: {e}", flush=True)
             sys.exit(1)
@@ -63,7 +65,7 @@ def get_drive_service():
             creds = service_account.Credentials.from_service_account_file(
                 str(cale_local), scopes=["https://www.googleapis.com/auth/drive"]
             )
-            return build("drive", "v3", credentials=creds)
+            return build("drive", "v3", credentials=creds, cache_discovery=False)
         except Exception as e:
             print(f"❌ Eroare la citirea fișierului local service_account.json: {e}", flush=True)
 
@@ -75,66 +77,154 @@ def get_drive_service():
 # OPERAȚIUNI CU MASTER INDEX
 # ==============================================================================
 def descarca_master_index(service):
-    print("📥 Descărcare conținut Master Index (index_xml.json)...", flush=True)
+    print(f"📥 Descărcare {NUME_MASTER_INDEX} din Drive...", flush=True)
+    query = f"'{FOLDER_TEMP_INDEXES_ID}' in parents and name = '{NUME_MASTER_INDEX}' and trashed = false"
     try:
-        if hasattr(XML_INDEX_READER, "descarca_index_master"):
-            master_data = XML_INDEX_READER.descarca_index_master(service)
-        else:
-            master_data = XML_INDEX_READER.descarca_master_index(service)
-        print(f"✅ [Master Index] Încărcate {len(master_data.get('fisiere', {}))} fișiere.", flush=True)
-        return master_data
+        list_params = get_list_params(q=query, fields="files(id)")
+        res = service.files().list(**list_params).execute()
+        files = res.get("files", [])
+        if files:
+            file_id = files[0]["id"]
+            file_params = get_file_params(fileId=file_id)
+            request = service.files().get_media(**file_params)
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+            fh.seek(0)
+            data = json.loads(fh.read().decode("utf-8"))
+            print(f"✅ Master Index încărcat! ({len(data.get('fisiere', {})):,} fișiere unice)", flush=True)
+            return data
     except Exception as e:
-        print(f"⚠️ Nu s-a putut descărca Master Index-ul: {e}", flush=True)
-        return {"fisiere": {}, "last_updated": ""}
+        print(f"ℹ️ Nu s-a putut descărca Master Index (se va crea unul nou): {e}", flush=True)
+
+    return {"fisiere": {}, "last_updated": ""}
 
 
-def salveaza_master_index(service, master_data):
-    master_data["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
+def salveaza_master_index(service, data):
+    data["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    cale_temp = Path(NUME_MASTER_INDEX)
     try:
-        if hasattr(XML_INDEX_READER, "salveaza_master_index"):
-            res = XML_INDEX_READER.salveaza_master_index(service, master_data)
-        elif hasattr(XML_INDEX_READER, "salveaza_index_master"):
-            res = XML_INDEX_READER.salveaza_index_master(service, master_data)
-        else:
-            res = None
+        with open(cale_temp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
-        if res:
-            print(f"💾 [CHECKPOINT] Master Index actualizat pe Drive! ({len(master_data['fisiere']):,} fișiere unice)", flush=True)
+        query = f"'{FOLDER_TEMP_INDEXES_ID}' in parents and name = '{NUME_MASTER_INDEX}' and trashed = false"
+        list_params = get_list_params(q=query, fields="files(id)")
+        res = service.files().list(**list_params).execute()
+        files = res.get("files", [])
+
+        media = MediaFileUpload(str(cale_temp), mimetype="application/json")
+
+        if files:
+            file_id = files[0]["id"]
+            params = get_file_params(fileId=file_id)
+            params["media_body"] = media
+            service.files().update(**params).execute()
         else:
-            print(f"💾 Master Index actualizat pe Drive! ({len(master_data['fisiere']):,} fișiere unice)", flush=True)
+            file_metadata = {"name": NUME_MASTER_INDEX, "parents": [FOLDER_TEMP_INDEXES_ID]}
+            params = get_file_params()
+            params["body"] = file_metadata
+            params["media_body"] = media
+            service.files().create(**params).execute()
+
+        print(f"💾 Master Index actualizat pe Drive! ({len(data['fisiere']):,} fișiere unice)", flush=True)
+        if cale_temp.exists():
+            cale_temp.unlink()
     except Exception as e:
-        print(f"❌ Excepție la salvarea Master Index-ului pe Drive: {e}", flush=True)
+        print(f"❌ Eroare la salvarea Master Index: {e}", flush=True)
+        if cale_temp.exists():
+            cale_temp.unlink()
 
 
 # ==============================================================================
-# CURĂȚARE DUPLICATE MULTI-THREADED (VITEZĂ MAXIMĂ)
+# SCANARE ȘI RECONSTRUCȚIE INDEX (FULL RE-INDEX)
 # ==============================================================================
-def curata_duplicate_drive_multithreaded(service, master_data, max_workers=15):
+def executa_full_reindex(service):
+    print("\n🚀 Reconstrucție completă index (FULL RE-INDEX)...", flush=True)
+    master_data = {"fisiere": {}, "last_updated": ""}
+    total_fisiere_scanate = 0
+    timp_start = time.time()
+
+    for idx, folder_id in enumerate(FOLDERE_XML_IDS, 1):
+        print(f"📂 [{idx}/{len(FOLDERE_XML_IDS)}] Scanare Shared Drive Folder ID: {folder_id}...", flush=True)
+        page_token = None
+        query = f"'{folder_id}' in parents and trashed = false"
+
+        while True:
+            for incercare in range(5):
+                try:
+                    list_params = get_list_params(
+                        q=query,
+                        fields="nextPageToken, files(id, name)",
+                        pageToken=page_token,
+                        pageSize=1000,
+                    )
+                    response = service.files().list(**list_params).execute()
+                    break
+                except (socket.error, HttpError, Exception) as e:
+                    print(f"⚠️ Rețea/Broken Pipe la scanare (încercarea {incercare + 1}/5): {e}", flush=True)
+                    time.sleep(2 * (incercare + 1))
+                    service = get_drive_service()  # Reîmprospătăm conexiunea API
+
+            files = response.get("files", [])
+            for f in files:
+                nume = f["name"]
+                total_fisiere_scanate += 1
+
+                if nume not in master_data["fisiere"]:
+                    master_data["fisiere"][nume] = {
+                        "id": f["id"],
+                        "folder_id": folder_id,
+                        "downloaded": True,
+                        "Tags_extracted": False,
+                        "processed": False,
+                    }
+
+                if total_fisiere_scanate % 10000 == 0:
+                    print(f"📊 [Status Update] Progres scanare: {total_fisiere_scanate:,} fișiere fizice parcurse...", flush=True)
+                    salveaza_master_index(service, master_data)
+
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+
+    durata = round(time.time() - timp_start, 1)
+    print(f"🏁 Reindexare completă finalizată! Total fișiere unice indexate: {len(master_data['fisiere']):,} ({durata}s)", flush=True)
+    salveaza_master_index(service, master_data)
+    return master_data
+
+
+# ==============================================================================
+# CURĂȚARE DUPLICATE MULTI-THREADED (BLINDATĂ ANTI-BROKEN PIPE)
+# ==============================================================================
+def curata_duplicate_multithreaded(service, master_data, max_workers=25):
     print("\n" + "=" * 60, flush=True)
     print(f"🚀 ÎNCEPERE CURĂȚARE TURBO MULTI-THREADED ({max_workers} FIRE PARALELE)...", flush=True)
     print("=" * 60, flush=True)
 
     fisiere_valide = master_data.get("fisiere", {})
     id_uri_oficiale = {meta["id"] for meta in fisiere_valide.values() if "id" in meta}
-    
+
     print(f"🛡️ Total ID-uri oficiale protejate: {len(id_uri_oficiale):,}", flush=True)
 
     counter_lock = threading.Lock()
-    total_fisiere_verificate = 0
     total_duplicate_gunoi = 0
+    total_fisiere_verificate = 0
     erori_gunoi = 0
     timp_start = time.time()
 
     def trashing_worker(file_id):
         nonlocal total_duplicate_gunoi, erori_gunoi
-        # Fiecare thread folosește o instanță de API pentru siguranță
+        # Fiecare thread își creează propriul client API izolat pentru a preveni conflictul de socket-uri
         thread_service = get_drive_service()
-        for incercare in range(3):
+
+        for incercare in range(5):
             try:
                 params = get_file_params(fileId=file_id)
                 params["body"] = {"trashed": True}
                 thread_service.files().update(**params).execute()
-                
+
                 with counter_lock:
                     total_duplicate_gunoi += 1
                     if total_duplicate_gunoi % 500 == 0:
@@ -145,9 +235,11 @@ def curata_duplicate_drive_multithreaded(service, master_data, max_workers=15):
                             flush=True,
                         )
                 return True
-            except Exception as e:
-                if "429" in str(e) or "rateLimitExceeded" in str(e):
-                    time.sleep(1.5 * (incercare + 1)) # Backoff la cota depășită
+            except (socket.error, HttpError, Exception) as e:
+                # Dacă primim Broken Pipe sau Rate Limit, re-creăm serviciul și încercăm din nou
+                if "429" in str(e) or "rateLimitExceeded" in str(e) or "Broken pipe" in str(e):
+                    time.sleep(1.5 * (incercare + 1))
+                    thread_service = get_drive_service()
                 else:
                     time.sleep(0.5)
 
@@ -155,43 +247,42 @@ def curata_duplicate_drive_multithreaded(service, master_data, max_workers=15):
             erori_gunoi += 1
         return False
 
-    for folder_idx, folder_id in enumerate(FOLDERE_XML_IDS, 1):
-        print(f"\n📂 [{folder_idx}/{len(FOLDERE_XML_IDS)}] Scanare folder pentru curățare: {folder_id[:8]}...", flush=True)
+    for idx, folder_id in enumerate(FOLDERE_XML_IDS, 1):
+        print(f"\n📂 [{idx}/{len(FOLDERE_XML_IDS)}] Scanare folder pentru curățare: {folder_id}...", flush=True)
         page_token = None
         query = f"'{folder_id}' in parents and trashed = false"
 
         while True:
-            try:
-                response = (
-                    service.files()
-                    .list(
-                        **get_list_params(
-                            q=query,
-                            fields="nextPageToken, files(id, name)",
-                            pageToken=page_token,
-                            pageSize=1000,
-                        )
+            response = None
+            for incercare in range(5):
+                try:
+                    list_params = get_list_params(
+                        q=query,
+                        fields="nextPageToken, files(id, name)",
+                        pageToken=page_token,
+                        pageSize=1000,
                     )
-                    .execute()
-                )
-
-                files = response.get("files", [])
-                total_fisiere_verificate += len(files)
-                
-                # Colectăm ID-urile neindexate din pagina curentă de 1.000
-                ids_de_sters = [f["id"] for f in files if f["id"] not in id_uri_oficiale]
-
-                # Rulăm ștergerea în paralel pe 15 fire simultane
-                if ids_de_sters:
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        executor.map(trashing_worker, ids_de_sters)
-
-                page_token = response.get("nextPageToken")
-                if not page_token:
+                    response = service.files().list(**list_params).execute()
                     break
-            except Exception as e:
-                print(f"⚠️ Eroare la scanarea folderului {folder_id[:8]}: {e}", flush=True)
-                time.sleep(1)
+                except (socket.error, HttpError, Exception) as e:
+                    print(f"⚠️ Rețea/Broken Pipe la citirea listei de curățare (încercarea {incercare + 1}/5): {e}", flush=True)
+                    time.sleep(2 * (incercare + 1))
+                    service = get_drive_service()
+
+            if not response:
+                print(f"❌ Nu s-a putut obține lista pentru folderul {folder_id}. Se trece la următorul.", flush=True)
+                break
+
+            files = response.get("files", [])
+            total_fisiere_verificate += len(files)
+            ids_de_sters = [f["id"] for f in files if f["id"] not in id_uri_oficiale]
+
+            if ids_de_sters:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    executor.map(trashing_worker, ids_de_sters)
+
+            page_token = response.get("nextPageToken")
+            if not page_token:
                 break
 
     durata_totala = round(time.time() - timp_start, 1)
@@ -200,164 +291,24 @@ def curata_duplicate_drive_multithreaded(service, master_data, max_workers=15):
     print(f"📊 Fișiere verificate: {total_fisiere_verificate:,}", flush=True)
     print(f"🗑️ Duplicate mutate în Trash: {total_duplicate_gunoi:,}", flush=True)
     if erori_gunoi > 0:
-        print(f"⚠️ Erori întâmpinate: {erori_gunoi}", flush=True)
+        print(f"⚠️ Erori întâmpinate la ștergere: {erori_gunoi:,}", flush=True)
     print("=" * 60 + "\n", flush=True)
 
 
 # ==============================================================================
-# EXECUȚIE STRATEGII
+# MAIN ENGINE
 # ==============================================================================
-def executa_full_index(service):
-    print("🚀 Reconstrucție completă index (FULL INDEX)...", flush=True)
-    master_data = {"fisiere": {}, "last_updated": ""}
-    pattern_xml = re.compile(r"brut_legislatie_(\d{4})_pag(\d+)\.xml")
-
-    total_fisiere = 0
-    ultimul_checkpoint = 0
-    PAS_CHECKPOINT = 10000
-    timp_start = time.time()
-
-    for folder_idx, folder_id in enumerate(FOLDERE_XML_IDS, 1):
-        print(f"📂 [{folder_idx}/{len(FOLDERE_XML_IDS)}] Scanare Shared Drive Folder ID: {folder_id[:8]}...", flush=True)
-        page_token = None
-        query = f"'{folder_id}' in parents and trashed = false"
-
-        while True:
-            try:
-                response = (
-                    service.files()
-                    .list(
-                        **get_list_params(
-                            q=query,
-                            fields="nextPageToken, files(id, name, parents)",
-                            pageToken=page_token,
-                            pageSize=1000,
-                        )
-                    )
-                    .execute()
-                )
-
-                files = response.get("files", [])
-                for f in files:
-                    nume = f["name"]
-                    m = pattern_xml.search(nume)
-                    if m:
-                        an = int(m.group(1))
-                        pag = int(m.group(2))
-                        master_data["fisiere"][nume] = {
-                            "id": f["id"],
-                            "folder_id": folder_id,
-                            "an": an,
-                            "pagina": pag,
-                            "downloaded": True,
-                            "Tags_extracted": False,
-                            "processed": False,
-                        }
-                        total_fisiere += 1
-
-                        if total_fisiere - ultimul_checkpoint >= PAS_CHECKPOINT:
-                            print(
-                                f"📊 [Status Update] Progres scanare: {total_fisiere:,} fișiere fizice parcurse...",
-                                flush=True,
-                            )
-                            salveaza_master_index(service, master_data)
-                            ultimul_checkpoint = total_fisiere
-
-                page_token = response.get("nextPageToken")
-                if not page_token:
-                    break
-            except Exception as e:
-                print(f"⚠️ Eroare la scanare {folder_id[:8]}: {e}", flush=True)
-                break
-
-    durata_totala = round(time.time() - timp_start, 1)
-    print(
-        f"🏁 Reindexare completă finalizată! Total fișiere unice indexate: {len(master_data['fisiere']):,} ({durata_totala}s)",
-        flush=True,
-    )
-    salveaza_master_index(service, master_data)
-
-    # Executăm curățarea pe 25 fire paralele
-    curata_duplicate_drive_multithreaded(service, master_data, max_workers=25)
-
-
-def executa_incremental_index(service):
-    print("⚡ Consolidare incrementală index...", flush=True)
-    master_data = descarca_master_index(service)
-    fisiere_dict = master_data.get("fisiere", {})
-
-    folder_temp_id = getattr(XML_INDEX_READER, "FOLDER_TEMP_INDEXES_ID", None)
-    if not folder_temp_id:
-        from drive_config import FOLDER_TEMP_INDEXES_ID
-        folder_temp_id = FOLDER_TEMP_INDEXES_ID
-
-    query = f"'{folder_temp_id}' in parents and name contains 'temp_index_' and trashed = false"
-
-    try:
-        response = (
-            service.files()
-            .list(**get_list_params(q=query, fields="files(id, name)"))
-            .execute()
-        )
-        temp_files = response.get("files", [])
-
-        if not temp_files:
-            print("ℹ️ Nu există micro-indecși temporari de consolidat.", flush=True)
-            return
-
-        print(f"🧩 Găsiți {len(temp_files)} micro-indecși de consolidat...", flush=True)
-        modificari = False
-
-        for tf in temp_files:
-            file_id = tf["id"]
-            nume_temp = tf["name"]
-
-            try:
-                request = service.files().get_media(**get_file_params(fileId=file_id))
-                fh = io.BytesIO()
-                downloader = MediaIoBaseDownload(fh, request)
-                done = False
-                while not done:
-                    _, done = downloader.next_chunk()
-
-                fh.seek(0)
-                sub_data = json.loads(fh.read().decode("utf-8"))
-                flag_updates = sub_data.get("flag_updates", {})
-
-                for nume_xml, meta in flag_updates.items():
-                    fisiere_dict[nume_xml] = meta
-                    modificari = True
-
-                params_del = get_file_params(fileId=file_id)
-                params_del["body"] = {"trashed": True}
-                service.files().update(**params_del).execute()
-                print(f"   └─ Consolidat și mutat în Trash micro-index: {nume_temp}", flush=True)
-
-            except Exception as ex:
-                print(f"⚠️ Eroare procesare micro-index {nume_temp}: {ex}", flush=True)
-
-        if modificari:
-            master_data["fisiere"] = fisiere_dict
-            salveaza_master_index(service, master_data)
-
-    except Exception as e:
-        print(f"❌ Eroare la consolidarea incrementală: {e}", flush=True)
-
-
 def main():
-    is_full = "--full" in sys.argv or os.getenv("FORCE_FULL_INDEX", "").lower() == "true"
+    is_full = "--full" in sys.argv or os.getenv("IS_FULL", "").lower() in ["true", "1", "yes"]
 
     if is_full:
         print("🚀 [Strategie] Se execută FULL INDEX (Multi-Threaded Turbo Trash).", flush=True)
     else:
-        print("⚡ [Strategie] Se execută INCREMENTAL INDEX.", flush=True)
+        print("ℹ️ [Strategie] Se execută verfificare standard.", flush=True)
 
     service = get_drive_service()
-
-    if is_full:
-        executa_full_index(service)
-    else:
-        executa_incremental_index(service)
+    master_data = executa_full_reindex(service)
+    curata_duplicate_multithreaded(service, master_data, max_workers=25)
 
 
 if __name__ == "__main__":
