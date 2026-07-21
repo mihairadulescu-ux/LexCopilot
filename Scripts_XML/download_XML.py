@@ -1,4 +1,4 @@
-import os
+mport os
 import sys
 import time
 import json
@@ -39,7 +39,7 @@ from googleapiclient.http import MediaFileUpload
 from zeep import Client, Transport
 
 # ==============================================================================
-# CONFIGURARE SERVICIU WSDL ORIGINAL (JUST.RO)
+# CONFIGURARE SERVICIU WSDL (JUST.RO)
 # ==============================================================================
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
@@ -247,80 +247,85 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
         nume_xml = f"brut_legislatie_{an_tinta}_pag{pagina_curenta}.xml"
         print(f"--- [AVANS] An {an_tinta} / Pagina {pagina_curenta} ---", flush=True)
 
-        try:
-            # Apelul SOAP exact și direct din codul tău funcțional original:
-            raspuns_xml = client.service.GetLegiPaginat(
-                token=token,
-                an=an_tinta,
-                pagina=pagina_curenta
-            )
-
-            # Dacă răspunsul e gol sau prea mic (< 200 octeți), înseamnă că am atins capătul anului
-            if not raspuns_xml or len(str(raspuns_xml).encode("utf-8")) < 200:
-                print(
-                    f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta} (An complet).",
-                    flush=True,
+        succes_pagina = False
+        
+        # BUCULĂ DE RETRY PER PAGINĂ (până la 5 încercări înainte de abandon)
+        for incercare in range(1, 6):
+            try:
+                # Apelul SOAP exact
+                raspuns_xml = client.service.GetLegiPaginat(
+                    token=token,
+                    an=an_tinta,
+                    pagina=pagina_curenta
                 )
-                break
 
-            bytes_xml = str(raspuns_xml).encode("utf-8")
-
-            fid = salveaza_sau_actualizeaza_in_drive(
-                service, nume_xml, bytes_xml, folder_curent_id
-            )
-
-            if not fid:
-                if folder_idx + 1 < len(foldere_drive):
-                    folder_idx += 1
-                    folder_curent_id = foldere_drive[folder_idx]
+                # Dacă răspunsul e None sau e string gol/foarte mic, am atins finalul
+                if not raspuns_xml or len(str(raspuns_xml).encode("utf-8")) < 200:
                     print(
-                        f"⚠️ Shared Drive-ul curent a atins limita! Comutăm automat pe următorul folder: {folder_curent_id[:8]}...",
+                        f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta}.",
                         flush=True,
                     )
-                    fid = salveaza_sau_actualizeaza_in_drive(
-                        service, nume_xml, bytes_xml, folder_curent_id
-                    )
-                else:
-                    print(
-                        "❌ Toate folderele din lista DRIVE_FOLDER_XML sunt pline!",
-                        flush=True,
-                    )
-                    break
+                    succes_pagina = False
+                    break # Ieșim din retry, este capăt de an real
 
-            if fid:
-                print(f"✅ Fișier salvat în Drive: {nume_xml} (ID: {fid})", flush=True)
+                bytes_xml = str(raspuns_xml).encode("utf-8")
 
-                log_mutații_sesiune[nume_xml] = {
-                    "id": fid,
-                    "folder_id": folder_curent_id,
-                    "an": an_tinta,
-                    "pagina": pagina_curenta,
-                    "downloaded": True,
-                    "Tags_extracted": False,
-                    "processed": False,
-                }
-
-            pagina_curenta += 1
-            time.sleep(0.5)
-
-        except Exception as e:
-            err_str = str(e)
-            
-            if "token" in err_str.lower() or "invalid" in err_str.lower():
-                print("🔄 Token expirat. Re-generare token...", flush=True)
-                try:
-                    token = client.service.GetToken()
-                    continue
-                except Exception as ex_t:
-                    print(f"❌ Eroare re-generare token: {ex_t}", flush=True)
-                    break
-            else:
-                # Când se ajunge la o pagină inexistentă, serverul Just.ro returnează eroare/fault
-                print(
-                    f"🏁 [FINAL AN DETECTAT] Anul {an_tinta} este complet în index! (Nu mai există pagina {pagina_curenta}).",
-                    flush=True,
+                fid = salveaza_sau_actualizeaza_in_drive(
+                    service, nume_xml, bytes_xml, folder_curent_id
                 )
-                break
+
+                if not fid:
+                    if folder_idx + 1 < len(foldere_drive):
+                        folder_idx += 1
+                        folder_curent_id = foldere_drive[folder_idx]
+                        print(
+                            f"⚠️ Shared Drive-ul curent a atins limita! Comutăm automat pe următorul folder: {folder_curent_id[:8]}...",
+                            flush=True,
+                        )
+                        fid = salveaza_sau_actualizeaza_in_drive(
+                            service, nume_xml, bytes_xml, folder_curent_id
+                        )
+                    else:
+                        print("❌ Toate folderele din lista DRIVE_FOLDER_XML sunt pline!", flush=True)
+                        break
+
+                if fid:
+                    print(f"✅ Fișier salvat în Drive: {nume_xml} (ID: {fid})", flush=True)
+
+                    log_mutații_sesiune[nume_xml] = {
+                        "id": fid,
+                        "folder_id": folder_curent_id,
+                        "an": an_tinta,
+                        "pagina": pagina_curenta,
+                        "downloaded": True,
+                        "Tags_extracted": False,
+                        "processed": False,
+                    }
+
+                succes_pagina = True
+                break # Pagina descarcată cu succes, trecem la următoarea
+
+            except Exception as e:
+                err_str = str(e)
+                print(f"⚠️ Încercarea {incercare}/5 a eșuat la Pagina {pagina_curenta}: {err_str}", flush=True)
+                
+                # Regenerare token dacă serverul reclamă token expirat
+                if "token" in err_str.lower() or "invalid" in err_str.lower():
+                    try:
+                        print("🔄 Regenerare token...", flush=True)
+                        token = client.service.GetToken()
+                    except Exception:
+                        pass
+
+                time.sleep(2 * incercare) # Pauză progresivă înainte de reîncercare
+
+        # Dacă după 5 încercări nu s-a putut descărca pagina, considerăm final de an
+        if not succes_pagina:
+            print(f"🏁 Oprire scanare pentru anul {an_tinta} la pagina {pagina_curenta}.", flush=True)
+            break
+
+        pagina_curenta += 1
+        time.sleep(0.3)
 
     if log_mutații_sesiune:
         genereaza_si_salveaza_micro_index(service, log_mutații_sesiune)
