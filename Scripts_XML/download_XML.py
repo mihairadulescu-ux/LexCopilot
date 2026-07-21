@@ -27,40 +27,34 @@ MAX_FAILED_CYCLES = 3          # Câte cicluri de eșec permitem înainte să S�
 PAUSE_BETWEEN_RETRIES = 3      # Pauza de start (secunde)
 LOG_ERRORS_FILE = "pagini_saltate_erori.json"
 
-# ENDPOINT-UL OFICIAL SI SCHEMA WSDL
 SOAP_ENDPOINT_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc"
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
+# HEADERE STRICT ASCII (Fără diacritice în SOAPAction)
 SOAP_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Content-Type': 'text/xml; charset=utf-8',
-    'SOAPAction': 'http://tempuri.org/IFreeWebService/GetLegislațieByAnPagina' # Numele acțiunii WCF
+    'SOAPAction': 'http://tempuri.org/IFreeWebService/GetLegislatie'
 }
 
 
-# ==========================================
-# TEMPLATE PLIC SOAP (WCF ENVELOPE)
-# ==========================================
 def construieste_plic_soap(an, pagina):
     """
-    Construiește corpul XML SOAP pentru serviciul WCF FreeWebService.svc.
+    Construiește corpul XML SOAP fără diacritice în nume de metode/taguri.
     """
     soap_body = f"""<?xml version="1.0" encoding="utf-8"?>
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:temp="http://tempuri.org/">
    <soapenv:Header/>
    <soapenv:Body>
-      <temp:GetLegislațieByAnPagina>
+      <temp:GetLegislatie>
          <temp:an>{an}</temp:an>
          <temp:pagina>{pagina}</temp:pagina>
-      </temp:GetLegislațieByAnPagina>
+      </temp:GetLegislatie>
    </soapenv:Body>
 </soapenv:Envelope>"""
     return soap_body
 
 
-# ==========================================
-# FUNCȚII AUXILIARE DE LOGARE ȘI DEBUG
-# ==========================================
 def logheaza_pagina_saltata(an, pagina, url, motiv_detaliat):
     """Salvează incremental paginile care au eșuat definitiv într-un fișier JSON."""
     entry = {
@@ -125,9 +119,6 @@ def trimite_cerere_soap_cu_debug(url, xml_payload, timeout=30):
         return False, None, motiv
 
 
-# ==========================================
-# BUCLA PRINCIPALĂ DE DESCĂRCARE PER AN/PAGINĂ
-# ==========================================
 def proceseaza_descarcare_an(an, pagina_start=1):
     """Procesează descărcarea paginilor pentru un an specific, cu tratare de erori și Skip."""
     print(f"\n=== AN INDUSTRIAL XML (SOAP WCF): {an} ===", flush=True)
@@ -152,9 +143,6 @@ def proceseaza_descarcare_an(an, pagina_start=1):
             if ok:
                 succes = True
                 cicluri_esuate_consecutive = 0
-                
-                # Aici salvezi conținutul XML returnat (în fișier sau pe Google Drive)
-                
                 break
             else:
                 ultimul_motiv_esec = motiv
@@ -184,9 +172,6 @@ def proceseaza_descarcare_an(an, pagina_start=1):
                 time.sleep(30)
 
 
-# ==========================================
-# MAIN ENTRYPOINT
-# ==========================================
 def main():
     print("🚀 Script de descărcare SOAP XML pornit (FreeWebService.svc via curl_cffi).", flush=True)
     
@@ -217,5 +202,4 @@ if __name__ == "__main__":
         print(f"   Mesaj: {e}", flush=True)
         print("\n📜 Traceback complet:", flush=True)
         traceback.print_exc()
-        
         sys.exit(0)
