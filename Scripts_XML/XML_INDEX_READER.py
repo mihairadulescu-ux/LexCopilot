@@ -2,6 +2,7 @@ import io
 import json
 import os
 import re
+import sys
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
@@ -10,7 +11,7 @@ CALE_INDEX_LOCAL = "index_xml.json"
 DEFAULT_TEMP_FOLDER_ID = "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
 
 # ==========================================
-# PRELUARE VARIABILE PUBLICE DIN MEDIU (CURĂȚATE)
+# PRELUARE VARIABILE DIN MEDIU
 # ==========================================
 INDEX_FILE_ID = (
     os.getenv("XML_STORAGE_INDEX", "")
@@ -23,14 +24,6 @@ INDEX_FILE_ID = (
 
 FOLDER_TEMP_INDEXES_ID = (
     os.getenv("TEMPORARY_XML_INDEXES", "")
-    .replace('"', "")
-    .replace("'", "")
-    .strip()
-    or DEFAULT_TEMP_FOLDER_ID
-)
-
-FOLDER_METADATA_ID = (
-    os.getenv("METADATA_FOLDER_ID", "")
     .replace('"', "")
     .replace("'", "")
     .strip()
@@ -54,54 +47,76 @@ FOLDERE_XML_IDS = [
 ]
 
 
-def descarca_index_master(service):
-    """Descărcare directă a fișierului Main Index din Shared Drive."""
-    target_id = INDEX_FILE_ID
+def verifica_si_descarca_index_master(service):
+    """
+    PASUL 0: Verificare strictă existență Master Index.
+    Afișează parametrii, captează mesajul de eroare exact dacă eșuează și face ABORT.
+    """
+    params_get = {
+        "fileId": INDEX_FILE_ID,
+        "fields": "id, name, size, mimeType, parents, trashed",
+        "supportsAllDrives": True,
+    }
 
-    if not target_id:
-        print(
-            "ℹ️ [Index Reader] Variabila 'XML_STORAGE_INDEX' nu este setată. Se continuă pe micro-indecși.",
-            flush=True,
-        )
-        return {"last_updated": None, "total_fisiere": 0, "fisiere": {}}
+    print("=" * 70, flush=True)
+    print("🔍 [TEST DIAGNOSTIC] Verificare Master Index pe Google Drive...", flush=True)
+    print(f"   ├─ ID Fișier extras: '{INDEX_FILE_ID}'", flush=True)
+    print(f"   └─ Parametri apel API: {params_get}", flush=True)
 
+    if not INDEX_FILE_ID:
+        print("❌ [ABORT] Variabila 'XML_STORAGE_INDEX' este GOLĂ sau NESETATĂ!", flush=True)
+        sys.exit(1)
+
+    # 1. TEST VERIFICARE
     try:
-        print(
-            f"📥 [Index Reader] Descărcare Master Index din Drive (ID: {target_id[:8]}...)...",
-            flush=True,
+        meta = service.files().get(**params_get).execute()
+        size_mb = round(int(meta.get("size", 0)) / (1024 * 1024), 2)
+        print(f"✅ [TEST REUSIT] Fișier identificat pe Drive!", flush=True)
+        print(f"   ├─ Nume: {meta.get('name')}", flush=True)
+        print(f"   ├─ Dimensiune: {size_mb} MB", flush=True)
+        print(f"   ├─ În Trash/Coș: {meta.get('trashed', False)}", flush=True)
+        print(f"   └─ Folder Părinte ID: {meta.get('parents', [])}", flush=True)
+        print("=" * 70, flush=True)
+    except HttpError as err:
+        print("\n" + "🚨 " * 10, flush=True)
+        print("❌ [TEST EȘUAT - ABORT] Google Drive API a returnat o eroare!", flush=True)
+        print(f"   ├─ Cod Status HTTP: {err.resp.status}", flush=True)
+        print(f"   ├─ Motiv: {err._get_reason()}", flush=True)
+        print(f"   └─ Detalii Eroare Nativă: {err.content.decode('utf-8')}", flush=True)
+        print("🚨 " * 10 + "\n", flush=True)
+        sys.exit(1)
+    except Exception as ex:
+        print(f"\n❌ [TEST EȘUAT - ABORT] Eroare neașteptată la interogare: {ex}", flush=True)
+        sys.exit(1)
+
+    # 2. DESCĂRCARE FIZICĂ
+    print(f"📥 Descărcare conținut Master Index ({CALE_INDEX_LOCAL})...", flush=True)
+    try:
+        continut_bytes = (
+            service.files()
+            .get_media(
+                fileId=INDEX_FILE_ID,
+                supportsAllDrives=True,
+                acknowledgeAbuse=True
+            )
+            .execute()
         )
 
-        cerere = service.files().get_media(
-            fileId=target_id, supportsAllDrives=True
-        )
-
-        fh = io.FileIO(CALE_INDEX_LOCAL, "wb")
-        downloader = MediaIoBaseDownload(
-            fh, cerere, chunksize=10 * 1024 * 1024
-        )
-
-        gata = False
-        while not gata:
-            _, gata = downloader.next_chunk()
+        with open(CALE_INDEX_LOCAL, "wb") as f:
+            f.write(continut_bytes)
 
         with open(CALE_INDEX_LOCAL, "r", encoding="utf-8") as f:
             data = json.load(f)
-            print(
-                f"✅ [Index Reader] Master Index încărcat cu succes! ({len(data.get('fisiere', {}))} fișiere în baza master)",
-                flush=True,
-            )
+            total = len(data.get("fisiere", {}))
+            print(f"✅ [Master Index] Descărcat și încărcat în memorie cu succes! ({total} fișiere)", flush=True)
             return data
-
     except Exception as e:
-        print(
-            f"⚠️ [Index Reader] Master Index indisponibil pe Drive (ID: {target_id}): {e}",
-            flush=True,
-        )
-        return {"last_updated": None, "total_fisiere": 0, "fisiere": {}}
+        print(f"❌ [ABORT] Eroare la descărcarea conținutului media: {e}", flush=True)
+        sys.exit(1)
 
 
 def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
-    """Citește din găleată și suprapune în memorie toate mutațiile din temp_index_*.json."""
+    """Citește și aplică micro-indecșii temporari din TEMPORARY_XML_INDEXES."""
     if not FOLDER_TEMP_INDEXES_ID:
         return fisiere_map
 
@@ -123,10 +138,7 @@ def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
             return fisiere_map
 
         loguri_temp.sort(key=lambda x: x.get("createdTime", ""))
-        print(
-            f"⚡ [Index Reader] Aplicare {len(loguri_temp)} micro-indecși din TEMPORARY_XML_INDEXES...",
-            flush=True,
-        )
+        print(f"⚡ [Micro-Indecși] Aplicare {len(loguri_temp)} fișiere temporare...", flush=True)
 
         mutații_aplicate = 0
         for log_file in loguri_temp:
@@ -134,7 +146,7 @@ def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
             try:
                 content_bytes = (
                     service.files()
-                    .get_media(fileId=file_id, supportsAllDrives=True)
+                    .get_media(fileId=file_id, supportsAllDrives=True, acknowledgeAbuse=True)
                     .execute()
                 )
                 data_log = json.loads(content_bytes.decode("utf-8"))
@@ -157,30 +169,30 @@ def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
             except Exception:
                 pass
 
-        print(
-            f"   └─ ✅ {mutații_aplicate} mutații aplicate în Indexul Virtual.",
-            flush=True,
-        )
+        print(f"   └─ ✅ Aplicat în memorie {mutații_aplicate} mutații.", flush=True)
 
     except Exception as e:
-        print(
-            f"⚠️ [Index Reader] Eroare la citirea micro-indecșilor: {e}",
-            flush=True,
-        )
+        print(f"⚠️ Eroare la citirea micro-indecșilor temporari: {e}", flush=True)
 
     return fisiere_map
 
 
 def obtine_index_virtual(service):
-    """Construiește în memorie starea unificată la zi a tuturor fișierelor XML."""
-    data_master = descarca_index_master(service)
+    """
+    Construiește starea unificată:
+    1. Verificare + Descărcare Master Index (Aborțează dacă nu există)
+    2. Aplicare Micro-Indecși
+    3. Verificare Delta
+    """
+    # Pasul 0 & 1: Verificare strictă și încărcare Master Index
+    data_master = verifica_si_descarca_index_master(service)
     fisiere_map = data_master.get("fisiere", {})
     last_updated = data_master.get("last_updated")
 
-    fisiere_map = aplica_micro_indecsi_temporari_in_memorie(
-        service, fisiere_map
-    )
+    # Pasul 2: Aplicare Micro-Indecși
+    fisiere_map = aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map)
 
+    # Pasul 3: Delta Scan pe Shared Drives
     pattern_nume = re.compile(r"brut_legislatie_(\d+)_pag(\d+)\.xml")
     noutati_gasite = 0
 
@@ -208,10 +220,7 @@ def obtine_index_virtual(service):
                     files = response.get("files", [])
                     for f in files:
                         nume = f["name"]
-                        if (
-                            nume not in fisiere_map
-                            or not fisiere_map[nume].get("id")
-                        ):
+                        if nume not in fisiere_map or not fisiere_map[nume].get("id"):
                             desc = f.get("description", "")
                             match = pattern_nume.search(nume)
                             an_val = int(match.group(1)) if match else None
@@ -219,6 +228,7 @@ def obtine_index_virtual(service):
 
                             fisiere_map[nume] = {
                                 "id": f["id"],
+                                "folder_id": folder_id,
                                 "an": an_val,
                                 "pagina": pag_val,
                                 "downloaded": True,
@@ -231,16 +241,10 @@ def obtine_index_virtual(service):
                     if not page_token:
                         break
             except Exception as e:
-                print(
-                    f"⚠️ [Index Reader] Eroare verificare delta în Shared Drive {folder_id[:8]}: {e}",
-                    flush=True,
-                )
+                print(f"⚠️ Eroare verificare delta folder {folder_id[:8]}: {e}", flush=True)
 
     if noutati_gasite > 0:
-        print(
-            f"⚡ [Index Reader] Identificate {noutati_gasite} fișiere noi din scanarea Delta.",
-            flush=True,
-        )
+        print(f"⚡ [Delta Finală] Identificate {noutati_gasite} fișiere ultra-noi.", flush=True)
 
     data_master["fisiere"] = fisiere_map
     data_master["total_fisiere"] = len(fisiere_map)
@@ -248,7 +252,6 @@ def obtine_index_virtual(service):
 
 
 def obtine_fisiere_neprocesate(service, nume_flag="Tags_extracted"):
-    """Filtrează Indexul Virtual pentru a returna fișierele neprocesate."""
     index_v = obtine_index_virtual(service)
     fisiere_map = index_v.get("fisiere", {})
 
@@ -259,8 +262,5 @@ def obtine_fisiere_neprocesate(service, nume_flag="Tags_extracted"):
             item["nume"] = nume
             rezultat.append(item)
 
-    print(
-        f"🎯 [Index Reader] Găsite {len(rezultat)} fișiere neprocesate pentru flagul '{nume_flag}'.",
-        flush=True,
-    )
+    print(f"🎯 [Filtrare Target] Găsite {len(rezultat)} fișiere neprocesate pentru '{nume_flag}'.", flush=True)
     return rezultat
