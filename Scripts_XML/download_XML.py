@@ -2,11 +2,11 @@ import os
 import sys
 import time
 import json
-import re
+import requests
 from pathlib import Path
 
 # ==============================================================================
-# CONFIGURARE CĂI DE IMPORT (PENTRU RULARE DIN GITHUB ACTIONS SAU LOCAL)
+# CONFIGURARE CĂI DE IMPORT
 # ==============================================================================
 DIRECTOR_CURENT = Path(__file__).resolve().parent
 RADACINA_PROIECT = DIRECTOR_CURENT.parent
@@ -16,9 +16,14 @@ if str(RADACINA_PROIECT) not in sys.path:
 if str(DIRECTOR_CURENT) not in sys.path:
     sys.path.insert(0, str(DIRECTOR_CURENT))
 
-# Importăm configurația centralizată și cititorul de index
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+import io
+
 from drive_config import (
     FOLDERE_XML_IDS,
+    FOLDER_TEMP_INDEXES_ID,
     get_file_params,
     get_list_params,
 )
@@ -28,178 +33,136 @@ try:
 except ImportError:
     from Scripts_XML import XML_INDEX_READER
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-
-from zeep import Client, Transport
-from zeep.helpers import serialize_object
 
 # ==============================================================================
-# CONFIGURARE SERVICIU WSDL (JUST.RO) - URL OFICIAL FREEWEBSERVICE
+# AUTENTIFICARE GOOGLE DRIVE API
 # ==============================================================================
-WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
-
-
-def creeaza_client_zeep_securizat(wsdl_url, retries=5, backoff=2):
-    """
-    Creează un client Zeep configurat cu Session robust pe HTTP care
-    include User-Agent de browser și reîncearcă automat la deconectări.
-    """
-    session = requests.Session()
-    session.headers.update(
-        {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
+def get_drive_service():
+    """Autentificare în Google Drive API folosind GOOGLE_SERVICE_ACCOUNT_JSON."""
+    creds_json = (
+        os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+        or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
+        or os.getenv("SERVICE_ACCOUNT_JSON")
     )
 
-    strategie_retry = Retry(
-        total=5,
-        backoff_factor=1,
-        status_forcelist=[500, 502, 503, 504],
-        raise_on_status=False,
-    )
-
-    adapter = HTTPAdapter(max_retries=strategie_retry)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-
-    transport = Transport(session=session, timeout=30)
-
-    for incercare in range(1, retries + 1):
+    if creds_json:
         try:
-            print(
-                f"🌐 Conectare la serviciul WSDL Just.ro ({wsdl_url}) (Încercarea {incercare}/{retries})...",
-                flush=True,
+            info = json.loads(creds_json)
+            creds = service_account.Credentials.from_service_account_info(
+                info, scopes=["https://www.googleapis.com/auth/drive"]
             )
-            client = Client(wsdl_url, transport=transport)
-            print("✅ Conexiune WSDL stabilită cu succes!", flush=True)
-            return client
+            return build("drive", "v3", credentials=creds)
         except Exception as e:
-            print(
-                f"⚠️ Conexiunea la Just.ro a eșuat ({e}). Reîncercare în {backoff} secunde...",
-                flush=True,
-            )
-            time.sleep(backoff)
-            backoff *= 2
+            print(f"❌ Eroare la citirea secretului JSON: {e}", flush=True)
+            sys.exit(1)
 
-    print("❌ Nu s-a putut conecta la serviciul WSDL Just.ro după multiple încercări.", flush=True)
+    cale_local = RADACINA_PROIECT / "service_account.json"
+    if cale_local.exists():
+        try:
+            creds = service_account.Credentials.from_service_account_file(
+                str(cale_local), scopes=["https://www.googleapis.com/auth/drive"]
+            )
+            return build("drive", "v3", credentials=creds)
+        except Exception as e:
+            print(f"❌ Eroare la citirea fișierului local service_account.json: {e}", flush=True)
+
+    print("❌ Nu s-a găsit secretul GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
     sys.exit(1)
 
 
-def autenifica_google_drive():
-    """Autentificare în Google Drive API folosind Service Account din GitHub Secrets."""
-    creds_json = os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY") or os.getenv(
-        "GOOGLE_SERVICE_ACCOUNT_JSON"
-    )
-
-    if not creds_json:
-        print(
-            "❌ [Cloud Mode] Secretul (GDRIVE_SERVICE_ACCOUNT_KEY / GOOGLE_SERVICE_ACCOUNT_JSON) nu a fost găsit!",
-            flush=True,
-        )
-        sys.exit(1)
-
-    try:
-        info = json.loads(creds_json)
-        creds = service_account.Credentials.from_service_account_info(
-            info, scopes=["https://www.googleapis.com/auth/drive"]
-        )
-        return build("drive", "v3", credentials=creds)
-    except Exception as e:
-        print(
-            f"❌ [Cloud Mode] Eroare la autentificarea în Google Drive: {e}",
-            flush=True,
-        )
-        sys.exit(1)
-
-
-def salveaza_sau_actualizeaza_in_drive(service, nume_fisier, continut_bytes, folder_id):
+# ==============================================================================
+# INTEROGARE API JUST.RO CU LOGGING ULTRA-DETALIAT PE ERORI
+# ==============================================================================
+def interogheaza_just_ro(an, pagina):
     """
-    Salvează fișierul XML pe Google Drive în folderul specificat.
-    Dacă fișierul există deja, îi actualizează conținutul.
+    Efectuează cererea către API-ul Just.ro și oferă detalii diagnostice complete
+    în caz de erori, fișiere nule sau răspunsuri invalide.
     """
-    cale_temp = f"/tmp/{nume_fisier}" if os.name != "nt" else nume_fisier
-    with open(cale_temp, "wb") as f:
-        f.write(continut_bytes)
+    url = "https://legislatie.just.ro/api/Search/GetLegi"
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) LexCopilot/1.0"
+    }
+    
+    payload = {
+        "SearchAn": str(an),
+        "NumarPagina": pagina,
+        "RezultatePagina": 10
+    }
 
-    query = f"'{folder_id}' in parents and name = '{nume_fisier}' and trashed = false"
+    for incercare in range(1, 4):
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            status = response.status_code
+            text_raw = response.text or ""
 
-    try:
-        response = (
-            service.files()
-            .list(**get_list_params(q=query, fields="files(id)"))
-            .execute()
-        )
-        files = response.get("files", [])
+            if status == 200:
+                # Verificare calitate răspuns
+                if not text_raw.strip():
+                    print(f"⚠️ [An {an} | Pag {pagina}] Răspuns GOL (0 octeți) de la Just.ro! (Încercarea {incercare}/3)", flush=True)
+                    time.sleep(2)
+                    continue
 
-        media = MediaFileUpload(cale_temp, mimetype="text/xml", resumable=True)
+                # Verificăm dacă structura conține date utile
+                has_legi = "<Legi>" in text_raw or '"Legi":' in text_raw or "SearchModel" in text_raw
+                if not has_legi:
+                    print(
+                        f"⚠️ [An {an} | Pag {pagina}] Răspuns HTTP 200 dar FĂRĂ date legislative valide!\n"
+                        f"   ├─ Payload trimis: {payload}\n"
+                        f"   └─ Fragment răspuns (primele 300 caractere):\n{text_raw[:300]}\n",
+                        flush=True,
+                    )
+                return text_raw
 
-        if files:
-            file_id = files[0]["id"]
-            updated_file = (
-                service.files()
-                .update(**get_file_params(fileId=file_id, media_body=media))
-                .execute()
-            )
-            if os.path.exists(cale_temp):
-                os.remove(cale_temp)
-            return updated_file.get("id")
-        else:
-            metadata = {"name": nume_fisier, "parents": [folder_id]}
-            new_file = (
-                service.files()
-                .create(**get_file_params(body=metadata, media_body=media))
-                .execute()
-            )
-            if os.path.exists(cale_temp):
-                os.remove(cale_temp)
-            return new_file.get("id")
+            else:
+                # Logare extinsă pentru coduri de eroare HTTP (404, 500, 503 etc.)
+                print(
+                    f"❌ [An {an} | Pag {pagina}] Eroare HTTP Status {status}! (Încercarea {incercare}/3)\n"
+                    f"   ├─ URL: {url}\n"
+                    f"   ├─ Payload: {payload}\n"
+                    f"   ├─ Antete răspuns: {dict(response.headers)}\n"
+                    f"   └─ Corp răspuns (primele 500 caractere):\n{text_raw[:500]}\n",
+                    flush=True,
+                )
 
-    except Exception as e:
-        print(
-            f"❌ Eroare salvare {nume_fisier} în Drive (Folder: {folder_id[:8]}...): {e}",
-            flush=True,
-        )
-        if os.path.exists(cale_temp):
-            os.remove(cale_temp)
-        return None
+        except requests.exceptions.Timeout:
+            print(f"⌛ [An {an} | Pag {pagina}] TIMEOUT la conectarea la Just.ro (30s exspirat). Încercarea {incercare}/3", flush=True)
+        except requests.exceptions.RequestException as req_err:
+            print(f"❌ [An {an} | Pag {pagina}] Excepție de rețea/conexiune: {req_err} (Încercarea {incercare}/3)", flush=True)
+
+        time.sleep(2.5 * incercare)
+
+    print(f"💥 [An {an} | Pag {pagina}] Toate cele 3 încercări către Just.ro au eșuat definitiv!", flush=True)
+    return None
 
 
-def genereaza_si_salveaza_micro_index(service, log_mutații):
-    """Generează și salvează un micro-index temporar JSON în folderul TEMPORARY_XML_INDEXES."""
-    if not log_mutații:
+# ==============================================================================
+# SALVARE MICRO-INDEX TEMPORAR DUPĂ DESCARCARE
+# ==============================================================================
+def salveaza_micro_index(service, flag_updates):
+    """Salvează un fișier temporar de update pentru a fi consolidat ulterior în Master Index."""
+    if not flag_updates:
         return
 
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    nume_micro = f"temp_index_{timestamp}_{os.getpid()}.json"
-    cale_temp = f"/tmp/{nume_micro}" if os.name != "nt" else nume_micro
-
-    data_log = {"timestamp": timestamp, "flag_updates": log_mutații}
+    nume_temp = f"temp_index_download_{int(time.time())}.json"
+    cale_temp = f"/tmp/{nume_temp}" if os.name != "nt" else nume_temp
 
     with open(cale_temp, "w", encoding="utf-8") as f:
-        json.dump(data_log, f, ensure_ascii=False, indent=2)
-
-    folder_target = XML_INDEX_READER.FOLDER_TEMP_INDEXES_ID
+        json.dump({"flag_updates": flag_updates}, f, ensure_ascii=False)
 
     try:
         media = MediaFileUpload(cale_temp, mimetype="application/json")
-        metadata = {"name": nume_micro, "parents": [folder_target]}
-        res = (
-            service.files()
-            .create(**get_file_params(body=metadata, media_body=media))
-            .execute()
-        )
-
-        print(
-            f"⚡ [Micro-Index] Înregistrat micro-index cu {len(log_mutații)} fișiere: {nume_micro} (ID: {res.get('id')})",
-            flush=True,
-        )
-
+        file_metadata = {
+            "name": nume_temp,
+            "parents": [FOLDER_TEMP_INDEXES_ID]
+        }
+        
+        params = get_file_params()
+        params["body"] = file_metadata
+        params["media_body"] = media
+        
+        service.files().create(**params).execute()
+        print(f"🧩 [Micro-Index] Salvat cu succes update pentru {len(flag_updates)} fișiere noi.", flush=True)
     except Exception as e:
         print(f"⚠️ Eroare la salvarea micro-indexului temporar: {e}", flush=True)
     finally:
@@ -207,174 +170,119 @@ def genereaza_si_salveaza_micro_index(service, log_mutații):
             os.remove(cale_temp)
 
 
-def proceseaza_an(service, client, an_tinta, foldere_drive):
-    """Descarcă paginile din API-ul Just.ro pentru anul specificat și le salvează în Drive."""
-    print("=" * 70, flush=True)
-    print(f"📅 AN INDUSTRIAL XML: {an_tinta}", flush=True)
-    print("=" * 70, flush=True)
+# ==============================================================================
+# PROCESARE AN
+# ==============================================================================
+def proceseaza_an(service, master_index_dict, an):
+    print(f"\n📅 --- Începere verificare/descărcare pentru ANUL {an} ---", flush=True)
+    
+    folder_tinta_id = FOLDERE_XML_IDS[0] 
 
-    index_v = XML_INDEX_READER.obtine_index_virtual(service)
-    fisiere_map = index_v.get("fisiere", {})
-
-    pagini_existente = set()
-    pattern = re.compile(rf"brut_legislatie_{an_tinta}_pag(\d+)\.xml")
-
-    for nume_f in fisiere_map.keys():
-        m = pattern.search(nume_f)
-        if m:
-            pagini_existente.add(int(m.group(1)))
-
-    max_pag_existenta = max(pagini_existente) if pagini_existente else 0
-    print(
-        f"📦 {len(pagini_existente)} pagini VALIDE în index pentru {an_tinta}. (Ultima scanată: {max_pag_existenta if max_pag_existenta > 0 else 'Niciuna'})",
-        flush=True,
-    )
-
-    token = None
-    try:
-        token = client.service.GetToken()
-        print("🔑 Token obținut cu succes via Zeep!", flush=True)
-    except Exception as e:
-        print(f"❌ Eroare la obținerea token-ului WSDL: {e}", flush=True)
-        return
-
-    pagina_curenta = max_pag_existenta + 1
-    folder_idx = 0
-    folder_curent_id = foldere_drive[folder_idx]
-
-    log_mutații_sesiune = {}
+    pagina = 1
+    fisiere_noi_descarcate = 0
+    flag_updates_locala = {}
 
     while True:
-        nume_xml = f"brut_legislatie_{an_tinta}_pag{pagina_curenta}.xml"
-        print(f"--- [AVANS] An {an_tinta} / Pagina {pagina_curenta} ---", flush=True)
+        nume_xml = f"brut_legislatie_{an}_pag{pagina}.xml"
 
-        succes_pagina = False
+        # Check rapid în Master Index-ul aflat în memorie
+        if nume_xml in master_index_dict:
+            pagina += 1
+            continue
 
-        for incercare in range(1, 6):
-            try:
-                # Structură SearchModel exactă din documentația oficială SOAP
-                search_model = {
-                    "NumarPagina": pagina_curenta,
-                    "RezultatePagina": 0,  # 0 conform exemplului din documentația oficială
-                    "SearchAn": str(an_tinta),
-                    "SearchNumar": None,
-                    "SearchText": None,
-                    "SearchTitlu": None,
-                }
+        print(f"🔍 [Verificare] Pagina {pagina} pentru anul {an} nu există în index. Interogare API...", flush=True)
+        continut_xml = interogheaza_just_ro(an, pagina)
 
-                raspuns_soap = client.service.Search(
-                    SearchModel=search_model,
-                    tokenKey=token
-                )
-
-                dict_res = serialize_object(raspuns_soap) if raspuns_soap else {}
-                legi_gasite = None
-
-                if isinstance(dict_res, dict):
-                    legi_gasite = dict_res.get("Legi") or dict_res.get("SearchResult", {}).get("Legi")
-
-                # Fallback cu SearchAn transmis ca integer dacă stringul întoarce listă goală
-                if not legi_gasite:
-                    search_model["SearchAn"] = int(an_tinta)
-                    raspuns_soap = client.service.Search(SearchModel=search_model, tokenKey=token)
-                    dict_res = serialize_object(raspuns_soap) if raspuns_soap else {}
-                    if isinstance(dict_res, dict):
-                        legi_gasite = dict_res.get("Legi") or dict_res.get("SearchResult", {}).get("Legi")
-
-                if not legi_gasite:
-                    print(
-                        f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta} (Lista Legi este goală).",
-                        flush=True,
-                    )
-                    succes_pagina = False
-                    break
-
-                str_data = json.dumps(dict_res, ensure_ascii=False, indent=2)
-                bytes_xml = str_data.encode("utf-8")
-
-                fid = salveaza_sau_actualizeaza_in_drive(
-                    service, nume_xml, bytes_xml, folder_curent_id
-                )
-
-                if not fid:
-                    if folder_idx + 1 < len(foldere_drive):
-                        folder_idx += 1
-                        folder_curent_id = foldere_drive[folder_idx]
-                        print(
-                            f"⚠️ Shared Drive-ul curent a atins limita! Comutăm automat pe următorul folder: {folder_curent_id[:8]}...",
-                            flush=True,
-                        )
-                        fid = salveaza_sau_actualizeaza_in_drive(
-                            service, nume_xml, bytes_xml, folder_curent_id
-                        )
-                    else:
-                        print("❌ Toate folderele din lista DRIVE_FOLDER_XML sunt pline!", flush=True)
-                        break
-
-                if fid:
-                    print(f"✅ Fișier salvat în Drive: {nume_xml} (ID: {fid})", flush=True)
-
-                    log_mutații_sesiune[nume_xml] = {
-                        "id": fid,
-                        "folder_id": folder_curent_id,
-                        "an": an_tinta,
-                        "pagina": pagina_curenta,
-                        "downloaded": True,
-                        "Tags_extracted": False,
-                        "processed": False,
-                    }
-
-                succes_pagina = True
-                break
-
-            except Exception as e:
-                err_str = str(e)
-                print(f"⚠️ Încercarea {incercare}/5 a eșuat la Pagina {pagina_curenta}: {err_str}", flush=True)
-
-                if "token" in err_str.lower() or "invalid" in err_str.lower():
-                    try:
-                        print("🔄 Regenerare token...", flush=True)
-                        token = client.service.GetToken()
-                    except Exception:
-                        pass
-
-                time.sleep(2 * incercare)
-
-        if not succes_pagina:
-            print(f"🏁 Oprire scanare pentru anul {an_tinta} la pagina {pagina_curenta}.", flush=True)
+        # Analiză detaliată a conținutului primit
+        if not continut_xml:
+            print(f"🛑 [Diagnostic] Răspuns nul/eșuat de la API. Se oprește căutarea pentru anul {an} la pagina {pagina}.", flush=True)
             break
 
-        pagina_curenta += 1
-        time.sleep(0.3)
+        # Verificăm dacă răspunsul indică sfârșitul listei de legi
+        are_legi = "<Legi>" in continut_xml or '"Legi":' in continut_xml or "SearchModel" in continut_xml
+        if not are_legi:
+            print(
+                f"🏁 [Diagnostic] S-a atins capătul datelor pentru anul {an} la pagina {pagina}.\n"
+                f"   └─ Motiv: Răspunsul primit nu mai conține acte normative (`Legi` / `SearchModel`).",
+                flush=True
+            )
+            break
 
-    if log_mutații_sesiune:
-        genereaza_si_salveaza_micro_index(service, log_mutații_sesiune)
+        # Salvare fișier XML în Shared Drive
+        cale_temp_xml = f"/tmp/{nume_xml}" if os.name != "nt" else nume_xml
+        with open(cale_temp_xml, "w", encoding="utf-8") as f:
+            f.write(continut_xml)
 
-
-def main():
-    print("🤖 [Cloud Mode] Autentificare în Google Drive...", flush=True)
-    service = autenifica_google_drive()
-
-    an_start = 2018
-    an_end = 2026
-
-    if len(sys.argv) >= 3:
         try:
-            an_start = int(sys.argv[1])
-            an_end = int(sys.argv[2])
-        except ValueError:
-            pass
+            media = MediaFileUpload(cale_temp_xml, mimetype="text/xml")
+            file_metadata = {
+                "name": nume_xml,
+                "parents": [folder_tinta_id]
+            }
+            params = get_file_params()
+            params["body"] = file_metadata
+            params["media_body"] = media
+            
+            res_file = service.files().create(**params).execute()
+            file_id = res_file.get("id")
 
-    print(f"🎯 [Config Matrice XML] Interceptat interval: {an_start} - {an_end}", flush=True)
-    print(
-        f"🚀 Pornire segment industrial paralel XML. Interval: {an_start} – {an_end}...",
-        flush=True,
-    )
+            meta_fisier = {
+                "id": file_id,
+                "folder_id": folder_tinta_id,
+                "an": an,
+                "pagina": pagina,
+                "downloaded": True,
+                "Tags_extracted": False,
+                "processed": False
+            }
 
-    client_zeep = creeaza_client_zeep_securizat(WSDL_URL)
+            master_index_dict[nume_xml] = meta_fisier
+            flag_updates_locala[nume_xml] = meta_fisier
+            fisiere_noi_descarcate += 1
+            print(f"✅ Descărcat și salvat cu succes în Drive: {nume_xml} (ID: {file_id})", flush=True)
 
-    for an in range(an_start, an_end + 1):
-        proceseaza_an(service, client_zeep, an, FOLDERE_XML_IDS)
+        except Exception as e:
+            print(f"❌ Eroare la încărcarea fișierului {nume_xml} pe Google Drive: {e}", flush=True)
+        finally:
+            if os.path.exists(cale_temp_xml):
+                os.remove(cale_temp_xml)
+
+        pagina += 1
+        time.sleep(0.5)
+
+    if flag_updates_locala:
+        salveaza_micro_index(service, flag_updates_locala)
+
+    print(f"📊 Summary Anul {an}: {fisiere_noi_descarcate} fișiere noi adăugate.", flush=True)
+
+
+# ==============================================================================
+# MAIN ENTRY POINT
+# ==============================================================================
+def main():
+    service = get_drive_service()
+
+    print("📥 Încărcare Master Index în memorie...", flush=True)
+    if hasattr(XML_INDEX_READER, "descarca_index_master"):
+        master_data = XML_INDEX_READER.descarca_index_master(service)
+    else:
+        master_data = XML_INDEX_READER.descarca_master_index(service)
+
+    master_index_dict = master_data.get("fisiere", {})
+    print(f"✅ Master Index încărcat cu succes! ({len(master_index_dict):,} fișiere unice protejate în memorie)", flush=True)
+
+    an_start = 1948
+    an_stop = 2026
+
+    if len(sys.argv) >= 2:
+        an_start = int(sys.argv[1])
+    if len(sys.argv) >= 3:
+        an_stop = int(sys.argv[2])
+
+    print(f"🚀 Pornire proces descărcare pentru intervalul de ani: {an_start} - {an_stop}", flush=True)
+
+    for an in range(an_start, an_stop + 1):
+        proceseaza_an(service, master_index_dict, an)
 
 
 if __name__ == "__main__":
