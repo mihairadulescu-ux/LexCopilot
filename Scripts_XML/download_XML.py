@@ -39,14 +39,14 @@ from googleapiclient.http import MediaFileUpload
 from zeep import Client, Transport
 
 # ==============================================================================
-# CONFIGURARE SERVICIU WSDL (JUST.RO) - URL-UL OFICIAL FreeWebService
+# CONFIGURARE SERVICIU WSDL (JUST.RO)
 # ==============================================================================
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
 
 def creeaza_client_zeep_securizat(wsdl_url, retries=5, backoff=2):
     """
-    Creează un client Zeep configurat cu un Session robust pe HTTP care
+    Creează un client Zeep configurat cu Session robust pe HTTP care
     include User-Agent de browser și reîncearcă automat la deconectări.
     """
     session = requests.Session()
@@ -77,6 +77,10 @@ def creeaza_client_zeep_securizat(wsdl_url, retries=5, backoff=2):
             )
             client = Client(wsdl_url, transport=transport)
             print("✅ Conexiune WSDL stabilită cu succes!", flush=True)
+
+            metode = [op for op in dir(client.service) if not op.startswith("_")]
+            print(f"📋 Metode WSDL disponibile: {metode}", flush=True)
+
             return client
         except Exception as e:
             print(
@@ -206,30 +210,66 @@ def genereaza_si_salveaza_micro_index(service, log_mutații):
             os.remove(cale_temp)
 
 
-def apeleaza_get_legi_paginat(client, token, an_tinta, pagina_curenta):
+def apeleaza_descarcare_paginata_soap(client, token, an_tinta, pagina_curenta):
     """
-    Apelează metoda de descărcare paginată încercând variantele de nume expuse
-    de serviciul SOAP FreeWebService.svc (GetLegiPaginatText, GetLegiPaginat, etc.).
+    Execută interogarea paginată adaptând apelul SOAP la semnatura exactă a WSDL-ului Just.ro.
     """
-    # 1. Încercăm GetLegiPaginatText
-    if hasattr(client.service, "GetLegiPaginatText"):
-        return client.service.GetLegiPaginatText(
-            token=token, an=an_tinta, pagina=pagina_curenta
-        )
+    service = client.service
 
-    # 2. Încercăm GetLegiPaginat
-    if hasattr(client.service, "GetLegiPaginat"):
-        return client.service.GetLegiPaginat(
-            token=token, an=an_tinta, pagina=pagina_curenta
-        )
+    # 1. Încercăm apel direct pe GetLegiPaginat cu diferitele combinații de nume de argumente
+    if hasattr(service, "GetLegiPaginat"):
+        incercari_parametri = [
+            {"token": token, "an": an_tinta, "pagina": pagina_curenta},
+            {"token": token, "an": an_tinta, "numarPagina": pagina_curenta},
+            {"token": token, "an": an_tinta, "page": pagina_curenta},
+            {"token": token, "An": an_tinta, "Pagina": pagina_curenta},
+        ]
+        for params in incercari_parametri:
+            try:
+                res = service.GetLegiPaginat(**params)
+                if res is not None:
+                    return res
+            except TypeError:
+                continue
+            except Exception as ex:
+                # Dacă eroarea nu e de potrivire parametri, o transmitem mai departe
+                if "SearchModel" in str(ex) or "unexpected keyword" in str(ex):
+                    continue
+                raise ex
 
-    # 3. Fallback: căutare dinamică a primei metode care conține 'Paginat'
-    for nume_op in dir(client.service):
-        if "paginat" in nume_op.lower() and not nume_op.startswith("_"):
-            metoda = getattr(client.service, nume_op)
-            return metoda(token=token, an=an_tinta, pagina=pagina_curenta)
+    # 2. Încercăm pe GetLegiPaginatText
+    if hasattr(service, "GetLegiPaginatText"):
+        try:
+            return service.GetLegiPaginatText(token=token, an=an_tinta, pagina=pagina_curenta)
+        except Exception:
+            pass
 
-    raise AttributeError("Nicio metodă de tip GetLegiPaginat nu a fost găsită în serviciul WSDL.")
+    # 3. Încercăm transmisia de parametru unic (Obiect / Structură SearchModel)
+    if hasattr(service, "GetLegiPaginat"):
+        try:
+            # Construim dicționarul de căutare pentru FreeWebService
+            model_cautare = {
+                "An": an_tinta,
+                "Pagina": pagina_curenta,
+                "NumarPagina": pagina_curenta,
+            }
+            return service.GetLegiPaginat(token=token, cautare=model_cautare)
+        except Exception:
+            pass
+
+    # Fallback generic pe orice operație cu 'Paginat' sau 'Legi'
+    for op_name in dir(service):
+        if not op_name.startswith("_") and ("paginat" in op_name.lower() or "legi" in op_name.lower()):
+            func = getattr(service, op_name)
+            try:
+                return func(token, an_tinta, pagina_curenta)
+            except Exception:
+                try:
+                    return func(token=token, an=an_tinta, pagina=pagina_curenta)
+                except Exception:
+                    continue
+
+    raise RuntimeError(f"Nu s-a putut executa interogarea paginată pentru anul {an_tinta}, pagina {pagina_curenta}.")
 
 
 def proceseaza_an(service, client, an_tinta, foldere_drive):
@@ -274,21 +314,19 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
         print(f"--- [AVANS] An {an_tinta} / Pagina {pagina_curenta} ---", flush=True)
 
         try:
-            raspuns_xml = apeleaza_get_legi_paginat(
+            raspuns_xml = apeleaza_descarcare_paginata_soap(
                 client, token, an_tinta, pagina_curenta
             )
 
-            if not raspuns_xml or len(str(raspuns_xml).encode("utf-8")) < 200:
+            str_raspuns = str(raspuns_xml) if raspuns_xml else ""
+            if not str_raspuns or len(str_raspuns.encode("utf-8")) < 200:
                 print(
                     f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta}.",
                     flush=True,
                 )
                 break
 
-            if isinstance(raspuns_xml, str):
-                bytes_xml = raspuns_xml.encode("utf-8")
-            else:
-                bytes_xml = str(raspuns_xml).encode("utf-8")
+            bytes_xml = str_raspuns.encode("utf-8")
 
             fid = salveaza_sau_actualizeaza_in_drive(
                 service, nume_xml, bytes_xml, folder_curent_id
