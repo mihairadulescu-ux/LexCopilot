@@ -1,4 +1,4 @@
-import os
+mport os
 import sys
 import time
 import json
@@ -108,16 +108,14 @@ def salveaza_master_index(service, master_data):
 
 
 # ==============================================================================
-# CURĂȚARE DUPLICATE / FIȘIERE NEINDEXATE (MUTARE ÎN TRASH)
-# RULATĂ EXCLUSIV PE RAMURA FULL INDEX
+# CURĂȚARE DUPLICATE / FIȘIERE NEINDEXATE (MUTARE RAPIDĂ ÎN TRASH)
 # ==============================================================================
 def curata_duplicate_drive(service, master_data):
     """
-    Scanează folderele Shared Drive și mută în Trash fișierele fizice neindexate
-    (ale căror ID-uri nu figurează în Master Index).
+    Scanează folderele Shared Drive și mută rapid în Trash fișierele fizice neindexate.
     """
     print("\n" + "=" * 60, flush=True)
-    print("🗑️ ÎNCEPERE ETAPĂ MUTARE FIȘIERE NEINDEXATE ÎN COȘUL DE GUNOI (TRASH)...", flush=True)
+    print("⚡ ÎNCEPERE ETAPĂ MUTARE RAPIDĂ ÎN TRASH A FIȘIERELOR NEINDEXATE...", flush=True)
     print("=" * 60, flush=True)
 
     fisiere_valide = master_data.get("fisiere", {})
@@ -131,7 +129,7 @@ def curata_duplicate_drive(service, master_data):
     timp_start = time.time()
 
     for folder_idx, folder_id in enumerate(FOLDERE_XML_IDS, 1):
-        print(f"\n📂 [{folder_idx}/{len(FOLDERE_XML_IDS)}] Scanare folder pentru curățare: {folder_id[:8]}...", flush=True)
+        print(f"\n📂 [{folder_idx}/{len(FOLDERE_XML_IDS)}] Curățare folder: {folder_id[:8]}...", flush=True)
         page_token = None
         query = f"'{folder_id}' in parents and trashed = false"
 
@@ -154,51 +152,43 @@ def curata_duplicate_drive(service, master_data):
                 for f in files:
                     total_fisiere_verificate += 1
                     file_id = f["id"]
-                    nume_fisier = f["name"]
 
-                    # Dacă ID-ul fișierului NU este în Master Index, îl mutăm în Coșul de Gunoi
                     if file_id not in id_uri_oficiale:
-                        succes = False
-                        for incercare in range(3):
-                            try:
-                                params = get_file_params(fileId=file_id)
-                                params["body"] = {"trashed": True}
-                                service.files().update(**params).execute()
-                                total_duplicate_gunoi += 1
-                                succes = True
-                                break
-                            except Exception:
-                                time.sleep(1.5 * (incercare + 1))
+                        try:
+                            params = get_file_params(fileId=file_id)
+                            params["body"] = {"trashed": True}
+                            service.files().update(**params).execute()
+                            total_duplicate_gunoi += 1
 
-                        if not succes:
+                            # Micro-pauză de 0.02s doar pentru protecție quota (fără să blocheze ritmul)
+                            time.sleep(0.02)
+
+                            # Raportare rapidă la fiecare 500 de fișiere
+                            if total_duplicate_gunoi % 500 == 0:
+                                durata = round(time.time() - timp_start, 1)
+                                viteză = round(total_duplicate_gunoi / (durata if durata > 0 else 1), 1)
+                                print(
+                                    f"⚡ [Viteză Trash] Mutate la coș #{total_duplicate_gunoi:,} fișiere... | Ritm: {viteză} fișiere/sec ({durata}s)",
+                                    flush=True,
+                                )
+                        except Exception as ex_del:
                             erori_gunoi += 1
                             if erori_gunoi <= 5:
-                                print(f"⚠️ Nu s-a putut muta în Trash fișierul {nume_fisier} ({file_id})", flush=True)
-
-                        # PAUZĂ DE 1 SECUNDĂ LA FIECARE 50 DE FIȘIERE MUTATE ÎN TRASH
-                        if total_duplicate_gunoi > 0 and total_duplicate_gunoi % 50 == 0:
-                            time.sleep(1.0)
-
-                        if total_duplicate_gunoi % 1000 == 0:
-                            durata = round(time.time() - timp_start, 1)
-                            print(
-                                f"🗑️ [Trash #{total_duplicate_gunoi:,}] Aruncate la coș {total_duplicate_gunoi:,} fișiere... ({durata}s)",
-                                flush=True,
-                            )
+                                print(f"⚠️ Eroare mutare fișier {file_id}: {ex_del}", flush=True)
 
                 page_token = response.get("nextPageToken")
                 if not page_token:
                     break
             except Exception as e:
                 print(f"⚠️ Eroare la scanarea folderului {folder_id[:8]}: {e}", flush=True)
-                time.sleep(2)
+                time.sleep(1)
                 break
 
     durata_totala = round(time.time() - timp_start, 1)
     print("\n" + "=" * 60, flush=True)
     print(f"🏁 CURĂȚARE DUPLICATE FINALIZATĂ în {durata_totala}s!", flush=True)
-    print(f"📊 Fișiere totale verificate: {total_fisiere_verificate:,}", flush=True)
-    print(f"🗑️ Fișiere neindexate aruncate la coș (Trash): {total_duplicate_gunoi:,}", flush=True)
+    print(f"📊 Fișiere verificate: {total_fisiere_verificate:,}", flush=True)
+    print(f"🗑️ Duplicate mutate în Trash: {total_duplicate_gunoi:,}", flush=True)
     if erori_gunoi > 0:
         print(f"⚠️ Erori întâmpinate: {erori_gunoi}", flush=True)
     print("=" * 60 + "\n", flush=True)
@@ -279,12 +269,12 @@ def executa_full_index(service):
     )
     salveaza_master_index(service, master_data)
 
-    # CURĂȚAREA SE EXECUTĂ EXCLUSIV AICI (PE RAMURA FULL INDEX)
+    # Executare curățare rapidă în Trash
     curata_duplicate_drive(service, master_data)
 
 
 def executa_incremental_index(service):
-    """Consolidează micro-indecșii temporari în Master Index (fără curățare duplicate)."""
+    """Consolidează micro-indecșii temporari în Master Index."""
     print("⚡ Consolidare incrementală index...", flush=True)
     master_data = descarca_master_index(service)
     fisiere_dict = master_data.get("fisiere", {})
