@@ -22,19 +22,27 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 import io
 
 from drive_config import (
-    MASTER_INDEX_FILE_ID,
-    FOLDER_TEMP_INDEXES_ID,
     FOLDERE_XML_IDS,
     get_file_params,
     get_list_params,
 )
+
+try:
+    import XML_INDEX_READER
+except ImportError:
+    from Scripts_XML import XML_INDEX_READER
+
 
 # ==============================================================================
 # AUTENTIFICARE GOOGLE DRIVE API
 # ==============================================================================
 def get_drive_service():
     """Autentificare în Google Drive API folosind GOOGLE_SERVICE_ACCOUNT_JSON."""
-    creds_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
+    creds_json = (
+        os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+        or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
+        or os.getenv("SERVICE_ACCOUNT_JSON")
+    )
 
     if creds_json:
         try:
@@ -62,22 +70,13 @@ def get_drive_service():
 
 
 # ==============================================================================
-# OPERAȚIUNI CU MASTER INDEX
+# OPERAȚIUNI CU MASTER INDEX (DELEGAT CĂTRE XML_INDEX_READER)
 # ==============================================================================
 def descarca_master_index(service):
     """Descarcă index_xml.json din Google Drive în memorie."""
-    print(f"📥 Descărcare conținut Master Index (ID: {MASTER_INDEX_FILE_ID})...", flush=True)
+    print("📥 Descărcare conținut Master Index (index_xml.json)...", flush=True)
     try:
-        request = service.files().get_media(**get_file_params(fileId=MASTER_INDEX_FILE_ID))
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-
-        fh.seek(0)
-        continut = fh.read().decode("utf-8")
-        master_data = json.loads(continut)
+        master_data = XML_INDEX_READER.descarca_index_master(service)
         print(f"✅ [Master Index] Încărcate {len(master_data.get('fisiere', {}))} fișiere.", flush=True)
         return master_data
     except Exception as e:
@@ -88,31 +87,22 @@ def descarca_master_index(service):
 def salveaza_master_index(service, master_data):
     """Suprascrie Master Index-ul (index_xml.json) pe Google Drive."""
     master_data["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    cale_temp = "/tmp/index_xml.json" if os.name != "nt" else "index_xml.json"
-
-    with open(cale_temp, "w", encoding="utf-8") as f:
-        json.dump(master_data, f, ensure_ascii=False, indent=2)
-
+    
     try:
-        media = MediaFileUpload(cale_temp, mimetype="application/json", resumable=True)
-        updated_file = (
-            service.files()
-            .update(**get_file_params(fileId=MASTER_INDEX_FILE_ID, media_body=media))
-            .execute()
-        )
-        print(f"✅ Master Index actualizat pe Drive cu succes! (ID: {updated_file.get('id')})", flush=True)
+        res = XML_INDEX_READER.salveaza_index_master(service, master_data)
+        if res:
+            print(f"✅ Master Index actualizat pe Drive cu succes! (ID: {res.get('id')})", flush=True)
+        else:
+            print("❌ Eroare la salvarea Master Index-ului pe Drive.", flush=True)
     except Exception as e:
-        print(f"❌ Eroare la salvarea Master Index-ului pe Drive: {e}", flush=True)
-    finally:
-        if os.path.exists(cale_temp):
-            os.remove(cale_temp)
+        print(f"❌ Excepție la salvarea Master Index-ului pe Drive: {e}", flush=True)
 
 
 # ==============================================================================
 # EXECUȚIE STRATEGII
 # ==============================================================================
 def executa_full_index(service):
-    """Scanează integral toate folderele și reconstruiește Master Index-ul."""
+    """Scanează integral toate folderele și reconstruiește Master Index-ul de la zero."""
     print("🚀 Reconstrucție completă index (FULL INDEX)...", flush=True)
     master_data = {"fisiere": {}, "last_updated": ""}
     pattern_xml = re.compile(r"brut_legislatie_(\d{4})_pag(\d+)\.xml")
@@ -173,7 +163,8 @@ def executa_incremental_index(service):
     master_data = descarca_master_index(service)
     fisiere_dict = master_data.get("fisiere", {})
 
-    query = f"'{FOLDER_TEMP_INDEXES_ID}' in parents and name contains 'temp_index_' and trashed = false"
+    folder_temp_id = XML_INDEX_READER.FOLDER_TEMP_INDEXES_ID
+    query = f"'{folder_temp_id}' in parents and name contains 'temp_index_' and trashed = false"
 
     try:
         response = (
