@@ -37,9 +37,10 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 from zeep import Client, Transport
+from zeep.helpers import serialize_object
 
 # ==============================================================================
-# CONFIGURARE SERVICIU WSDL (JUST.RO)
+# CONFIGURARE SERVICIU WSDL (JUST.RO) - URL OFICIAL FREEWEBSERVICE
 # ==============================================================================
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
@@ -249,26 +250,42 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
 
         succes_pagina = False
         
-        # BUCULĂ DE RETRY PER PAGINĂ (până la 5 încercări înainte de abandon)
+        # BUCULĂ DE RETRY PER PAGINĂ (până la 5 încercări)
         for incercare in range(1, 6):
             try:
-                # Apelul SOAP exact
-                raspuns_xml = client.service.GetLegiPaginat(
-                    token=token,
-                    an=an_tinta,
-                    pagina=pagina_curenta
+                # Construim obiectul SearchModel cerut oficial de WSDL
+                search_model = {
+                    "NumarPagina": pagina_curenta,
+                    "RezultatePagina": 10,
+                    "SearchAn": an_tinta,
+                    "SearchNumar": None,
+                    "SearchText": None,
+                    "SearchTitlu": None,
+                }
+
+                # Apelul SOAP nativ cu metoda Search
+                raspuns_soap = client.service.Search(
+                    SearchModel=search_model,
+                    tokenKey=token
                 )
 
-                # Dacă răspunsul e None sau e string gol/foarte mic, am atins finalul
-                if not raspuns_xml or len(str(raspuns_xml).encode("utf-8")) < 200:
+                # Verificăm dacă există rezultate în răspuns
+                dict_res = serialize_object(raspuns_soap) if raspuns_soap else {}
+                legi_gasite = None
+                
+                if isinstance(dict_res, dict):
+                    legi_gasite = dict_res.get("Legi") or dict_res.get("SearchResult", {}).get("Legi")
+
+                if not legi_gasite:
                     print(
-                        f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta}.",
+                        f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta} (Lista Legi este goală).",
                         flush=True,
                     )
                     succes_pagina = False
-                    break # Ieșim din retry, este capăt de an real
+                    break  # Ieșim din retry, e capăt de an real
 
-                bytes_xml = str(raspuns_xml).encode("utf-8")
+                str_data = json.dumps(dict_res, ensure_ascii=False, indent=2)
+                bytes_xml = str_data.encode("utf-8")
 
                 fid = salveaza_sau_actualizeaza_in_drive(
                     service, nume_xml, bytes_xml, folder_curent_id
@@ -303,13 +320,12 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
                     }
 
                 succes_pagina = True
-                break # Pagina descarcată cu succes, trecem la următoarea
+                break  # Pagina descărcată cu succes
 
             except Exception as e:
                 err_str = str(e)
                 print(f"⚠️ Încercarea {incercare}/5 a eșuat la Pagina {pagina_curenta}: {err_str}", flush=True)
                 
-                # Regenerare token dacă serverul reclamă token expirat
                 if "token" in err_str.lower() or "invalid" in err_str.lower():
                     try:
                         print("🔄 Regenerare token...", flush=True)
@@ -317,9 +333,9 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
                     except Exception:
                         pass
 
-                time.sleep(2 * incercare) # Pauză progresivă înainte de reîncercare
+                time.sleep(2 * incercare)
 
-        # Dacă după 5 încercări nu s-a putut descărca pagina, considerăm final de an
+        # Dacă după 5 încercări nu am avut succes sau am ajuns la finalul datelor
         if not succes_pagina:
             print(f"🏁 Oprire scanare pentru anul {an_tinta} la pagina {pagina_curenta}.", flush=True)
             break
