@@ -5,15 +5,17 @@ import json
 import traceback
 import subprocess
 
-# Auto-instalare dinamică și import pentru curl_cffi + CurlHttpVersion
+# Auto-instalare dinamică și import corectat pentru curl_cffi + CurlHttpVersion
 try:
-    from curl_cffi import requests
-    from curl_cffi.requests import CurlHttpVersion
+    from curl_cffi import requests, CurlHttpVersion
 except ImportError:
     print("📦 Pachetul 'curl_cffi' nu a fost găsit. Se instalează automat...", flush=True)
     subprocess.check_call([sys.executable, "-m", "pip", "install", "curl_cffi"])
-    from curl_cffi import requests
-    from curl_cffi.requests import CurlHttpVersion
+    try:
+        from curl_cffi import requests, CurlHttpVersion
+    except ImportError:
+        from curl_cffi import requests
+        from curl_cffi.const import CurlHttpVersion
     print("✅ 'curl_cffi' a fost instalat cu succes!", flush=True)
 
 
@@ -73,7 +75,7 @@ def descarca_pagina_cu_debug(url, timeout=30):
             url, 
             headers=DEFAULT_HEADERS, 
             impersonate="chrome120", 
-            http_version=CurlHttpVersion.V1_1,  # <--- FORȚARE HTTP/1.1
+            http_version=CurlHttpVersion.V1_1,  # Forțare HTTP/1.1
             timeout=timeout
         )
         
@@ -199,5 +201,4 @@ if __name__ == "__main__":
         print("\n📜 Traceback complet:", flush=True)
         traceback.print_exc()
         
-        # Ieșire curată cu exit-code 0 pentru menținerea log-urilor în consolă
         sys.exit(0)
