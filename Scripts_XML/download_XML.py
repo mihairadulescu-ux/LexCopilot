@@ -37,6 +37,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 from zeep import Client, Transport
+from zeep.helpers import serialize_object
 
 # ==============================================================================
 # CONFIGURARE SERVICIU WSDL (JUST.RO) - URL OFICIAL FREEWEBSERVICE
@@ -215,10 +216,9 @@ def apeleaza_descarcare_paginata_soap(client, token, an_tinta, pagina_curenta):
     Execută interogarea CĂUTARE conform DCOUMENTAȚIEI OFICIALE FreeWebService:
     Metoda: Search(SearchModel, tokenKey)
     """
-    # Construim structura SearchModel cerută de WSDL
     search_model = {
         "NumarPagina": pagina_curenta,
-        "RezultatePagina": 10,  # Paginație standard
+        "RezultatePagina": 50,  # Solicităm 50 rezultate per pagină
         "SearchAn": an_tinta,
         "SearchNumar": None,
         "SearchText": None,
@@ -226,14 +226,12 @@ def apeleaza_descarcare_paginata_soap(client, token, an_tinta, pagina_curenta):
     }
 
     try:
-        # Apel oficial exact conform WSDL Documentat
         raspuns = client.service.Search(
             SearchModel=search_model,
             tokenKey=token
         )
         return raspuns
     except Exception as ex:
-        # Încercăm varianta alternativă de numire a parametrilor dacă Zeep cere cu litere mici
         try:
             raspuns = client.service.Search(
                 searchModel=search_model,
@@ -290,21 +288,24 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
                 client, token, an_tinta, pagina_curenta
             )
 
-            # Verificăm dacă răspunsul conține legi
-            if not raspuns_soap or not getattr(raspuns_soap, 'Legi', None):
+            # Inspectare obiect returnat de Zeep
+            dict_raspuns = serialize_object(raspuns_soap)
+            
+            # Verificăm dacă există lista 'Legi' în răspuns
+            legi_lista = None
+            if isinstance(dict_raspuns, dict):
+                legi_lista = dict_raspuns.get("Legi") or dict_raspuns.get("SearchResult", {}).get("Legi")
+
+            if not legi_lista:
                 print(
-                    f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta} (Nu mai există rezultate).",
+                    f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta} (Nu mai există legi în răspuns).",
                     flush=True,
                 )
                 break
 
-            # Serializăm răspunsul SOAP / XML în text UTF-8 pentru stocare
-            str_raspuns = str(raspuns_soap)
-            if len(str_raspuns.encode("utf-8")) < 50:
-                print(f"🏁 Conținut insuficient la pagina {pagina_curenta}. Oprire an {an_tinta}.", flush=True)
-                break
-
-            bytes_xml = str_raspuns.encode("utf-8")
+            # Convertim structura de date în JSON/XML lizibil
+            str_json = json.dumps(dict_raspuns, ensure_ascii=False, indent=2)
+            bytes_xml = str_json.encode("utf-8")
 
             fid = salveaza_sau_actualizeaza_in_drive(
                 service, nume_xml, bytes_xml, folder_curent_id
