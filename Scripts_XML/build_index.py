@@ -108,15 +108,15 @@ def salveaza_master_index(service, master_data):
 
 
 # ==============================================================================
-# CURĂȚARE DUPLICATE DIN DRIVE (PERMISIUNI EDITOR: MUTARE ÎN TRASH)
+# CURĂȚARE DUPLICATE / FIȘIERE NEINDEXATE (MUTARE ÎN TRASH)
 # ==============================================================================
 def curata_duplicate_drive(service, master_data):
     """
-    Scanează folderele Shared Drive și mută în Trash fișierele fizice 
-    ale căror ID-uri nu figurează în Master Index (operațiune compatibilă cu rolul de Editor).
+    Scanează folderele Shared Drive și mută în Trash fișierele fizice neindexate
+    (ale căror ID-uri nu figurează în Master Index).
     """
     print("\n" + "=" * 60, flush=True)
-    print("🗑️ ÎNCEPERE ETAPĂ MUTARE DUPLICATE ÎN COȘUL DE GUNOI (TRASH)...", flush=True)
+    print("🗑️ ÎNCEPERE ETAPĂ MUTARE FIȘIERE NEINDEXATE ÎN COȘUL DE GUNOI (TRASH)...", flush=True)
     print("=" * 60, flush=True)
 
     fisiere_valide = master_data.get("fisiere", {})
@@ -132,7 +132,6 @@ def curata_duplicate_drive(service, master_data):
     for folder_idx, folder_id in enumerate(FOLDERE_XML_IDS, 1):
         print(f"\n📂 [{folder_idx}/{len(FOLDERE_XML_IDS)}] Scanare folder pentru curățare: {folder_id[:8]}...", flush=True)
         page_token = None
-        # Interogăm doar fișierele care NU sunt deja în Trash
         query = f"'{folder_id}' in parents and trashed = false"
 
         while True:
@@ -154,8 +153,9 @@ def curata_duplicate_drive(service, master_data):
                 for f in files:
                     total_fisiere_verificate += 1
                     file_id = f["id"]
+                    nume_fisier = f["name"]
 
-                    # Dacă ID-ul fișierului NU este în Master Index, îl mutăm în Trash
+                    # Dacă ID-ul fișierului NU este în Master Index, îl mutăm în Coșul de Gunoi
                     if file_id not in id_uri_oficiale:
                         try:
                             params = get_file_params(fileId=file_id)
@@ -163,16 +163,16 @@ def curata_duplicate_drive(service, master_data):
                             service.files().update(**params).execute()
                             total_duplicate_gunoi += 1
 
-                            if total_duplicate_gunoi % 1000 == 0:
-                                durata = round(time.time() - timp_start, 1)
+                            # Logare explicită pentru fiecare fișier neindexat aruncat la coș (sau sumariat la 1000)
+                            if total_duplicate_gunoi <= 10 or total_duplicate_gunoi % 1000 == 0:
                                 print(
-                                    f"🗑️ [Progres Trash] Trimise în Coșul de Gunoi {total_duplicate_gunoi:,} duplicate... ({durata}s)",
+                                    f"🗑️ [Trash #{total_duplicate_gunoi:,}] Aruncat la coș fișierul neindexat: {nume_fisier} (ID: {file_id})",
                                     flush=True,
                                 )
                         except Exception as ex_del:
                             erori_gunoi += 1
                             if erori_gunoi <= 5:
-                                print(f"⚠️ Nu s-a putut muta în Trash fișierul {f['name']} ({file_id}): {ex_del}", flush=True)
+                                print(f"⚠️ Nu s-a putut muta în Trash fișierul {nume_fisier} ({file_id}): {ex_del}", flush=True)
 
                 page_token = response.get("nextPageToken")
                 if not page_token:
@@ -185,9 +185,9 @@ def curata_duplicate_drive(service, master_data):
     print("\n" + "=" * 60, flush=True)
     print(f"🏁 CURĂȚARE DUPLICATE FINALIZATĂ în {durata_totala}s!", flush=True)
     print(f"📊 Fișiere totale verificate: {total_fisiere_verificate:,}", flush=True)
-    print(f"🗑️ Duplicate mutate în Trash: {total_duplicate_gunoi:,}", flush=True)
+    print(f"🗑️ Fișiere neindexate aruncate la coș (Trash): {total_duplicate_gunoi:,}", flush=True)
     if erori_gunoi > 0:
-        print(f"⚠️ Erori întâmpinate (permisiuni / fișiere blocate): {erori_gunoi}", flush=True)
+        print(f"⚠️ Erori întâmpinate: {erori_gunoi}", flush=True)
     print("=" * 60 + "\n", flush=True)
 
 
@@ -195,7 +195,7 @@ def curata_duplicate_drive(service, master_data):
 # EXECUȚIE STRATEGII (FULL VS INCREMENTAL)
 # ==============================================================================
 def executa_full_index(service):
-    """Scanează integral toate folderele, reconstruiește Master Index-ul și trimite duplicatele în Trash."""
+    """Scanează integral toate folderele, reconstruiește Master Index-ul și mută fișierele neindexate în Trash."""
     print("🚀 Reconstrucție completă index (FULL INDEX)...", flush=True)
     master_data = {"fisiere": {}, "last_updated": ""}
     pattern_xml = re.compile(r"brut_legislatie_(\d{4})_pag(\d+)\.xml")
@@ -266,7 +266,7 @@ def executa_full_index(service):
     )
     salveaza_master_index(service, master_data)
 
-    # Executăm mutarea duplicatelor în Trash
+    # Executăm curățarea fișierelor neindexate direct după salvarea indexului oficial
     curata_duplicate_drive(service, master_data)
 
 
@@ -341,7 +341,7 @@ def main():
     is_full = "--full" in sys.argv or os.getenv("FORCE_FULL_INDEX", "").lower() == "true"
 
     if is_full:
-        print("🚀 [Strategie] Se execută FULL INDEX (Reindexare completă + Mutare duplicate în Trash).", flush=True)
+        print("🚀 [Strategie] Se execută FULL INDEX (Reindexare completă + Mutare fișiere neindexate în Trash).", flush=True)
     else:
         print("⚡ [Strategie] Se execută INCREMENTAL INDEX (Delta & Consolidare).", flush=True)
 
