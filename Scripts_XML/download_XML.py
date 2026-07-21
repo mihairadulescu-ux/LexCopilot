@@ -39,7 +39,7 @@ from googleapiclient.http import MediaFileUpload
 from zeep import Client, Transport
 
 # ==============================================================================
-# CONFIGURARE SERVICIU WSDL (JUST.RO) - URL-UL OFICIAL SI CORECT
+# CONFIGURARE SERVICIU WSDL (JUST.RO) - URL-UL OFICIAL FreeWebService
 # ==============================================================================
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
@@ -206,6 +206,32 @@ def genereaza_si_salveaza_micro_index(service, log_mutații):
             os.remove(cale_temp)
 
 
+def apeleaza_get_legi_paginat(client, token, an_tinta, pagina_curenta):
+    """
+    Apelează metoda de descărcare paginată încercând variantele de nume expuse
+    de serviciul SOAP FreeWebService.svc (GetLegiPaginatText, GetLegiPaginat, etc.).
+    """
+    # 1. Încercăm GetLegiPaginatText
+    if hasattr(client.service, "GetLegiPaginatText"):
+        return client.service.GetLegiPaginatText(
+            token=token, an=an_tinta, pagina=pagina_curenta
+        )
+
+    # 2. Încercăm GetLegiPaginat
+    if hasattr(client.service, "GetLegiPaginat"):
+        return client.service.GetLegiPaginat(
+            token=token, an=an_tinta, pagina=pagina_curenta
+        )
+
+    # 3. Fallback: căutare dinamică a primei metode care conține 'Paginat'
+    for nume_op in dir(client.service):
+        if "paginat" in nume_op.lower() and not nume_op.startswith("_"):
+            metoda = getattr(client.service, nume_op)
+            return metoda(token=token, an=an_tinta, pagina=pagina_curenta)
+
+    raise AttributeError("Nicio metodă de tip GetLegiPaginat nu a fost găsită în serviciul WSDL.")
+
+
 def proceseaza_an(service, client, an_tinta, foldere_drive):
     """Descarcă paginile din API-ul Just.ro pentru anul specificat și le salvează în Drive."""
     print("=" * 70, flush=True)
@@ -248,18 +274,21 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
         print(f"--- [AVANS] An {an_tinta} / Pagina {pagina_curenta} ---", flush=True)
 
         try:
-            raspuns_xml = client.service.GetLegiPaginat(
-                token=token, an=an_tinta, pagina=pagina_curenta
+            raspuns_xml = apeleaza_get_legi_paginat(
+                client, token, an_tinta, pagina_curenta
             )
 
-            if not raspuns_xml or len(raspuns_xml.encode("utf-8")) < 200:
+            if not raspuns_xml or len(str(raspuns_xml).encode("utf-8")) < 200:
                 print(
                     f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta}.",
                     flush=True,
                 )
                 break
 
-            bytes_xml = raspuns_xml.encode("utf-8")
+            if isinstance(raspuns_xml, str):
+                bytes_xml = raspuns_xml.encode("utf-8")
+            else:
+                bytes_xml = str(raspuns_xml).encode("utf-8")
 
             fid = salveaza_sau_actualizeaza_in_drive(
                 service, nume_xml, bytes_xml, folder_curent_id
