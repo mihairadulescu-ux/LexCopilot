@@ -20,18 +20,20 @@ except ImportError:
 
 
 # ==========================================
-# CONFIGURĂRI SI ENDPOINT OFICIAL
+# CONFIGURĂRI SI ENDPOINT OFICIAL (HTTP)
 # ==========================================
 MAX_RETRIES_PER_PAGE = 4
 MAX_FAILED_CYCLES = 3
 PAUSE_BETWEEN_RETRIES = 3
 LOG_ERRORS_FILE = "pagini_saltate_erori.json"
 
+# Endpoint-ul STRICT pe http:// așa cum este definit oficial
 SOAP_ENDPOINT_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc"
 
 HEADERS_BASE = {
+    'Host': 'legislatie.just.ro',
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Content-Type': 'text/xml; charset=utf-8'
+    'Content-Type': 'text/xml; charset=utf-8',
 }
 
 
@@ -74,12 +76,12 @@ def construieste_plic_search(token_key, an, pagina, rezultate_per_pagina=10):
 # LOGICĂ REȚEA ȘI MANAGEMENT TOKEN
 # ==========================================
 def obtine_token():
-    """Apelează GetToken doar când este necesar un token nou."""
+    """Apelează GetToken pe HTTP."""
     print("🔑 [TOKEN] Solicităm un token nou de la serviciul web...", flush=True)
     payload = construieste_plic_get_token()
     
     headers = HEADERS_BASE.copy()
-    headers['SOAPAction'] = 'http://tempuri.org/IFreeWebService/GetToken'
+    headers['SOAPAction'] = '"http://tempuri.org/IFreeWebService/GetToken"'
     
     try:
         response = requests.post(
@@ -98,7 +100,7 @@ def obtine_token():
                 print(f"✅ [TOKEN OK] Token activat: {token[:15]}...", flush=True)
                 return token
         
-        print(f"❌ [TOKEN ERROR] Cod HTTP {response.status_code}: {response.text[:200]}", flush=True)
+        print(f"❌ [TOKEN ERROR] Cod HTTP {response.status_code}: {response.text[:200]!r}", flush=True)
         return None
     except Exception as e:
         print(f"💥 [TOKEN EXCEPTION] {type(e).__name__}: {e}", flush=True)
@@ -108,7 +110,7 @@ def obtine_token():
 def trimite_search_soap(token_key, an, pagina, timeout=30):
     payload = construieste_plic_search(token_key, an, pagina)
     headers = HEADERS_BASE.copy()
-    headers['SOAPAction'] = 'http://tempuri.org/IFreeWebService/Search'
+    headers['SOAPAction'] = '"http://tempuri.org/IFreeWebService/Search"'
     
     try:
         response = requests.post(
@@ -121,7 +123,6 @@ def trimite_search_soap(token_key, an, pagina, timeout=30):
         )
         
         if response.status_code == 200:
-            # Verificăm dacă răspunsul conține erori specifice de token nevalid/expirat
             if "Invalid Token" in response.text or "Token Expired" in response.text:
                 return False, None, "TOKEN_EXPIRED"
             return True, response.content, "OK"
@@ -176,7 +177,6 @@ def logheaza_pagina_saltata(an, pagina, url, motiv_detaliat):
 def proceseaza_descarcare_an(an, pagina_start=1, token_salvat=None):
     print(f"\n=== AN INDUSTRIAL XML (SOAP OFICIAL): {an} ===", flush=True)
     
-    # Folosim token-ul existent sau obținem unul nou doar dacă nu există
     token_curent = token_salvat or obtine_token()
     if not token_curent:
         print("❌ Nu s-a putut obține token-ul inițial. Abandonăm anul curent.", flush=True)
@@ -199,11 +199,9 @@ def proceseaza_descarcare_an(an, pagina_start=1, token_salvat=None):
             if ok:
                 succes = True
                 cicluri_esuate_consecutive = 0
-                # Aici salvezi conținutul XML
                 break
             else:
                 ultimul_motiv_esec = motiv
-                # Re-generare token DOAR dacă serverul indică explicit că primul a expirat
                 if motiv == "TOKEN_EXPIRED":
                     print("🔄 [TOKEN EXPIRED] Tokenul curent a expirat. Obținem un token nou...", flush=True)
                     token_nou = obtine_token()
