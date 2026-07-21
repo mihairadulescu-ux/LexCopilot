@@ -10,22 +10,41 @@ CALE_INDEX_LOCAL = "index_xml.json"
 DEFAULT_TEMP_FOLDER_ID = "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
 
 # ==========================================
-# PRELUARE VARIABILE PUBLICE DIN MEDIU
+# PRELUARE VARIABILE PUBLICE DIN MEDIU (CURĂȚATE)
 # ==========================================
-INDEX_FILE_ID = os.getenv("XML_STORAGE_INDEX", "").strip()
+INDEX_FILE_ID = (
+    os.getenv("XML_STORAGE_INDEX", "")
+    .replace('"', "")
+    .replace("'", "")
+    .replace("\n", "")
+    .replace("\r", "")
+    .strip()
+)
 
 FOLDER_TEMP_INDEXES_ID = (
-    os.getenv("TEMPORARY_XML_INDEXES", "").strip() or DEFAULT_TEMP_FOLDER_ID
+    os.getenv("TEMPORARY_XML_INDEXES", "")
+    .replace('"', "")
+    .replace("'", "")
+    .strip()
+    or DEFAULT_TEMP_FOLDER_ID
 )
 
 FOLDER_METADATA_ID = (
-    os.getenv("METADATA_FOLDER_ID", "").strip() or DEFAULT_TEMP_FOLDER_ID
+    os.getenv("METADATA_FOLDER_ID", "")
+    .replace('"', "")
+    .replace("'", "")
+    .strip()
+    or DEFAULT_TEMP_FOLDER_ID
 )
 
 FOLDERE_XML_RAW = os.getenv("DRIVE_FOLDER_XML", "").strip()
 FOLDERE_XML_IDS = [
     fid.strip()
-    for fid in FOLDERE_XML_RAW.replace("\n", "").replace("\r", "").split(",")
+    for fid in FOLDERE_XML_RAW.replace('"', "")
+    .replace("'", "")
+    .replace("\n", "")
+    .replace("\r", "")
+    .split(",")
     if fid.strip()
 ] or [
     "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m",
@@ -36,10 +55,7 @@ FOLDERE_XML_IDS = [
 
 
 def descarca_index_master(service):
-    """
-    Descărcare directă a fișierului Main Index din Shared Drive.
-    Include parametrii compleți de autorizare pentru Google Drive API v3.
-    """
+    """Descărcare directă a fișierului Main Index din Shared Drive."""
     target_id = INDEX_FILE_ID
 
     if not target_id:
@@ -51,14 +67,12 @@ def descarca_index_master(service):
 
     try:
         print(
-            f"📥 [Index Reader] Descărcare Master Index din Shared Drive (ID: {target_id[:8]}...)...",
+            f"📥 [Index Reader] Descărcare Master Index din Drive (ID: {target_id[:8]}...)...",
             flush=True,
         )
 
-        # Pasul 1: Preluare stream media cu toate flag-urile de Shared Drive active
         cerere = service.files().get_media(
-            fileId=target_id,
-            supportsAllDrives=True
+            fileId=target_id, supportsAllDrives=True
         )
 
         fh = io.FileIO(CALE_INDEX_LOCAL, "wb")
@@ -78,44 +92,9 @@ def descarca_index_master(service):
             )
             return data
 
-    except HttpError as err:
-        # Dacă prin get_media conexiunea directă e blocată pe Shared Drive, încercăm prin execute direct
-        if err.resp.status == 404:
-            try:
-                print(
-                    "🔄 [Index Reader] Reîncercare descărcare directă ca octeți (Shared Drive Bypass)...",
-                    flush=True,
-                )
-                continut_bytes = (
-                    service.files()
-                    .get_media(fileId=target_id, supportsAllDrives=True)
-                    .execute()
-                )
-
-                with open(CALE_INDEX_LOCAL, "wb") as f:
-                    f.write(continut_bytes)
-
-                with open(CALE_INDEX_LOCAL, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    print(
-                        f"✅ [Index Reader] Master Index descărcat cu succes via Direct Stream! ({len(data.get('fisiere', {}))} fișiere)",
-                        flush=True,
-                    )
-                    return data
-            except Exception as ex:
-                print(
-                    f"⚠️ [Index Reader] Descărcare Direct Stream eșuată: {ex}",
-                    flush=True,
-                )
-
-        print(
-            f"⚠️ [Index Reader] Master Index indisponibil pe Drive (ID: {target_id}): {err}",
-            flush=True,
-        )
-        return {"last_updated": None, "total_fisiere": 0, "fisiere": {}}
     except Exception as e:
         print(
-            f"⚠️ [Index Reader] Eroare la descărcarea Master Index: {e}",
+            f"⚠️ [Index Reader] Master Index indisponibil pe Drive (ID: {target_id}): {e}",
             flush=True,
         )
         return {"last_updated": None, "total_fisiere": 0, "fisiere": {}}
