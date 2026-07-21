@@ -3,7 +3,14 @@ import os
 import time
 import json
 import traceback
-import requests
+
+# Folosim curl_cffi în loc de requests pentru bypass la TLS Fingerprint
+try:
+    from curl_cffi import requests
+except ImportError:
+    print("❌ Pachetul 'curl_cffi' nu este instalat! Rulați: pip install curl_cffi", flush=True)
+    sys.exit(1)
+
 
 # ==========================================
 # CONFIGURĂRI ȘI CONSTANTE
@@ -14,9 +21,9 @@ PAUSE_BETWEEN_RETRIES = 3      # Pauza de start (secunde)
 LOG_ERRORS_FILE = "pagini_saltate_erori.json"
 
 DEFAULT_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Connection': 'close'  # CRUCIAL: Forțează închiderea socket-ului TCP după fiecare cerere
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'ro-RO,ro;q=0.9,en-US;q=0.8,en;q=0.7',
 }
 
 
@@ -53,11 +60,17 @@ def logheaza_pagina_saltata(an, pagina, url, motiv_detaliat):
 
 def descarca_pagina_cu_debug(url, timeout=30):
     """
-    Execută request-ul HTTP și afișează în clar orice cod de eroare
-    sau excepție de rețea întâlnită (Status Code, Connection Drop, Timeout).
+    Execută request-ul HTTP folosind curl_cffi cu impresie de Chrome 120
+    pentru a trece de blocajele de nivel de socket/TLS.
     """
     try:
-        response = requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout)
+        # impersonate="chrome120" imită amprenta TLS nativă a Chrome-ului
+        response = requests.get(
+            url, 
+            headers=DEFAULT_HEADERS, 
+            impersonate="chrome120", 
+            timeout=timeout
+        )
         
         # 1. Răspuns Successful (200 OK)
         if response.status_code == 200:
@@ -70,20 +83,9 @@ def descarca_pagina_cu_debug(url, timeout=30):
             print(f"      📄 Preview Răspuns (200 chars): {response.text[:200]!r}", flush=True)
         return False, None, motiv
 
-    except requests.exceptions.HTTPError as e:
-        motiv = f"HTTPError: {e}"
-        print(f"\n   ❌ [HTTPError Exact]: {e}", flush=True)
-        return False, None, motiv
-        
-    except requests.exceptions.ConnectionError as e:
-        # Prinde ConnectionResetError, RemoteDisconnected, DNS Failure etc.
-        motiv = f"ConnectionError ({type(e).__name__}): {e}"
-        print(f"\n   ❌ [ConnectionError Exact]: {type(e).__name__} -> {e}", flush=True)
-        return False, None, motiv
-
-    except requests.exceptions.Timeout as e:
-        motiv = f"Timeout ({timeout}s)"
-        print(f"\n   ⏳ [Timeout Error]: Serverul nu a răspuns în {timeout} secunde.", flush=True)
+    except requests.errors.RequestsError as e:
+        motiv = f"curl_cffi Error ({type(e).__name__}): {e}"
+        print(f"\n   ❌ [cURL Error Exact]: {type(e).__name__} -> {e}", flush=True)
         return False, None, motiv
 
     except Exception as e:
@@ -162,7 +164,7 @@ def proceseaza_descarcare_an(an, pagina_start=1):
 # MAIN ENTRYPOINT
 # ==========================================
 def main():
-    print("🚀 Script de descărcare XML pornit.", flush=True)
+    print("🚀 Script de descărcare XML pornit (cu impersonare Chrome via curl_cffi).", flush=True)
     
     # Preluare argumente din linia de comandă (ex: python download_XML.py 2012 2013)
     ani_de_procesat = [2012, 2013]
