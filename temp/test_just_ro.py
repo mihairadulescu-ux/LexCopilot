@@ -33,7 +33,7 @@ PAGINA_TEST = 1
 REZULTATE_PER_PAGINA = 10
 
 URL_JUST_API = "https://legislatie.just.ro/api/Search/GetLegi"
-URL_SOAP_WSDL = "http://legislatie.just.ro/api/CautareService.svc"
+URL_SOAP_WSDL = "https://legislatie.just.ro/api/CautareService.svc"
 
 
 # ==============================================================================
@@ -95,16 +95,29 @@ def incarca_fisier_in_drive(service, cale_locala, nume_fisier_drive, mime_type="
 
 
 # ==============================================================================
-# METODA 1: INTEROGARE REST / JSON WRAPPER
+# CREARE SESIUNE HTTP SIMULATĂ BROWSER
 # ==============================================================================
-def test_metoda_json_api(service, an, pagina):
+def creeaza_sesiune_browser():
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ro-RO,ro;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Origin": "https://legislatie.just.ro",
+        "Referer": "https://legislatie.just.ro/",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "Connection": "keep-alive"
+    })
+    return session
+
+
+# ==============================================================================
+# METODA 1: INTEROGARE REST / JSON WRAPPER CU BROWSER HEADER
+# ==============================================================================
+def test_metoda_json_api(service, session, an, pagina):
     print(f"\n🔍 [TEST 1 - REST/JSON] Încercare interogare API Just.ro pentru An: {an}, Pagina: {pagina}...", flush=True)
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json, text/xml, */*",
-        "Content-Type": "application/json; charset=utf-8"
-    }
 
     payload = {
         "SearchAn": str(an),
@@ -113,7 +126,11 @@ def test_metoda_json_api(service, an, pagina):
     }
 
     try:
-        response = requests.post(URL_JUST_API, json=payload, headers=headers, timeout=20)
+        # Preluăm mai întâi cookie-ul de sesiune de pe pagina principală
+        session.get("https://legislatie.just.ro/", timeout=15)
+        time.sleep(1)
+
+        response = session.post(URL_JUST_API, json=payload, timeout=20)
         print(f"📡 Status HTTP: {response.status_code}", flush=True)
         print(f"📊 Dimensiune răspuns: {len(response.content):,} octeți", flush=True)
         
@@ -122,16 +139,17 @@ def test_metoda_json_api(service, an, pagina):
         print(text_raw[:500], flush=True)
         print("--------------------------------------------------\n", flush=True)
 
-        nume_fisier_local = f"TEST_JSON_{an}_pag{pagina}.xml"
-        nume_drive = f"TEST_JSON_brut_legislatie_{an}_pag{pagina}.xml"
+        if text_raw.strip():
+            nume_fisier_local = f"TEST_JSON_{an}_pag{pagina}.xml"
+            nume_drive = f"TEST_JSON_brut_legislatie_{an}_pag{pagina}.xml"
 
-        with open(nume_fisier_local, "w", encoding="utf-8") as f:
-            f.write(text_raw)
+            with open(nume_fisier_local, "w", encoding="utf-8") as f:
+                f.write(text_raw)
 
-        incarca_fisier_in_drive(service, nume_fisier_local, nume_drive, "text/xml")
+            incarca_fisier_in_drive(service, nume_fisier_local, nume_drive, "text/xml")
 
-        if os.path.exists(nume_fisier_local):
-            os.remove(nume_fisier_local)
+            if os.path.exists(nume_fisier_local):
+                os.remove(nume_fisier_local)
 
     except Exception as e:
         print(f"❌ Excepție la interogare JSON: {e}", flush=True)
@@ -140,7 +158,7 @@ def test_metoda_json_api(service, an, pagina):
 # ==============================================================================
 # METODA 2: INTEROGARE DIRECTĂ SOAP ENVELOPE XML
 # ==============================================================================
-def test_metoda_soap_xml(service, an, pagina):
+def test_metoda_soap_xml(service, session, an, pagina):
     print(f"\n🔍 [TEST 2 - SOAP XML] Încercare interogare SOAP WSDL pentru An: {an}, Pagina: {pagina}...", flush=True)
 
     soap_headers = {
@@ -161,7 +179,7 @@ def test_metoda_soap_xml(service, an, pagina):
 </soapenv:Envelope>"""
 
     try:
-        response = requests.post(URL_SOAP_WSDL, data=soap_payload, headers=soap_headers, timeout=20)
+        response = session.post(URL_SOAP_WSDL, data=soap_payload, headers=soap_headers, timeout=20)
         print(f"📡 Status HTTP: {response.status_code}", flush=True)
         print(f"📊 Dimensiune răspuns: {len(response.content):,} octeți", flush=True)
 
@@ -170,16 +188,17 @@ def test_metoda_soap_xml(service, an, pagina):
         print(text_raw[:500], flush=True)
         print("----------------------------------------------\n", flush=True)
 
-        nume_fisier_local = f"TEST_SOAP_{an}_pag{pagina}.xml"
-        nume_drive = f"TEST_SOAP_brut_legislatie_{an}_pag{pagina}.xml"
+        if text_raw.strip():
+            nume_fisier_local = f"TEST_SOAP_{an}_pag{pagina}.xml"
+            nume_drive = f"TEST_SOAP_brut_legislatie_{an}_pag{pagina}.xml"
 
-        with open(nume_fisier_local, "w", encoding="utf-8") as f:
-            f.write(text_raw)
+            with open(nume_fisier_local, "w", encoding="utf-8") as f:
+                f.write(text_raw)
 
-        incarca_fisier_in_drive(service, nume_fisier_local, nume_drive, "text/xml")
+            incarca_fisier_in_drive(service, nume_fisier_local, nume_drive, "text/xml")
 
-        if os.path.exists(nume_fisier_local):
-            os.remove(nume_fisier_local)
+            if os.path.exists(nume_fisier_local):
+                os.remove(nume_fisier_local)
 
     except Exception as e:
         print(f"❌ Excepție la interogare SOAP: {e}", flush=True)
@@ -194,15 +213,13 @@ def main():
     print("============================================================", flush=True)
 
     service = get_drive_service()
+    session = creeaza_sesiune_browser()
 
-    test_metoda_json_api(service, AN_TEST, PAGINA_TEST)
-    test_metoda_soap_xml(service, AN_TEST, PAGINA_TEST)
+    test_metoda_json_api(service, session, AN_TEST, PAGINA_TEST)
+    test_metoda_soap_xml(service, session, AN_TEST, PAGINA_TEST)
 
     print("\n============================================================", flush=True)
-    print("🏁 TEST FINALIZAT CU SUCCES!", flush=True)
-    print("Verifică fișierele create în Folderul de Indecși din Google Drive:")
-    print(" - TEST_JSON_brut_legislatie_1990_pag1.xml")
-    print(" - TEST_SOAP_brut_legislatie_1990_pag1.xml")
+    print("🏁 TEST FINALIZAT!", flush=True)
     print("============================================================", flush=True)
 
 
