@@ -34,15 +34,15 @@ RESET = "\033[0m"
 # CONFIGURĂRI DINAMICE ȘI FOLDERE FALLBACK
 # ==========================================
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
-FOLDER_TEMP_INDEXES_ID = os.getenv(
-    "TEMPORARY_XML_INDEXES", "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
-).strip()
 
-DRIVE_FOLDER_RAW = os.getenv("DRIVE_FOLDER_XML", "").strip()
+DEFAULT_TEMP_FOLDER_ID = "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
+FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES", "").replace('"', '').replace("'", "").strip() or DEFAULT_TEMP_FOLDER_ID
+
+DRIVE_FOLDER_RAW = os.getenv("DRIVE_FOLDER_XML", "").replace('"', '').replace("'", "").replace("\n", "").replace("\r", "").strip()
 
 # Preluăm toate ID-urile de foldere din mediu sau folosim lista default de rezervă
 FOLDERE_DESTINATIE = [
-    f.strip() for f in DRIVE_FOLDER_RAW.replace("\n", "").split(",") if f.strip()
+    f.strip() for f in DRIVE_FOLDER_RAW.split(",") if f.strip()
 ] or [
     "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m",
     "1G7CkaoivnTR0O8mZceB0143Q6956C1-1",
@@ -112,7 +112,7 @@ def get_already_downloaded_pages(service, target_year):
 def upload_to_drive(service, filename, content_bytes):
     """
     Încarcă fișierul XML în Drive.
-    Dacă folderul curent atinge limita de 500k fișiere (403), comută automat la următorul folder.
+    Dacă folderul curent atinge limita de 500k fișiere (403), comută automat la următorul folder din Shared Drive.
     """
     global CURRENT_FOLDER_INDEX
 
@@ -143,9 +143,7 @@ def upload_to_drive(service, filename, content_bytes):
             return file_id
 
         except HttpError as err:
-            if err.resp.status == 403 and "teamDriveFileLimitExceeded" in str(
-                err
-            ):
+            if err.resp.status == 403 and "teamDriveFileLimitExceeded" in str(err):
                 print(
                     f"{GALBEN}⚠️ Shared Drive-ul curent ({target_folder_id[:8]}...) a atins limita de 500k fișiere!{RESET}"
                 )
@@ -176,7 +174,7 @@ def upload_to_drive(service, filename, content_bytes):
 
 
 def salveaza_micro_index_temp(service, flag_updates):
-    """Creează și urcă un micro-index temporar în Drive cu fișierele adăugate recent."""
+    """Creează și urcă un micro-index temporar în Shared Drive cu fișierele adăugate recent."""
     if not flag_updates:
         return True
 
@@ -194,6 +192,7 @@ def salveaza_micro_index_temp(service, flag_updates):
         json_bytes = json.dumps(
             continut_payload, ensure_ascii=False, indent=2
         ).encode("utf-8")
+        
         file_metadata = {
             "name": nume_micro_index,
             "parents": [FOLDER_TEMP_INDEXES_ID],
@@ -208,7 +207,7 @@ def salveaza_micro_index_temp(service, flag_updates):
                 body=file_metadata,
                 media_body=media,
                 fields="id",
-                supportsAllDrives=True,
+                supportsAllDrives=True,  # Critic pentru Shared Drive
             )
             .execute()
         )
@@ -219,7 +218,7 @@ def salveaza_micro_index_temp(service, flag_updates):
         return True
     except Exception as e:
         print(
-            f"{ROSU}⚠️ Eroare la salvarea micro-indexului temporar: {e}{RESET}",
+            f"{ROSU}⚠️ Eroare la salvarea micro-indexului temporar pe Shared Drive: {e}{RESET}",
             flush=True,
         )
         return False
@@ -422,7 +421,7 @@ def download_year(drive_service, composite_type_name, target_year):
 
         time.sleep(1.5)
 
-    # Flush final la ieșire din buclă
+    # Flush final la ieșire din buclă pentru fișierele rămase
     if mutații_micro_index:
         salveaza_micro_index_temp(drive_service, mutații_micro_index)
         mutații_micro_index.clear()
