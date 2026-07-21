@@ -37,9 +37,10 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 from zeep import Client, Transport
+from zeep.helpers import serialize_object
 
 # ==============================================================================
-# CONFIGURARE SERVICIU WSDL ORIGINAL (JUST.RO)
+# CONFIGURARE SERVICIU WSDL (JUST.RO) - URL OFICIAL FREEWEBSERVICE
 # ==============================================================================
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
@@ -206,27 +207,6 @@ def genereaza_si_salveaza_micro_index(service, log_mutații):
             os.remove(cale_temp)
 
 
-def executa_get_legi_paginat_raw(client, token, an_tinta, pagina_curenta):
-    """
-    Execută apelul SOAP exact pentru XML-ul brut de legislație paginată.
-    Inspecționează dinamic metodele disponibile ale serviciului pentru compatibilitate maximă.
-    """
-    service = client.service
-
-    # Inspecție sigură a numelui metodei SOAP
-    metoda = getattr(service, "GetLegiPaginat", None) or getattr(service, "GetLegiPaginatText", None)
-
-    if metoda:
-        return metoda(token=token, an=an_tinta, pagina=pagina_curenta)
-
-    # Fallback prin apel de operatie direct pe port-ul WSDL (dacă Zeep nu a expus direct metoda pe service)
-    try:
-        op = client.bind('FreeWebService', 'BasicHttpBinding_IFreeWebService')
-        return op.GetLegiPaginat(token=token, an=an_tinta, pagina=pagina_curenta)
-    except Exception as ex:
-        raise AttributeError(f"Nu s-a putut apela GetLegiPaginat pe serviciul WSDL Just.ro: {ex}")
-
-
 def proceseaza_an(service, client, an_tinta, foldere_drive):
     """Descarcă paginile din API-ul Just.ro pentru anul specificat și le salvează în Drive."""
     print("=" * 70, flush=True)
@@ -244,9 +224,9 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
         if m:
             pagini_existente.add(int(m.group(1)))
 
-    max_pag_existenta = max(pagini_existente) if pagini_existente else 0
+    max_pag_existenta = max(pagini_existente) if pagini_existente else -1
     print(
-        f"📦 {len(pagini_existente)} pagini VALIDE în index pentru {an_tinta}. (Ultima scanată: {max_pag_existenta})",
+        f"📦 {len(pagini_existente)} pagini VALIDE în index pentru {an_tinta}. (Ultima scanată: {max_pag_existenta if max_pag_existenta >= 0 else 'Niciuna'})",
         flush=True,
     )
 
@@ -258,6 +238,7 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
         print(f"❌ Eroare la obținerea token-ului WSDL: {e}", flush=True)
         return
 
+    # Dacă anul nu exista în index, începem de la 0
     pagina_curenta = max_pag_existenta + 1
     folder_idx = 0
     folder_curent_id = foldere_drive[folder_idx]
@@ -272,20 +253,48 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
 
         for incercare in range(1, 6):
             try:
-                # PreLuare XML brut exact ca în descărcările originale
-                raspuns_xml = executa_get_legi_paginat_raw(client, token, an_tinta, pagina_curenta)
+                # Construim apelul CĂUTARE oficial conform WSDL
+                search_model = {
+                    "NumarPagina": pagina_curenta,
+                    "RezultatePagina": 50,
+                    "SearchAn": an_tinta,
+                    "SearchNumar": None,
+                    "SearchText": None,
+                    "SearchTitlu": None,
+                }
 
-                # Când se termină paginile pentru anul respectiv, serverul returnează răspuns gol / None / sub 200 octeți
-                str_xml = str(raspuns_xml) if raspuns_xml else ""
-                if not str_xml or len(str_xml.encode("utf-8")) < 200:
+                raspuns_soap = client.service.Search(
+                    SearchModel=search_model,
+                    tokenKey=token
+                )
+
+                dict_res = serialize_object(raspuns_soap) if raspuns_soap else {}
+                legi_gasite = None
+
+                if isinstance(dict_res, dict):
+                    legi_gasite = dict_res.get("Legi") or dict_res.get("SearchResult", {}).get("Legi")
+
+                # Tratare caz an nou unde pagina 0 poate fi goală și încercăm pagina 1
+                if not legi_gasite and pagina_curenta == 0:
+                    print("   ℹ️ Pagina 0 e goală. Încercăm fallback pe Pagina 1...", flush=True)
+                    search_model["NumarPagina"] = 1
+                    raspuns_soap = client.service.Search(SearchModel=search_model, tokenKey=token)
+                    dict_res = serialize_object(raspuns_soap) if raspuns_soap else {}
+                    if isinstance(dict_res, dict):
+                        legi_gasite = dict_res.get("Legi") or dict_res.get("SearchResult", {}).get("Legi")
+                    if legi_gasite:
+                        pagina_curenta = 1
+
+                if not legi_gasite:
                     print(
-                        f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta}.",
+                        f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta} (Lista Legi este goală).",
                         flush=True,
                     )
                     succes_pagina = False
                     break
 
-                bytes_xml = str_xml.encode("utf-8")
+                str_data = json.dumps(dict_res, ensure_ascii=False, indent=2)
+                bytes_xml = str_data.encode("utf-8")
 
                 fid = salveaza_sau_actualizeaza_in_drive(
                     service, nume_xml, bytes_xml, folder_curent_id
