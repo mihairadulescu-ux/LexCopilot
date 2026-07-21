@@ -1,12 +1,32 @@
 import os
-import re
 import sys
+import time
 import json
 import requests
 from pathlib import Path
 
 # ==============================================================================
-# CONFIGURARE TEST
+# CONFIGURARE CĂI DE IMPORT
+# ==============================================================================
+DIRECTOR_CURENT = Path(__file__).resolve().parent
+RADACINA_PROIECT = DIRECTOR_CURENT.parent
+
+if str(RADACINA_PROIECT) not in sys.path:
+    sys.path.insert(0, str(RADACINA_PROIECT))
+if str(DIRECTOR_CURENT) not in sys.path:
+    sys.path.insert(0, str(DIRECTOR_CURENT))
+
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+
+from drive_config import (
+    FOLDER_TEMP_INDEXES_ID,
+    get_file_params,
+)
+
+# ==============================================================================
+# CONFIGURARE TEST LEGISLATE.JUST.RO
 # ==============================================================================
 AN_TEST = 1990
 PAGINA_TEST = 1
@@ -15,16 +35,77 @@ REZULTATE_PER_PAGINA = 10
 URL_JUST_API = "https://legislatie.just.ro/api/Search/GetLegi"
 URL_SOAP_WSDL = "http://legislatie.just.ro/api/CautareService.svc"
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json, text/xml, */*",
-    "Content-Type": "application/json; charset=utf-8"
-}
 
-def test_metoda_json_api(an, pagina):
-    """Metoda 1: Interogare prin API-ul JSON/REST wrapper de la Just.ro."""
-    print(f"\n🔍 [TEST 1] Încercare interogare API JSON pentru An: {an}, Pagina: {pagina}...")
+# ==============================================================================
+# AUTENTIFICARE GOOGLE DRIVE API
+# ==============================================================================
+def get_drive_service():
+    """Autentificare în Google Drive API folosind GOOGLE_SERVICE_ACCOUNT_JSON."""
+    creds_json = (
+        os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+        or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
+        or os.getenv("SERVICE_ACCOUNT_JSON")
+    )
+
+    if creds_json:
+        try:
+            info = json.loads(creds_json)
+            creds = service_account.Credentials.from_service_account_info(
+                info, scopes=["https://www.googleapis.com/auth/drive"]
+            )
+            return build("drive", "v3", credentials=creds)
+        except Exception as e:
+            print(f"❌ Eroare la citirea secretului JSON: {e}", flush=True)
+            sys.exit(1)
+
+    cale_local = RADACINA_PROIECT / "service_account.json"
+    if cale_local.exists():
+        try:
+            creds = service_account.Credentials.from_service_account_file(
+                str(cale_local), scopes=["https://www.googleapis.com/auth/drive"]
+            )
+            return build("drive", "v3", credentials=creds)
+        except Exception as e:
+            print(f"❌ Eroare la citirea fișierului local service_account.json: {e}", flush=True)
+
+    print("❌ Nu s-a găsit secretul GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
+    sys.exit(1)
+
+
+def incarca_fisier_in_drive(service, cale_locala, nume_fisier_drive, mime_type="text/xml"):
+    """Încarcă fișierul direct în folderul de indecși din Google Drive."""
+    try:
+        media = MediaFileUpload(cale_locala, mimetype=mime_type)
+        file_metadata = {
+            "name": nume_fisier_drive,
+            "parents": [FOLDER_TEMP_INDEXES_ID]
+        }
+        
+        params = get_file_params()
+        params["body"] = file_metadata
+        params["media_body"] = media
+        
+        res_file = service.files().create(**params).execute()
+        file_id = res_file.get("id")
+        print(f"💾 Salvat cu succes în Folderul de Indecși Google Drive: {nume_fisier_drive} (ID: {file_id})", flush=True)
+        return file_id
+    except Exception as e:
+        print(f"❌ Eroare la încărcarea în Google Drive: {e}", flush=True)
+        return None
+
+
+# ==============================================================================
+# METODA 1: INTEROGARE REST / JSON WRAPPER
+# ==============================================================================
+def test_metoda_json_api(service, an, pagina):
+    print(f"\n🔍 [TEST 1 - REST/JSON] Încercare interogare API Just.ro pentru An: {an}, Pagina: {pagina}...", flush=True)
     
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json, text/xml, */*",
+        "Content-Type": "application/json; charset=utf-8"
+    }
+
     payload = {
         "SearchAn": str(an),
         "NumarPagina": pagina,
@@ -32,47 +113,39 @@ def test_metoda_json_api(an, pagina):
     }
 
     try:
-        response = requests.post(URL_JUST_API, json=payload, headers=HEADERS, timeout=15)
-        print(f"📡 Status HTTP: {response.status_code}")
-        print(f"📊 Dimensiune răspuns: {len(response.content):,} octeți")
+        response = requests.post(URL_JUST_API, json=payload, headers=headers, timeout=20)
+        print(f"📡 Status HTTP: {response.status_code}", flush=True)
+        print(f"📊 Dimensiune răspuns: {len(response.content):,} octeți", flush=True)
         
-        if response.status_code == 200:
-            text_raw = response.text
-            print("\n--- PRIMELE 500 CARACTERE DIN RĂSPUNS ---")
-            print(text_raw[:500])
-            print("------------------------------------------\n")
+        text_raw = response.text or ""
+        print("\n--- PRIMELE 500 CARACTERE DIN RĂSPUNS JSON/REST ---", flush=True)
+        print(text_raw[:500], flush=True)
+        print("--------------------------------------------------\n", flush=True)
 
-            # Salvare fișier de probă
-            nume_fisier = f"test_json_{an}_pag{pagina}.xml"
-            with open(nume_fisier, "w", encoding="utf-8") as f:
-                f.write(text_raw)
-            print(f"💾 Fișier salvat local ca: {nume_fisier}")
+        nume_fisier_local = f"TEST_JSON_{an}_pag{pagina}.xml"
+        nume_drive = f"TEST_JSON_brut_legislatie_{an}_pag{pagina}.xml"
 
-            # Diagnostic structură
-            if "<Legi>" in text_raw or "<SearchModel>" in text_raw:
-                print("✅ STRUCTURĂ DETECTATĂ: XML / SOAP Valid!")
-            elif '"Legi":' in text_raw or '"SearchModel":' in text_raw:
-                print("✅ STRUCTURĂ DETECTATĂ: JSON Valid!")
-            else:
-                print("⚠️ ATENȚIE: Răspunsul nu conține blocurile standard Așteptate (<Legi> / SearchModel)!")
-            
-            return True
-        else:
-            print(f"❌ Eroare la interogare JSON: Status {response.status_code}")
-            return False
+        with open(nume_fisier_local, "w", encoding="utf-8") as f:
+            f.write(text_raw)
+
+        incarca_fisier_in_drive(service, nume_fisier_local, nume_drive, "text/xml")
+
+        if os.path.exists(nume_fisier_local):
+            os.remove(nume_fisier_local)
 
     except Exception as e:
-        print(f"❌ Excepție la interogare JSON: {e}")
-        return False
+        print(f"❌ Excepție la interogare JSON: {e}", flush=True)
 
 
-def test_metoda_soap_xml(an, pagina):
-    """Metoda 2: Interogare directă SOAP XML (pentru a genera XML pur)."""
-    print(f"\n🔍 [TEST 2] Încercare interogare SOAP Envelope XML pentru An: {an}, Pagina: {pagina}...")
+# ==============================================================================
+# METODA 2: INTEROGARE DIRECTĂ SOAP ENVELOPE XML
+# ==============================================================================
+def test_metoda_soap_xml(service, an, pagina):
+    print(f"\n🔍 [TEST 2 - SOAP XML] Încercare interogare SOAP WSDL pentru An: {an}, Pagina: {pagina}...", flush=True)
 
     soap_headers = {
         "Content-Type": "text/xml; charset=utf-8",
-        "SOAPAction": "http://tempuri.org/ICautareService/GetLegi" # sau actiunea specifica WSDL
+        "SOAPAction": "http://tempuri.org/ICautareService/GetLegi"
     }
 
     soap_payload = f"""<?xml version="1.0" encoding="utf-8"?>
@@ -88,41 +161,50 @@ def test_metoda_soap_xml(an, pagina):
 </soapenv:Envelope>"""
 
     try:
-        response = requests.post(URL_SOAP_WSDL, data=soap_payload, headers=soap_headers, timeout=15)
-        print(f"📡 Status HTTP: {response.status_code}")
-        print(f"📊 Dimensiune răspuns: {len(response.content):,} octeți")
+        response = requests.post(URL_SOAP_WSDL, data=soap_payload, headers=soap_headers, timeout=20)
+        print(f"📡 Status HTTP: {response.status_code}", flush=True)
+        print(f"📊 Dimensiune răspuns: {len(response.content):,} octeți", flush=True)
 
-        if response.status_code == 200:
-            text_raw = response.text
-            print("\n--- PRIMELE 500 CARACTERE DIN RĂSPUNS SOAP ---")
-            print(text_raw[:500])
-            print("----------------------------------------------\n")
+        text_raw = response.text or ""
+        print("\n--- PRIMELE 500 CARACTERE DIN RĂSPUNS SOAP ---", flush=True)
+        print(text_raw[:500], flush=True)
+        print("----------------------------------------------\n", flush=True)
 
-            nume_fisier = f"test_soap_{an}_pag{pagina}.xml"
-            with open(nume_fisier, "w", encoding="utf-8") as f:
-                f.write(text_raw)
-            print(f"💾 Fișier salvat local ca: {nume_fisier}")
-            return True
-        else:
-            print(f"❌ Eroare la interogare SOAP directă: Status {response.status_code}")
-            return False
+        nume_fisier_local = f"TEST_SOAP_{an}_pag{pagina}.xml"
+        nume_drive = f"TEST_SOAP_brut_legislatie_{an}_pag{pagina}.xml"
+
+        with open(nume_fisier_local, "w", encoding="utf-8") as f:
+            f.write(text_raw)
+
+        incarca_fisier_in_drive(service, nume_fisier_local, nume_drive, "text/xml")
+
+        if os.path.exists(nume_fisier_local):
+            os.remove(nume_fisier_local)
 
     except Exception as e:
-        print(f"❌ Excepție la interogare SOAP: {e}")
-        return False
+        print(f"❌ Excepție la interogare SOAP: {e}", flush=True)
+
+
+# ==============================================================================
+# MAIN ENTRY POINT
+# ==============================================================================
+def main():
+    print("============================================================", flush=True)
+    print("🚀 PORNIRE TEST INTEROGARE JUST.RO (GITHUB ACTIONS execution)", flush=True)
+    print("============================================================", flush=True)
+
+    service = get_drive_service()
+
+    test_metoda_json_api(service, AN_TEST, PAGINA_TEST)
+    test_metoda_soap_xml(service, AN_TEST, PAGINA_TEST)
+
+    print("\n============================================================", flush=True)
+    print("🏁 TEST FINALIZAT CU SUCCES!", flush=True)
+    print("Verifică fișierele create în Folderul de Indecși din Google Drive:")
+    print(" - TEST_JSON_brut_legislatie_1990_pag1.xml")
+    print(" - TEST_SOAP_brut_legislatie_1990_pag1.xml")
+    print("============================================================", flush=True)
 
 
 if __name__ == "__main__":
-    print("============================================================")
-    print("🚀 PORNIRE TEST PARSARE / INTEROGARE API LEGISLATE.JUST.RO")
-    print("============================================================")
-
-    succes_json = test_metoda_json_api(AN_TEST, PAGINA_TEST)
-    succes_soap = test_metoda_soap_xml(AN_TEST, PAGINA_TEST)
-
-    print("\n============================================================")
-    print("🏁 TEST FINALIZAT!")
-    print("Verifică fișierele create local în directorul curent:")
-    print(" - test_json_1990_pag1.xml")
-    print(" - test_soap_1990_pag1.xml")
-    print("============================================================")
+    main()
