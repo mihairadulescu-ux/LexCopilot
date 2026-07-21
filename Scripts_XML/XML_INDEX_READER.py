@@ -35,22 +35,61 @@ FOLDERE_XML_IDS = [
 ]
 
 
+def cauta_id_master_in_folder(service):
+    """Caută dinamic fișierul 'index_xml.json' în folderul de metadate dacă ID-ul din mediu dă 404."""
+    for folder_id in [FOLDER_METADATA_ID, FOLDER_TEMP_INDEXES_ID]:
+        if not folder_id:
+            continue
+        try:
+            query = f"'{folder_id}' in parents and name = 'index_xml.json' and trashed = false"
+            res = (
+                service.files()
+                .list(
+                    q=query,
+                    spaces="drive",
+                    fields="files(id, name)",
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                )
+                .execute()
+            )
+            files = res.get("files", [])
+            if files:
+                found_id = files[0]["id"]
+                print(
+                    f"🔍 [Index Reader] Localizat dinamic 'index_xml.json' în folderul {folder_id[:8]}... (ID Nou: {found_id[:8]}...)",
+                    flush=True,
+                )
+                return found_id
+        except Exception as e:
+            print(f"⚠️ [Index Reader] Căutare dinamică eșuată pe {folder_id[:8]}: {e}", flush=True)
+    return None
+
+
 def descarca_index_master(service):
-    """Descărcare directă a fișierului Main Index din Shared Drive."""
+    """Descărcare robustă a fișierului Main Index din Shared Drive cu fallback automat."""
     target_id = INDEX_FILE_ID
 
     if not target_id:
         print(
-            "ℹ️ [Index Reader] Variabila 'XML_STORAGE_INDEX' nu este furnizată. Se continuă pe micro-indecși.",
+            "ℹ️ [Index Reader] Variabila 'XML_STORAGE_INDEX' nu este setată. Încercare localizare dinamică...",
             flush=True,
         )
+        target_id = cauta_id_master_in_folder(service)
+
+    if not target_id:
+        print("ℹ️ [Index Reader] Master Index indisponibil. Se continuă pe micro-indecși.", flush=True)
         return {"last_updated": None, "total_fisiere": 0, "fisiere": {}}
 
     try:
-        # Pasul 1: Confirmare metadate pentru Shared Drive
+        # Verificare metadate cu suport complet pentru Shared Drives
         meta = (
             service.files()
-            .get(fileId=target_id, fields="id, name, size", supportsAllDrives=True)
+            .get(
+                fileId=target_id,
+                fields="id, name, size",
+                supportsAllDrives=True,
+            )
             .execute()
         )
 
@@ -60,7 +99,6 @@ def descarca_index_master(service):
             flush=True,
         )
 
-        # Pasul 2: Descărcare conținut media
         request = service.files().get_media(
             fileId=target_id, supportsAllDrives=True
         )
@@ -81,9 +119,42 @@ def descarca_index_master(service):
             )
             return data
 
+    except HttpError as err:
+        if err.resp.status == 404:
+            print(
+                f"⚠️ [Index Reader] ID-ul {target_id[:8]}... a returnat 404. Căutăm dinamic fișierul pe Drive...",
+                flush=True,
+            )
+            dynamic_id = cauta_id_master_in_folder(service)
+            if dynamic_id and dynamic_id != target_id:
+                try:
+                    request = service.files().get_media(
+                        fileId=dynamic_id, supportsAllDrives=True
+                    )
+                    fh = io.FileIO(CALE_INDEX_LOCAL, "wb")
+                    downloader = MediaIoBaseDownload(fh, request)
+                    gata = False
+                    while not gata:
+                        _, gata = downloader.next_chunk()
+
+                    with open(CALE_INDEX_LOCAL, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        print(
+                            f"✅ [Index Reader] Master Index descărcat prin căutare dinamică! ({len(data.get('fisiere', {}))} fișiere)",
+                            flush=True,
+                        )
+                        return data
+                except Exception as ex:
+                    print(f"⚠️ [Index Reader] Descărcare fallback eșuată: {ex}", flush=True)
+
+        print(
+            f"⚠️ [Index Reader] Master Index indisponibil pe Drive (ID: {target_id}): {err}",
+            flush=True,
+        )
+        return {"last_updated": None, "total_fisiere": 0, "fisiere": {}}
     except Exception as e:
         print(
-            f"⚠️ [Index Reader] Master Index indisponibil pe Drive (ID: {target_id}): {e}",
+            f"⚠️ [Index Reader] Nu s-a putut descărca Master Index: {e}",
             flush=True,
         )
         return {"last_updated": None, "total_fisiere": 0, "fisiere": {}}
