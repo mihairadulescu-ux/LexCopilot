@@ -2,8 +2,13 @@ import io
 import json
 import re
 import sys
+from pathlib import Path
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
+
+# Rezolvare automată căi de import
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+sys.path.append(str(Path(__file__).resolve().parent))
 
 from drive_config import (
     INDEX_FILE_ID,
