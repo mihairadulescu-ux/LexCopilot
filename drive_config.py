@@ -1,3 +1,52 @@
+"""
+================================================================================
+          MODUL CENTRALIZAT DE CONFIGURARE & UTILITARE GOOGLE DRIVE
+================================================================================
+
+INSTRUCȚIUNI DE UTILIZARE:
+--------------------------
+1. Plasare fișier:
+   - Salvați acest fișier ca 'drive_config.py' direct în RĂDĂCINA repository-ului 
+     (LexCopilot/drive_config.py).
+
+2. Importare în orice script (XML, PDF etc.):
+   from drive_config import (
+       INDEX_FILE_ID,
+       FOLDER_TEMP_INDEXES_ID,
+       FOLDERE_XML_IDS,
+       FOLDERE_PDF_IDS,
+       get_file_params,
+       get_list_params,
+   )
+
+3. Utilizarea funcțiilor helper pentru operațiuni Google Drive API v3:
+
+   A) Pentru interogări de metadate / verificare fișier (service.files().get):
+      meta = service.files().get(**get_file_params(
+          fileId=id_fisier, 
+          fields="id, name, size"
+      )).execute()
+
+   B) Pentru liste / căutări în foldere de Shared Drive (service.files().list):
+      rezultat = service.files().list(**get_list_params(
+          q="name = 'test.xml' and trashed = false", 
+          pageSize=100
+      )).execute()
+
+   C) Pentru descărcare de conținut media (service.files().get_media):
+      bytes_continut = service.files().get_media(**get_file_params(
+          fileId=id_fisier, 
+          acknowledgeAbuse=True
+      )).execute()
+
+AVANTAJE:
+---------
+- Elimină automat ghilimelele, spațiile parazite și newlines din variabilele GitHub.
+- Injectează automat flag-urile legale obligatorii pentru Shared Drives 
+  (supportsAllDrives / includeItemsFromAllDrives) prevenind erorile 404 sau de sintaxă.
+================================================================================
+"""
+
 import os
 
 # ==============================================================================
@@ -48,26 +97,26 @@ FOLDERE_PDF_IDS = [
 # ==============================================================================
 # 3. HELPER-E OBLIGATORII PENTRU SHARED GOOGLE DRIVES (API v3)
 # ==============================================================================
-def get_drive_params(**extra_params):
+def get_file_params(**extra_params):
     """
-    Injectează AUTOMAT parametrii obligatorii pentru căutare / metadate pe Shared Drives (.get() și .list()).
+    Injectează AUTOMAT parametrii legali obligatorii pentru operarea pe un fișier specific
+    în Shared Drives via service.files().get() sau service.files().get_media().
     """
     base_params = {
         "supportsAllDrives": True,
-        "includeItemsFromAllDrives": True,
     }
     base_params.update(extra_params)
     return base_params
 
 
-def get_media_params(**extra_params):
+def get_list_params(**extra_params):
     """
-    Injectează AUTOMAT parametrii obligatorii pentru descărcare de conținut pe Shared Drives (.get_media()).
+    Injectează AUTOMAT parametrii legali obligatorii pentru căutare / listare de foldere
+    în Shared Drives via service.files().list().
     """
     base_params = {
         "supportsAllDrives": True,
         "includeItemsFromAllDrives": True,
-        "acknowledgeAbuse": True,
     }
     base_params.update(extra_params)
     return base_params
