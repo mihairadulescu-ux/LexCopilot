@@ -1,79 +1,42 @@
 import io
 import json
-import os
 import re
 import sys
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
+from drive_config import (
+    INDEX_FILE_ID,
+    FOLDER_TEMP_INDEXES_ID,
+    FOLDERE_XML_IDS,
+    get_file_params,
+    get_list_params,
+)
+
 CALE_INDEX_LOCAL = "index_xml.json"
-
-DEFAULT_TEMP_FOLDER_ID = "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
-
-# ==========================================
-# PRELUARE VARIABILE DIN MEDIU
-# ==========================================
-INDEX_FILE_ID = (
-    os.getenv("XML_STORAGE_INDEX", "")
-    .replace('"', "")
-    .replace("'", "")
-    .replace("\n", "")
-    .replace("\r", "")
-    .strip()
-)
-
-FOLDER_TEMP_INDEXES_ID = (
-    os.getenv("TEMPORARY_XML_INDEXES", "")
-    .replace('"', "")
-    .replace("'", "")
-    .strip()
-    or DEFAULT_TEMP_FOLDER_ID
-)
-
-FOLDERE_XML_RAW = os.getenv("DRIVE_FOLDER_XML", "").strip()
-FOLDERE_XML_IDS = [
-    fid.strip()
-    for fid in FOLDERE_XML_RAW.replace('"', "")
-    .replace("'", "")
-    .replace("\n", "")
-    .replace("\r", "")
-    .split(",")
-    if fid.strip()
-] or [
-    "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m",
-    "1G7CkaoivnTR0O8mZceB0143Q6956C1-1",
-    "1T2N_v81889Y7tyHUbrTSLR073YC7mGk5",
-    "1NWe4JKhhaQ4HxFGs7FfhxnlemE0ZM2E2",
-]
 
 
 def verifica_si_descarca_index_master(service):
-    """
-    PASUL 0: Verificare strictă existență Master Index.
-    Adaugă ambele flag-uri obligatorii pentru Shared Drives:
-    supportsAllDrives=True ȘI includeItemsFromAllDrives=True
-    """
-    params_get = {
-        "fileId": INDEX_FILE_ID,
-        "fields": "id, name, size, mimeType, parents, trashed",
-        "supportsAllDrives": True,
-        "includeItemsFromAllDrives": True,
-    }
-
-    print("=" * 70, flush=True)
-    print("🔍 [TEST DIAGNOSTIC] Verificare Master Index pe Google Drive...", flush=True)
-    print(f"   ├─ ID Fișier extras: '{INDEX_FILE_ID}'", flush=True)
-    print(f"   └─ Parametri apel API: {params_get}", flush=True)
-
+    """PASUL 0 & 1: Verificare strictă și descărcare Master Index."""
     if not INDEX_FILE_ID:
         print("❌ [ABORT] Variabila 'XML_STORAGE_INDEX' este GOLĂ sau NESETATĂ!", flush=True)
         sys.exit(1)
 
-    # 1. TEST VERIFICARE CU FLAG-URILE COMPLETE DE SHARED DRIVE
+    params_get = get_file_params(
+        fileId=INDEX_FILE_ID,
+        fields="id, name, size, mimeType, parents, trashed"
+    )
+
+    print("=" * 70, flush=True)
+    print("🔍 [SHARED DRIVE DIAGNOSTIC] Verificare Master Index...", flush=True)
+    print(f"   ├─ ID Fișier extras: '{INDEX_FILE_ID}'", flush=True)
+    print(f"   └─ Parametri apel API: {params_get}", flush=True)
+
+    # 1. VERIFICARE METADATE
     try:
         meta = service.files().get(**params_get).execute()
         size_mb = round(int(meta.get("size", 0)) / (1024 * 1024), 2)
-        print(f"✅ [TEST REUSIT] Fișier identificat pe Drive!", flush=True)
+        print(f"✅ [TEST REUSIT] Fișier identificat pe Shared Drive!", flush=True)
         print(f"   ├─ Nume: {meta.get('name')}", flush=True)
         print(f"   ├─ Dimensiune: {size_mb} MB", flush=True)
         print(f"   ├─ În Trash/Coș: {meta.get('trashed', False)}", flush=True)
@@ -91,16 +54,12 @@ def verifica_si_descarca_index_master(service):
         print(f"\n❌ [TEST EȘUAT - ABORT] Eroare neașteptată la interogare: {ex}", flush=True)
         sys.exit(1)
 
-    # 2. DESCĂRCARE FIZICĂ
+    # 2. DESCĂRCARE FIZICĂ MEDIA
     print(f"📥 Descărcare conținut Master Index ({CALE_INDEX_LOCAL})...", flush=True)
     try:
         continut_bytes = (
             service.files()
-            .get_media(
-                fileId=INDEX_FILE_ID,
-                supportsAllDrives=True,
-                acknowledgeAbuse=True
-            )
+            .get_media(**get_file_params(fileId=INDEX_FILE_ID, acknowledgeAbuse=True))
             .execute()
         )
 
@@ -126,12 +85,7 @@ def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
     try:
         resp = (
             service.files()
-            .list(
-                q=query,
-                fields="files(id, name, createdTime)",
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True,
-            )
+            .list(**get_list_params(q=query, fields="files(id, name, createdTime)"))
             .execute()
         )
 
@@ -148,7 +102,7 @@ def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
             try:
                 content_bytes = (
                     service.files()
-                    .get_media(fileId=file_id, supportsAllDrives=True, acknowledgeAbuse=True)
+                    .get_media(**get_file_params(fileId=file_id, acknowledgeAbuse=True))
                     .execute()
                 )
                 data_log = json.loads(content_bytes.decode("utf-8"))
@@ -180,21 +134,13 @@ def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
 
 
 def obtine_index_virtual(service):
-    """
-    Construiește starea unificată:
-    1. Verificare + Descărcare Master Index (Aborțează dacă nu există)
-    2. Aplicare Micro-Indecși
-    3. Verificare Delta
-    """
-    # Pasul 0 & 1: Verificare strictă și încărcare Master Index
+    """Construiește starea unificată a bazei de date."""
     data_master = verifica_si_descarca_index_master(service)
     fisiere_map = data_master.get("fisiere", {})
     last_updated = data_master.get("last_updated")
 
-    # Pasul 2: Aplicare Micro-Indecși
     fisiere_map = aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map)
 
-    # Pasul 3: Delta Scan pe Shared Drives
     pattern_nume = re.compile(r"brut_legislatie_(\d+)_pag(\d+)\.xml")
     noutati_gasite = 0
 
@@ -207,15 +153,13 @@ def obtine_index_virtual(service):
                 while True:
                     response = (
                         service.files()
-                        .list(
+                        .list(**get_list_params(
                             q=query,
                             spaces="drive",
                             fields="nextPageToken, files(id, name, description)",
                             pageSize=1000,
                             pageToken=page_token,
-                            supportsAllDrives=True,
-                            includeItemsFromAllDrives=True,
-                        )
+                        ))
                         .execute()
                     )
 
