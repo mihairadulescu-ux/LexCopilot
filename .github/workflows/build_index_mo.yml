@@ -13,11 +13,13 @@ jobs:
     steps:
       - name: Checkout cod din repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Configurare mediu Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.11'
 
       - name: Instalare dependențe
         run: |
@@ -28,4 +30,4 @@ jobs:
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: |
-          python Scripts_PDF/build_index_mo.py
+          python -m Scripts_PDF.build_index_mo
