@@ -1,484 +1,271 @@
-import json
 import os
-import random
-import re
 import sys
 import time
+import json
+import re
+from pathlib import Path
+
+# ==============================================================================
+# CONFIGURARE CAI DE IMPORT (PENTRU RULARE DIN GITHUB ACTIONS SAU LOCAL)
+# ==============================================================================
+DIRECTOR_CURENT = Path(__file__).resolve().parent
+RADACINA_PROIECT = DIRECTOR_CURENT.parent
+
+if str(RADACINA_PROIECT) not in sys.path:
+    sys.path.insert(0, str(RADACINA_PROIECT))
+if str(DIRECTOR_CURENT) not in sys.path:
+    sys.path.insert(0, str(DIRECTOR_CURENT))
+
+# Importăm configurația centralizată și cititorul de index
+from drive_config import (
+    FOLDERE_XML_IDS,
+    get_file_params,
+    get_list_params,
+)
+
+try:
+    import XML_INDEX_READER
+except ImportError:
+    from Scripts_XML import XML_INDEX_READER
+
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaInMemoryUpload
-from lxml import etree
+from googleapiclient.http import MediaFileUpload
 from zeep import Client
-from zeep.plugins import HistoryPlugin
-from zeep.transports import Transport
 
-# Importăm cititorul de index virtual unificat
-try:
-    from XML_INDEX_READER import obtine_index_virtual
-except ImportError:
-    print(
-        "⚠️ Nu s-a putut importa 'XML_INDEX_READER.py'. Asigură-te că fișierul există în același director."
-    )
-    sys.exit(1)
+# ==============================================================================
+# CONFIGURARE SERVICIU WSDL (JUST.RO)
+# ==============================================================================
+WSDL_URL = "http://legislatie.just.ro/api/serviciu.wsdl"
 
-# ==========================================
-# CULORI PENTRU CONSOLĂ
-# ==========================================
-VERDE = "\033[92m"
-GALBEN = "\033[93m"
-ROSU = "\033[91m"
-RESET = "\033[0m"
+def autenifica_google_drive():
+    """Autentificare în Google Drive API folosind Service Account din GitHub Secrets."""
+    creds_json = os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
+    if not creds_json:
+        print("❌ [Cloud Mode] Secretul GDRIVE_SERVICE_ACCOUNT_KEY nu a fost găsit!", flush=True)
+        sys.exit(1)
 
-# ==========================================
-# CONFIGURĂRI DINAMICE ȘI FOLDERE FALLBACK
-# ==========================================
-WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
-
-DEFAULT_TEMP_FOLDER_ID = "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
-FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES", "").replace('"', '').replace("'", "").strip() or DEFAULT_TEMP_FOLDER_ID
-
-DRIVE_FOLDER_RAW = os.getenv("DRIVE_FOLDER_XML", "").replace('"', '').replace("'", "").replace("\n", "").replace("\r", "").strip()
-
-# Preluăm toate ID-urile de foldere din mediu sau folosim lista default de rezervă
-FOLDERE_DESTINATIE = [
-    f.strip() for f in DRIVE_FOLDER_RAW.split(",") if f.strip()
-] or [
-    "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m",
-    "1G7CkaoivnTR0O8mZceB0143Q6956C1-1",
-    "1T2N_v81889Y7tyHUbrTSLR073YC7mGk5",
-    "1NWe4JKhhaQ4HxFGs7FfhxnlemE0ZM2E2",
-]
-
-CURRENT_FOLDER_INDEX = 0
-
-START_YEAR = int(os.getenv("START_YEAR", "2000"))
-END_YEAR = int(os.getenv("END_YEAR", "2026"))
-BATCH_FLUSH_INDEX = 10  # Salvăm micro-indexul la fiecare 10 fișiere descărcate
-
-
-def get_drive_service():
-    """Autentifică robotul în Google Drive folosind credențialele din mediu sau fișier local."""
-    scopes = ["https://www.googleapis.com/auth/drive.file"]
-    github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-
-    if github_secret:
-        print(
-            f"{VERDE}🤖 [Cloud Mode] Autentificare în Google Drive folosind GitHub Secrets...{RESET}"
-        )
-        service_account_info = json.loads(github_secret)
-        creds = service_account.Credentials.from_service_account_info(
-            service_account_info, scopes=scopes
-        )
-    else:
-        print(f"{GALBEN}💻 [Local Mode] Autentificare în Google Drive...{RESET}")
-        credentials_path = "service_account.json"
-        if not os.path.exists(credentials_path):
-            raise FileNotFoundError(
-                f"Nu s-a găsit fișierul '{credentials_path}'!"
-            )
-        creds = service_account.Credentials.from_service_account_file(
-            credentials_path, scopes=scopes
-        )
-
-    return build("drive", "v3", credentials=creds)
-
-
-def get_already_downloaded_pages(service, target_year):
-    """Obține paginile deja existente citind Indexul Virtual (Master + Micro-indecși Temp + Delta)."""
-    valid_pages = set()
     try:
-        index_data = obtine_index_virtual(service)
-        fisiere_map = index_data.get("fisiere", {})
-        prefix = f"brut_legislatie_{target_year}_pag"
-
-        for nume_fisier in fisiere_map.keys():
-            if prefix in nume_fisier:
-                match = re.search(r"_pag(\d+)\.xml$", nume_fisier)
-                if match:
-                    valid_pages.add(int(match.group(1)))
-
-        print(
-            f"⚡ [Index Reader] Încărcate {len(valid_pages)} pagini existente pentru anul {target_year} din Indexul Virtual."
+        info = json.loads(creds_json)
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/drive"]
         )
-        return valid_pages
+        return build("drive", "v3", credentials=creds)
     except Exception as e:
-        print(
-            f"{ROSU}⚠️ Eroare la încărcarea indexului virtual: {e}. Se începe scanarea curată.{RESET}"
-        )
-        return set()
+        print(f"❌ [Cloud Mode] Eroare la autentificarea în Google Drive: {e}", flush=True)
+        sys.exit(1)
 
-
-def upload_to_drive(service, filename, content_bytes):
+def salveaza_sau_actualizeaza_in_drive(service, nume_fisier, continut_bytes, folder_id):
     """
-    Încarcă fișierul XML în Drive.
-    Dacă folderul curent atinge limita de 500k fișiere (403), comută automat la următorul folder din Shared Drive.
+    Salvează fișierul XML pe Google Drive în folderul specificat.
+    Dacă fișierul există deja, îi actualizează conținutul.
     """
-    global CURRENT_FOLDER_INDEX
+    cale_temp = f"/tmp/{nume_fisier}" if os.name != "nt" else nume_fisier
+    with open(cale_temp, "wb") as f:
+        f.write(continut_bytes)
 
-    while CURRENT_FOLDER_INDEX < len(FOLDERE_DESTINATIE):
-        target_folder_id = FOLDERE_DESTINATIE[CURRENT_FOLDER_INDEX]
+    query = f"'{folder_id}' in parents and name = '{nume_fisier}' and trashed = false"
+    
+    try:
+        # Căutare fișier existent pe Shared Drive
+        response = service.files().list(
+            **get_list_params(q=query, fields="files(id)")
+        ).execute()
+        files = response.get("files", [])
 
-        try:
-            file_metadata = {"name": filename, "parents": [target_folder_id]}
-            media = MediaInMemoryUpload(
-                content_bytes, mimetype="application/xml", resumable=True
-            )
+        media = MediaFileUpload(cale_temp, mimetype="text/xml", resumable=True)
 
-            file = (
-                service.files()
-                .create(
-                    body=file_metadata,
-                    media_body=media,
-                    fields="id",
-                    supportsAllDrives=True,
-                )
-                .execute()
-            )
+        if files:
+            file_id = files[0]["id"]
+            # Actualizare conținut
+            updated_file = service.files().update(
+                **get_file_params(fileId=file_id, media_body=media)
+            ).execute()
+            if os.path.exists(cale_temp):
+                os.remove(cale_temp)
+            return updated_file.get("id")
+        else:
+            # Creare fișier nou
+            metadata = {
+                "name": nume_fisier,
+                "parents": [folder_id]
+            }
+            new_file = service.files().create(
+                **get_file_params(body=metadata, media_body=media)
+            ).execute()
+            if os.path.exists(cale_temp):
+                os.remove(cale_temp)
+            return new_file.get("id")
 
-            file_id = file.get("id")
-            print(
-                f"{VERDE}✅ Fișier salvat în Drive [{CURRENT_FOLDER_INDEX + 1}/{len(FOLDERE_DESTINATIE)}]: {filename} (ID: {file_id}){RESET}"
-            )
-            return file_id
+    except Exception as e:
+        print(f"❌ Eroare salvare {nume_fisier} în Drive (Folder: {folder_id[:8]}...): {e}", flush=True)
+        if os.path.exists(cale_temp):
+            os.remove(cale_temp)
+        return None
 
-        except HttpError as err:
-            if err.resp.status == 403 and "teamDriveFileLimitExceeded" in str(err):
-                print(
-                    f"{GALBEN}⚠️ Shared Drive-ul curent ({target_folder_id[:8]}...) a atins limita de 500k fișiere!{RESET}"
-                )
-                CURRENT_FOLDER_INDEX += 1
+def genereaza_si_salveaza_micro_index(service, log_mutații):
+    """Generează și salvează un micro-index temporar JSON în folderul TEMPORARY_XML_INDEXES."""
+    if not log_mutații:
+        return
 
-                if CURRENT_FOLDER_INDEX < len(FOLDERE_DESTINATIE):
-                    print(
-                        f"{VERDE}🔄 Comutăm automat pe următorul folder din listă: {FOLDERE_DESTINATIE[CURRENT_FOLDER_INDEX][:8]}...{RESET}"
-                    )
-                else:
-                    print(
-                        f"{ROSU}❌ Toate folderele din listă au atins limita maximă de fișiere!{RESET}"
-                    )
-                    break
-            else:
-                print(
-                    f"{ROSU}❌ Eroare HTTP Google Drive pentru {filename}: {err}{RESET}"
-                )
-                break
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    nume_micro = f"temp_index_{timestamp}_{os.getpid()}.json"
+    cale_temp = f"/tmp/{nume_micro}" if os.name != "nt" else nume_micro
 
-        except Exception as e:
-            print(
-                f"{ROSU}❌ Eroare generală upload Drive pentru {filename}: {e}{RESET}"
-            )
-            break
-
-    return None
-
-
-def salveaza_micro_index_temp(service, flag_updates):
-    """Creează și urcă un micro-index temporar în Shared Drive cu fișierele adăugate recent."""
-    if not flag_updates:
-        return True
-
-    timestamp_str = time.strftime("%Y%m%d_%H%M%S")
-    random_id = random.randint(1000, 9999)
-    nume_micro_index = f"temp_index_{timestamp_str}_{random_id}.json"
-
-    continut_payload = {
-        "timestamp": timestamp_str,
-        "sursa": "download_XML.py",
-        "flag_updates": flag_updates,
+    data_log = {
+        "timestamp": timestamp,
+        "flag_updates": log_mutații
     }
 
+    with open(cale_temp, "w", encoding="utf-8") as f:
+        json.dump(data_log, f, ensure_ascii=False, indent=2)
+
+    folder_target = XML_INDEX_READER.FOLDER_TEMP_INDEXES_ID
+
     try:
-        json_bytes = json.dumps(
-            continut_payload, ensure_ascii=False, indent=2
-        ).encode("utf-8")
-        
-        file_metadata = {
-            "name": nume_micro_index,
-            "parents": [FOLDER_TEMP_INDEXES_ID],
+        media = MediaFileUpload(cale_temp, mimetype="application/json")
+        metadata = {
+            "name": nume_micro,
+            "parents": [folder_target]
         }
-        media = MediaInMemoryUpload(
-            json_bytes, mimetype="application/json", resumable=False
-        )
+        res = service.files().create(
+            **get_file_params(body=metadata, media_body=media)
+        ).execute()
 
-        file = (
-            service.files()
-            .create(
-                body=file_metadata,
-                media_body=media,
-                fields="id",
-                supportsAllDrives=True,  # Critic pentru Shared Drive
-            )
-            .execute()
-        )
-        print(
-            f"{VERDE}⚡ [Micro-Index] Înregistrat micro-index cu {len(flag_updates)} fișiere: {nume_micro_index} (ID: {file.get('id')}){RESET}",
-            flush=True,
-        )
-        return True
+        print(f"⚡ [Micro-Index] Înregistrat micro-index cu {len(log_mutații)} fișiere: {nume_micro} (ID: {res.get('id')})", flush=True)
+
     except Exception as e:
-        print(
-            f"{ROSU}⚠️ Eroare la salvarea micro-indexului temporar pe Shared Drive: {e}{RESET}",
-            flush=True,
-        )
-        return False
+        print(f"⚠️ Eroare la salvarea micro-indexului temporar: {e}", flush=True)
+    finally:
+        if os.path.exists(cale_temp):
+            os.remove(cale_temp)
 
+def proceseaza_an(service, client, an_tinta, foldere_drive):
+    """Descarcă paginile din API-ul Just.ro pentru anul specificat și le salvează în Drive."""
+    print("=" * 70, flush=True)
+    print(f"📅 AN INDUSTRIAL XML: {an_tinta}", flush=True)
+    print("=" * 70, flush=True)
 
-def create_fresh_soap_client():
-    """Creează o instanță curată de client SOAP (Zeep) pentru negociere WSDL."""
-    history = HistoryPlugin()
-    transport = Transport(timeout=90, operation_timeout=120)
-    client = Client(WSDL_URL, transport=transport, plugins=[history])
-    return client, history
+    # Încărcare index virtual unificat
+    index_v = XML_INDEX_READER.obtine_index_virtual(service)
+    fisiere_map = index_v.get("fisiere", {})
 
+    # Identificăm paginile deja existente în index pentru anul respectiv
+    pagini_existente = set()
+    pattern = re.compile(rf"brut_legislatie_{an_tinta}_pag(\d+)\.xml")
 
-def download_year(drive_service, composite_type_name, target_year):
-    """Descarcă toate paginile lipsă pentru un singur an și salvează micro-indexul din 10 în 10 fișiere."""
-    print(
-        f"\n{GALBEN}{'='*70}\n📅 AN INDUSTRIAL XML: {target_year}\n{'='*70}{RESET}"
-    )
+    for nume_f in fisiere_map.keys():
+        m = pattern.search(nume_f)
+        if m:
+            pagini_existente.add(int(m.group(1)))
 
-    downloaded_pages = get_already_downloaded_pages(drive_service, target_year)
+    max_pag_existenta = max(pagini_existente) if pagini_existente else 0
+    print(f"📦 {len(pagini_existente)} pagini VALIDE în index pentru {an_tinta}. (Ultima scanată: {max_pag_existenta})", flush=True)
 
-    pages_to_process = []
-    if downloaded_pages:
-        max_page = max(downloaded_pages)
-        print(
-            f"📦 {len(downloaded_pages)} pagini VALIDE în index pentru {target_year}. (Ultima scanată: {max_page})"
-        )
+    # Obținere token din API-ul Just.ro
+    token = None
+    try:
+        token = client.service.GetToken()
+        print("🔑 Token obținut cu succes via Zeep!", flush=True)
+    except Exception as e:
+        print(f"❌ Eroare la obținerea token-ului WSDL: {e}", flush=True)
+        return
 
-        all_expected_pages = set(range(1, max_page + 1))
-        gaps = sorted(list(all_expected_pages - downloaded_pages))
-
-        if gaps:
-            print(
-                f"{GALBEN}🛠️ Detectat {len(gaps)} lacune în istoric: {gaps}. Începem repararea.{RESET}"
-            )
-            pages_to_process.extend(gaps)
-        next_new_page = max_page + 1
-    else:
-        print("🆕 An complet nou. Începem de la pagina 1.")
-        next_new_page = 1
-
-    results_per_page = 50
-    files_saved = 0
-    consecutive_empty_pages = 0
-    LIMITE_GOLURI_FINAL_AN = 10
-
-    # Puffer local pentru micro-index
-    mutații_micro_index = {}
-
-    client = None
-    history = None
-    token_key = None
-
-    for init_attempt in range(1, 6):
-        try:
-            client, history = create_fresh_soap_client()
-            token_key = client.service.GetToken()
-            print(f"{VERDE}🔑 Token obținut cu succes via Zeep!{RESET}")
-            break
-        except Exception as e:
-            print(
-                f"{ROSU}🚨 [Init Err] Just.ro nu răspunde (Tentativa {init_attempt}/5): {e}{RESET}"
-            )
-            if init_attempt == 5:
-                return 0
-            time.sleep(30 * init_attempt)
+    pagina_curenta = max_pag_existenta + 1
+    folder_idx = 0
+    folder_curent_id = foldere_drive[folder_idx]
+    
+    log_mutații_sesiune = {}
 
     while True:
-        if pages_to_process:
-            current_page = pages_to_process.pop(0)
-            is_gap_repair = True
-        else:
-            current_page = next_new_page
-            next_new_page += 1
-            is_gap_repair = False
+        nume_xml = f"brut_legislatie_{an_tinta}_pag{pagina_curenta}.xml"
+        print(f"--- [AVANS] An {an_tinta} / Pagina {pagina_curenta} ---", flush=True)
 
-        if current_page in downloaded_pages and not is_gap_repair:
-            continue
+        try:
+            # Apel API Just.ro pentru obținerea XML-ului brut al paginii
+            raspuns_xml = client.service.GetLegiPaginat(
+                token=token,
+                an=an_tinta,
+                pagina=pagina_curenta
+            )
 
-        prefix_log = "[REPARARE]" if is_gap_repair else "[AVANS]"
-        print(f"--- {prefix_log} An {target_year} / Pagina {current_page} ---")
-
-        retry_success = False
-        a_avut_eroare_tehnica = False
-        max_retries = 3
-        contor_raspunsuri_goale_curate = 0
-
-        for attempt in range(0, max_retries + 1):
-            try:
-                if attempt > 0:
-                    time.sleep(15 * attempt)
-                    client, history = create_fresh_soap_client()
-                    token_key = client.service.GetToken()
-
-                if not token_key:
-                    token_key = client.service.GetToken()
-
-                composite_type = client.get_type(composite_type_name)
-                search_model = composite_type(
-                    NumarPagina=current_page,
-                    RezultatePagina=results_per_page,
-                    SearchAn=str(target_year),
-                )
-
-                client.service.Search(
-                    SearchModel=search_model, tokenKey=token_key
-                )
-
-                last_response_envelope = history.last_received["envelope"]
-                raw_xml_bytes = etree.tostring(
-                    last_response_envelope, pretty_print=True, encoding="utf-8"
-                )
-                raw_xml_string = raw_xml_bytes.decode("utf-8")
-
-                if (
-                    "<a:Legi>" not in raw_xml_string
-                    and "<Legi>" not in raw_xml_string
-                ):
-                    contor_raspunsuri_goale_curate += 1
-                    if (
-                        is_gap_repair
-                        and contor_raspunsuri_goale_curate <= max_retries
-                    ):
-                        print(
-                            f"{GALBEN}   ⚠️ Pagina {current_page} e goală pe server (Verificarea {contor_raspunsuri_goale_curate}/{max_retries+1}). Reîncercăm...{RESET}"
-                        )
-                        continue
-
-                retry_success = True
+            if not raspuns_xml or len(raspuns_xml.encode('utf-8')) < 200:
+                print(f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta}.", flush=True)
                 break
-            except Exception as soap_error:
-                print(
-                    f"{ROSU}   ⚠️ Eroare tehnică la pagina {current_page}: {soap_error}{RESET}"
-                )
-                token_key = None
-                a_avut_eroare_tehnica = True
-                if is_gap_repair:
+
+            bytes_xml = raspuns_xml.encode('utf-8')
+            
+            # Salvare fișier pe Drive
+            fid = salveaza_sau_actualizeaza_in_drive(service, nume_xml, bytes_xml, folder_curent_id)
+
+            if not fid:
+                # Dacă folderul a atins limita de 500k fișiere, comutăm pe următorul
+                if folder_idx + 1 < len(foldere_drive):
+                    folder_idx += 1
+                    folder_curent_id = foldere_drive[folder_idx]
+                    print(f"⚠️ Shared Drive-ul curent a atins limita! Comutăm automat pe următorul folder: {folder_curent_id[:8]}...", flush=True)
+                    fid = salveaza_sau_actualizeaza_in_drive(service, nume_xml, bytes_xml, folder_curent_id)
+                else:
+                    print("❌ Toate folderele din lista DRIVE_FOLDER_XML sunt pline!", flush=True)
                     break
 
-        if is_gap_repair and a_avut_eroare_tehnica:
-            print(
-                f"{ROSU}🛑 [LĂSAT LIPSA] Pagina {current_page} are probleme de rețea. O sărim acum.{RESET}"
-            )
-            continue
-
-        if not retry_success and not is_gap_repair:
-            consecutive_empty_pages = 0
-            continue
-
-        filename = f"brut_legislatie_{target_year}_pag{current_page}.xml"
-
-        if (
-            "<a:Legi>" not in raw_xml_string
-            and "<Legi>" not in raw_xml_string
-        ):
-            if not is_gap_repair:
-                consecutive_empty_pages += 1
-                print(
-                    f"{GALBEN}   ℹ️ Pagină goală detectată. Goluri consecutive: {consecutive_empty_pages}/{LIMITE_GOLURI_FINAL_AN}{RESET}"
-                )
-                if consecutive_empty_pages >= LIMITE_GOLURI_FINAL_AN:
-                    print(
-                        f"\n{VERDE}✅ Anul {target_year} finalizat (S-a confirmat capătul după {LIMITE_GOLURI_FINAL_AN} pagini goale!){RESET}"
-                    )
-                    break
-            else:
-                print(
-                    f"{ROSU}🚨 [GAURĂ CONFIRMATĂ] Pagina de reparație {current_page} este definitiv goală pe server.{RESET}"
-                )
-                xml_martor = b"<GrupLegi><Info>PaginaGoalaConfirmataJustRo</Info></GrupLegi>"
-                uploaded_id = upload_to_drive(drive_service, filename, xml_martor)
-                if uploaded_id:
-                    files_saved += 1
-                    mutații_micro_index[filename] = {
-                        "id": uploaded_id,
-                        "an": target_year,
-                        "pagina": current_page,
-                        "Tags_extracted": False,
-                    }
-        else:
-            if not is_gap_repair:
-                consecutive_empty_pages = 0
-
-            uploaded_id = upload_to_drive(
-                drive_service, filename, raw_xml_bytes
-            )
-            if uploaded_id:
-                files_saved += 1
-                mutații_micro_index[filename] = {
-                    "id": uploaded_id,
-                    "an": target_year,
-                    "pagina": current_page,
+            if fid:
+                print(f"✅ Fișier salvat în Drive: {nume_xml} (ID: {fid})", flush=True)
+                
+                # Înregistrăm mutația în micro-indexul local al sesiunii
+                log_mutații_sesiune[nume_xml] = {
+                    "id": fid,
+                    "folder_id": folder_curent_id,
+                    "an": an_tinta,
+                    "pagina": pagina_curenta,
+                    "downloaded": True,
                     "Tags_extracted": False,
+                    "processed": False
                 }
 
-        # Flush din 10 în 10 fișiere
-        if len(mutații_micro_index) >= BATCH_FLUSH_INDEX:
-            salveaza_micro_index_temp(drive_service, mutații_micro_index)
-            mutații_micro_index.clear()
+            pagina_curenta += 1
+            time.sleep(0.5)
 
-        time.sleep(1.5)
+        except Exception as e:
+            err_str = str(e)
+            if "token" in err_str.lower() or "invalid" in err_str.lower():
+                print("🔄 Token expirat. Re-generare token...", flush=True)
+                try:
+                    token = client.service.GetToken()
+                    continue
+                except Exception as ex_t:
+                    print(f"❌ Eroare re-generare token: {ex_t}", flush=True)
+                    break
+            else:
+                print(f"⚠️ Eroare procesare An {an_tinta} Pagina {pagina_curenta}: {e}", flush=True)
+                break
 
-    # Flush final la ieșire din buclă pentru fișierele rămase
-    if mutații_micro_index:
-        salveaza_micro_index_temp(drive_service, mutații_micro_index)
-        mutații_micro_index.clear()
+    # La finalul procesării anului, emitem micro-indexul cu noile pagini adăugate
+    if log_mutații_sesiune:
+        genereaza_si_salveaza_micro_index(service, log_mutații_sesiune)
 
-    return files_saved
+def main():
+    print("🤖 [Cloud Mode] Autentificare în Google Drive...", flush=True)
+    service = autenifica_google_drive()
 
+    # Preluare interval ani din argumente (ex: python download_XML.py 2018 2026)
+    an_start = 2018
+    an_end = 2026
 
-def download_laws_main(an_start, an_stop):
-    """Funcția principală executată per segment."""
-    try:
-        print(
-            f"{VERDE}🚀 Pornire segment industrial paralel XML. Interval: {an_start} – {an_stop}...{RESET}"
-        )
-        drive_service = get_drive_service()
-        composite_type_name = "{http://schemas.datacontract.org/2004/07/FreeWebService}CompositeType"
-        total_files_segment = 0
+    if len(sys.argv) >= 3:
+        try:
+            an_start = int(sys.argv[1])
+            an_end = int(sys.argv[2])
+        except ValueError:
+            pass
 
-        for year in range(an_start, an_stop + 1):
-            try:
-                files_saved = download_year(
-                    drive_service, composite_type_name, year
-                )
-                total_files_segment += files_saved
-            except Exception as year_error:
-                print(
-                    f"{ROSU}💥 Eroare pentru anul {year}: {year_error}.{RESET}"
-                )
-                time.sleep(10)
+    print(f"🎯 [Config Matrice XML] Interceptat interval: {an_start} - {an_end}", flush=True)
+    print(f"🚀 Pornire segment industrial paralel XML. Interval: {an_start} – {an_end}...", flush=True)
 
-        print(
-            f"\n{VERDE}🎉🎉 SEGMENT XML FINALIZAT COMPLET ({an_start}-{an_stop}). Noi fișiere salvate: {total_files_segment}{RESET}"
-        )
-    except Exception as e:
-        print(f"{ROSU}💥 Eroare critică: {str(e)}{RESET}")
+    client_zeep = Client(WSDL_URL)
 
+    for an in range(an_start, an_end + 1):
+        proceseaza_an(service, client_zeep, an, FOLDERE_XML_IDS)
 
 if __name__ == "__main__":
-    argumente_numerice = []
-
-    for arg in sys.argv[1:]:
-        piese = arg.split()
-        for piesa in piese:
-            if piesa.isdigit():
-                argumente_numerice.append(int(piesa))
-
-    if len(argumente_numerice) == 1:
-        an_s = argumente_numerice[0]
-        an_f = argumente_numerice[0]
-    elif len(argumente_numerice) >= 2:
-        an_s = argumente_numerice[0]
-        an_f = argumente_numerice[1]
-    else:
-        an_s = START_YEAR
-        an_f = END_YEAR
-
-    print(
-        f"{VERDE}🎯 [Config Matrice XML] Interceptat interval din Matrix YAML: {an_s} - {an_f}{RESET}",
-        flush=True,
-    )
-    download_laws_main(an_s, an_f)
+    main()
