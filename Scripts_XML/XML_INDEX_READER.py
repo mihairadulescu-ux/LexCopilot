@@ -50,12 +50,14 @@ FOLDERE_XML_IDS = [
 def verifica_si_descarca_index_master(service):
     """
     PASUL 0: Verificare strictă existență Master Index.
-    Afișează parametrii, captează mesajul de eroare exact dacă eșuează și face ABORT.
+    Adaugă ambele flag-uri obligatorii pentru Shared Drives:
+    supportsAllDrives=True ȘI includeItemsFromAllDrives=True
     """
     params_get = {
         "fileId": INDEX_FILE_ID,
         "fields": "id, name, size, mimeType, parents, trashed",
         "supportsAllDrives": True,
+        "includeItemsFromAllDrives": True,
     }
 
     print("=" * 70, flush=True)
@@ -67,7 +69,7 @@ def verifica_si_descarca_index_master(service):
         print("❌ [ABORT] Variabila 'XML_STORAGE_INDEX' este GOLĂ sau NESETATĂ!", flush=True)
         sys.exit(1)
 
-    # 1. TEST VERIFICARE
+    # 1. TEST VERIFICARE CU FLAG-URILE COMPLETE DE SHARED DRIVE
     try:
         meta = service.files().get(**params_get).execute()
         size_mb = round(int(meta.get("size", 0)) / (1024 * 1024), 2)
