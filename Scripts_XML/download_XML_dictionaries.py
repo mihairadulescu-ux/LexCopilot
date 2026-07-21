@@ -6,33 +6,47 @@ import re
 import io
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+
+# ==============================================================================
+# CONFIGURARE CĂI DE IMPORT (PENTRU RULARE DIN GITHUB ACTIONS SAU LOCAL)
+# ==============================================================================
+DIRECTOR_CURENT = Path(__file__).resolve().parent
+RADACINA_PROIECT = DIRECTOR_CURENT.parent
+
+if str(RADACINA_PROIECT) not in sys.path:
+    sys.path.insert(0, str(RADACINA_PROIECT))
+if str(DIRECTOR_CURENT) not in sys.path:
+    sys.path.insert(0, str(DIRECTOR_CURENT))
+
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
-# Importăm cititorul de index virtual actualizat la secundă
-from XML_INDEX_READER import obtine_index_virtual
+# Importăm configurația centralizată și parametrii legați pentru Shared Drive
+from drive_config import (
+    FOLDER_METADATA_ID,
+    FOLDER_TEMP_INDEXES_ID,
+    get_file_params,
+    get_list_params,
+)
+
+# Importăm cititorul de index virtual actualizat
+try:
+    import XML_INDEX_READER
+except ImportError:
+    from Scripts_XML import XML_INDEX_READER
 
 VERDE = "\033[92m"
 GALBEN = "\033[93m"
 ROSU = "\033[91m"
 RESET = "\033[0m"
 
-# Folderul de destinație pentru fișierele CSV finale de metadate
-FOLDER_METADATE_ID = os.getenv("METADATA_FOLDER_ID", "").strip()
-
-# Folderul pentru micro-indecșii temporari de sincronizare real-time
-FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES", "").replace('"', '').replace("'", "").strip() or "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
-
-if not FOLDER_METADATE_ID:
-    FOLDERE_XML_RAW = os.getenv("DRIVE_FOLDER_XML", "").replace('"', '').replace("'", "").replace("\n", "").replace("\r", "")
-    FOLDERE_XML_IDS = [fid.strip() for fid in FOLDERE_XML_RAW.split(",") if fid.strip()]
-    FOLDER_METADATE_ID = FOLDERE_XML_IDS[0] if FOLDERE_XML_IDS else None
-
 
 def get_drive_service():
+    """Autentificare în Google Drive API."""
     scopes = ["https://www.googleapis.com/auth/drive"]
-    github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
     
     if github_secret:
         service_account_info = json.loads(github_secret)
@@ -67,7 +81,7 @@ def salveaza_micro_index_temporar(service, flag_updates):
     with open(nume_temp, "w", encoding="utf-8") as f:
         json.dump(structura_log, f, ensure_ascii=False, indent=2)
 
-    # Încărcare pe Drive în folderul temporar
+    # Încărcare pe Drive în folderul temporar cu parametrii securizați pentru Shared Drive
     try:
         media = MediaFileUpload(nume_temp, mimetype='application/json')
         file_metadata = {
@@ -75,10 +89,11 @@ def salveaza_micro_index_temporar(service, flag_updates):
             'parents': [FOLDER_TEMP_INDEXES_ID]
         }
         res = service.files().create(
-            body=file_metadata, 
-            media_body=media, 
-            supportsAllDrives=True, 
-            fields='id'
+            **get_file_params(
+                body=file_metadata, 
+                media_body=media, 
+                fields='id'
+            )
         ).execute()
         
         print(f"{VERDE}⚡ [Micro-Index Publicat] Înregistrat flag-ul 'Tags_extracted: True' pentru {len(flag_updates)} fișiere (ID Temp: {res.get('id')}){RESET}", flush=True)
@@ -90,6 +105,7 @@ def salveaza_micro_index_temporar(service, flag_updates):
 
 
 def incarca_pe_drive(service, cale_fisier_local, folder_id):
+    """Încărcare sau actualizare fișier CSV pe Google Drive."""
     if not folder_id:
         print(f"⚠️ Nu s-a specificat ID-ul folderului de destinație pe Drive pentru {cale_fisier_local}.", flush=True)
         return
@@ -99,17 +115,23 @@ def incarca_pe_drive(service, cale_fisier_local, folder_id):
 
     try:
         query = f"'{folder_id}' in parents and name = '{nume_fisier}' and trashed = false"
-        res = service.files().list(q=query, spaces='drive', fields='files(id)', supportsAllDrives=True).execute()
+        res = service.files().list(
+            **get_list_params(q=query, spaces='drive', fields='files(id)')
+        ).execute()
         files = res.get('files', [])
 
         if files:
             file_id = files[0]['id']
-            service.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
+            service.files().update(
+                **get_file_params(fileId=file_id, media_body=media)
+            ).execute()
             print(f"{VERDE}✅ Sincronizat pe Drive (Update) în Metadate: {nume_fisier} (ID: {file_id}){RESET}", flush=True)
             return
 
         file_metadata = {'name': nume_fisier, 'parents': [folder_id]}
-        f_nou = service.files().create(body=file_metadata, media_body=media, supportsAllDrives=True, fields='id').execute()
+        f_nou = service.files().create(
+            **get_file_params(body=file_metadata, media_body=media, fields='id')
+        ).execute()
         print(f"{VERDE}🎉 Încarcat pe Drive (Nou) în Metadate: {nume_fisier} (ID: {f_nou.get('id')}){RESET}", flush=True)
 
     except Exception as e:
@@ -117,8 +139,9 @@ def incarca_pe_drive(service, cale_fisier_local, folder_id):
 
 
 def extrage_taguri_din_matrice(service, ani_procesare):
-    # 🚀 Obținem indexul virtual ultra-actualizat
-    index_v = obtine_index_virtual(service)
+    """Obține fișierele neprocesate din indexul virtual și extrage tag-urile Emitent și TipAct."""
+    # Obținem indexul virtual ultra-actualizat
+    index_v = XML_INDEX_READER.obtine_index_virtual(service)
     fisiere_map = index_v.get("fisiere", {})
 
     emitenti_gasiti = set()
@@ -145,14 +168,12 @@ def extrage_taguri_din_matrice(service, ani_procesare):
             continue
 
         try:
-            cerere = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-            fh = io.BytesIO()
-            descarcare = MediaIoBaseDownload(fh, cerere)
-            gata = False
-            while not gata:
-                _, gata = descarcare.next_chunk()
-            
-            xml_text = fh.getvalue().decode("utf-8", errors="ignore")
+            # Preluare stream media cu parametri securizați pentru Shared Drive
+            continut_bytes = service.files().get_media(
+                **get_file_params(fileId=file_id, acknowledgeAbuse=True)
+            ).execute()
+
+            xml_text = continut_bytes.decode("utf-8", errors="ignore")
             
             for em in regex_emitent.findall(xml_text):
                 val = em.strip()
@@ -171,12 +192,12 @@ def extrage_taguri_din_matrice(service, ani_procesare):
             if contor_total_procesat % 500 == 0:
                 print(f"   📊 [Progres] Procesate: {contor_total_procesat}/{len(fisiere_tinta)} fișiere", flush=True)
 
-        except Exception:
+        except Exception as e:
             continue
 
     print(f"\n✅ [Procesare Finalizată] Total fișiere scanate: {contor_total_procesat}", flush=True)
 
-    # 💾 Salvăm mutațiile în folderul temporar de pe Drive
+    # Salvăm mutațiile în folderul temporar de pe Drive
     salveaza_micro_index_temporar(service, flag_updates)
 
     cale_emitenti = f"lista_emitenti_{string_ani}.csv"
@@ -196,8 +217,8 @@ def extrage_taguri_din_matrice(service, ani_procesare):
             
     print(f"{VERDE}✅ [Salvat Local] '{cale_emitenti}' și '{cale_acte}'. Se încarcă în folderul Metadate...{RESET}", flush=True)
 
-    incarca_pe_drive(service, cale_emitenti, FOLDER_METADATE_ID)
-    incarca_pe_drive(service, cale_acte, FOLDER_METADATE_ID)
+    incarca_pe_drive(service, cale_emitenti, FOLDER_METADATA_ID)
+    incarca_pe_drive(service, cale_acte, FOLDER_METADATA_ID)
 
 
 if __name__ == "__main__":
