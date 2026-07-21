@@ -238,7 +238,6 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
         print(f"❌ Eroare la obținerea token-ului WSDL: {e}", flush=True)
         return
 
-    # Începem de la pagina 1 dacă nu avem nicio pagină scanată în index
     pagina_curenta = max_pag_existenta + 1
     folder_idx = 0
     folder_curent_id = foldere_drive[folder_idx]
@@ -253,11 +252,11 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
 
         for incercare in range(1, 6):
             try:
-                # Construim obiectul SearchModel compatibil cu WSDL-ul Just.ro
+                # Structură SearchModel exactă din documentația oficială SOAP
                 search_model = {
                     "NumarPagina": pagina_curenta,
-                    "RezultatePagina": 50,
-                    "SearchAn": int(an_tinta),
+                    "RezultatePagina": 0,  # 0 conform exemplului din documentația oficială
+                    "SearchAn": str(an_tinta),
                     "SearchNumar": None,
                     "SearchText": None,
                     "SearchTitlu": None,
@@ -274,10 +273,9 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
                 if isinstance(dict_res, dict):
                     legi_gasite = dict_res.get("Legi") or dict_res.get("SearchResult", {}).get("Legi")
 
-                # Dacă prima pagină e goală, încercăm indexare de la 0
-                if not legi_gasite and pagina_curenta == 1 and max_pag_existenta == 0:
-                    print("   ℹ️ Pagina 1 e goală. Încercăm fallback pe Pagina 0...", flush=True)
-                    search_model["NumarPagina"] = 0
+                # Fallback cu SearchAn transmis ca integer dacă stringul întoarce listă goală
+                if not legi_gasite:
+                    search_model["SearchAn"] = int(an_tinta)
                     raspuns_soap = client.service.Search(SearchModel=search_model, tokenKey=token)
                     dict_res = serialize_object(raspuns_soap) if raspuns_soap else {}
                     if isinstance(dict_res, dict):
