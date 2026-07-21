@@ -1,227 +1,246 @@
 import os
 import sys
-import json
-import io
 import time
-from datetime import datetime, timezone
+import json
+import re
+from pathlib import Path
+
+# ==============================================================================
+# CONFIGURARE CĂI DE IMPORT
+# ==============================================================================
+DIRECTOR_CURENT = Path(__file__).resolve().parent
+RADACINA_PROIECT = DIRECTOR_CURENT.parent
+
+if str(RADACINA_PROIECT) not in sys.path:
+    sys.path.insert(0, str(RADACINA_PROIECT))
+if str(DIRECTOR_CURENT) not in sys.path:
+    sys.path.insert(0, str(DIRECTOR_CURENT))
+
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
-from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+import io
 
-VERDE = "\033[92m"
-GALBEN = "\033[93m"
-ROSU = "\033[91m"
-RESET = "\033[0m"
+from drive_config import (
+    MASTER_INDEX_FILE_ID,
+    FOLDER_TEMP_INDEXES_ID,
+    FOLDERE_XML_IDS,
+    get_file_params,
+    get_list_params,
+)
 
-CALE_INDEX_LOCAL = "index_xml.json"
-NUME_INDEX_DRIVE = "index_xml.json"
-
-# ID-uri configurare mediu
-INDEX_FILE_ID = os.getenv("XML_STORAGE_INDEX", "").strip()
-FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES", "").replace('"', '').replace("'", "").strip() or "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
-FOLDER_METADATE_ID = os.getenv("METADATA_FOLDER_ID", "").strip() or "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
-
-FOLDERE_XML_RAW = os.getenv("DRIVE_FOLDER_XML", "").replace('"', '').replace("'", "").replace("\n", "").replace("\r", "")
-FOLDERE_XML_IDS = [fid.strip() for fid in FOLDERE_XML_RAW.split(",") if fid.strip()] or [
-    "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m",
-    "1G7CkaoivnTR0O8mZceB0143Q6956C1-1",
-    "1T2N_v81889Y7tyHUbrTSLR073YC7mGk5",
-    "1NWe4JKhhaQ4HxFGs7FfhxnlemE0ZM2E2"
-]
-
-
+# ==============================================================================
+# AUTENTIFICARE GOOGLE DRIVE API
+# ==============================================================================
 def get_drive_service():
-    scopes = ["https://www.googleapis.com/auth/drive"]
-    github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    
-    if github_secret:
-        service_account_info = json.loads(github_secret)
-        creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=scopes)
-    else:
-        credentials_path = "service_account.json"
-        if not os.path.exists(credentials_path):
-            raise FileNotFoundError(f"Nu s-a găsit fișierul '{credentials_path}'!")
-        creds = service_account.Credentials.from_service_account_file(credentials_path, scopes=scopes)
-        
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
+    """Autentificare în Google Drive API folosind GOOGLE_SERVICE_ACCOUNT_JSON."""
+    creds_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
 
-
-def descarca_index_master(service):
-    """Descărcare Master Index din Drive cu suport complet pentru Shared Drives."""
-    target_id = INDEX_FILE_ID
-
-    if not target_id or target_id == "1OkPgwX_F6FKwupuhD9kO3rynj4zdel0N":
+    if creds_json:
         try:
-            query = f"'{FOLDER_METADATE_ID}' in parents and name = '{NUME_INDEX_DRIVE}' and trashed = false"
-            res = service.files().list(
-                q=query, 
-                spaces='drive', 
-                fields='files(id)', 
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True
-            ).execute()
-            files = res.get('files', [])
-            if files:
-                target_id = files[0]['id']
+            info = json.loads(creds_json)
+            creds = service_account.Credentials.from_service_account_info(
+                info, scopes=["https://www.googleapis.com/auth/drive"]
+            )
+            return build("drive", "v3", credentials=creds)
         except Exception as e:
-            print(f"⚠️ Căutare dinamică index eșuată: {e}", flush=True)
+            print(f"❌ Eroare la citirea secretului JSON: {e}", flush=True)
+            sys.exit(1)
 
-    if not target_id:
-        print("ℹ️ Zero Master Index identificat. Se începe cu o structură nouă.", flush=True)
-        return {"last_updated": None, "total_fisiere": 0, "fisiere": {}}, None
+    cale_local = RADACINA_PROIECT / "service_account.json"
+    if cale_local.exists():
+        try:
+            creds = service_account.Credentials.from_service_account_file(
+                str(cale_local), scopes=["https://www.googleapis.com/auth/drive"]
+            )
+            return build("drive", "v3", credentials=creds)
+        except Exception as e:
+            print(f"❌ Eroare la citirea fișierului local service_account.json: {e}", flush=True)
+
+    print("❌ Nu s-a găsit secretul GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
+    sys.exit(1)
+
+
+# ==============================================================================
+# OPERAȚIUNI CU MASTER INDEX
+# ==============================================================================
+def descarca_master_index(service):
+    """Descarcă index_xml.json din Google Drive în memorie."""
+    print(f"📥 Descărcare conținut Master Index (ID: {MASTER_INDEX_FILE_ID})...", flush=True)
+    try:
+        request = service.files().get_media(**get_file_params(fileId=MASTER_INDEX_FILE_ID))
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+
+        fh.seek(0)
+        continut = fh.read().decode("utf-8")
+        master_data = json.loads(continut)
+        print(f"✅ [Master Index] Încărcate {len(master_data.get('fisiere', {}))} fișiere.", flush=True)
+        return master_data
+    except Exception as e:
+        print(f"⚠️ Nu s-a putut descărca Master Index-ul (posibil fișier nou sau eroare): {e}", flush=True)
+        return {"fisiere": {}, "last_updated": ""}
+
+
+def salveaza_master_index(service, master_data):
+    """Suprascrie Master Index-ul (index_xml.json) pe Google Drive."""
+    master_data["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    cale_temp = "/tmp/index_xml.json" if os.name != "nt" else "index_xml.json"
+
+    with open(cale_temp, "w", encoding="utf-8") as f:
+        json.dump(master_data, f, ensure_ascii=False, indent=2)
 
     try:
-        cerere = service.files().get_media(fileId=target_id, supportsAllDrives=True)
-        fh = io.FileIO(CALE_INDEX_LOCAL, 'wb')
-        downloader = MediaIoBaseDownload(fh, cerere)
-        gata = False
-        while not gata:
-            _, gata = downloader.next_chunk()
-
-        with open(CALE_INDEX_LOCAL, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            print(f"📥 [Cloud Sync] Încărcat '{NUME_INDEX_DRIVE}' din Drive (ID: {target_id[:8]}...).", flush=True)
-            return data, target_id
+        media = MediaFileUpload(cale_temp, mimetype="application/json", resumable=True)
+        updated_file = (
+            service.files()
+            .update(**get_file_params(fileId=MASTER_INDEX_FILE_ID, media_body=media))
+            .execute()
+        )
+        print(f"✅ Master Index actualizat pe Drive cu succes! (ID: {updated_file.get('id')})", flush=True)
     except Exception as e:
-        print(f"⚠️ Nu s-a putut descărca indexul master din Drive: {e}", flush=True)
-        return {"last_updated": None, "total_fisiere": 0, "fisiere": {}}, target_id
+        print(f"❌ Eroare la salvarea Master Index-ului pe Drive: {e}", flush=True)
+    finally:
+        if os.path.exists(cale_temp):
+            os.remove(cale_temp)
 
 
-def aplica_micro_indecsi_si_curata(service, fisiere_master):
-    """
-    Citește, aplică, mută în Trash micro-indecșii temporari din TEMPORARY_XML_INDEXES,
-    iar la final golește definitiv Trash-ul.
-    """
-    if not FOLDER_TEMP_INDEXES_ID:
-        return fisiere_master, 0
+# ==============================================================================
+# EXECUȚIE STRATEGII
+# ==============================================================================
+def executa_full_index(service):
+    """Scanează integral toate folderele și reconstruiește Master Index-ul."""
+    print("🚀 Reconstrucție completă index (FULL INDEX)...", flush=True)
+    master_data = {"fisiere": {}, "last_updated": ""}
+    pattern_xml = re.compile(r"brut_legislatie_(\d{4})_pag(\d+)\.xml")
+
+    total_fisiere = 0
+    for folder_id in FOLDERE_XML_IDS:
+        print(f"📂 Scanare folder Shared Drive ID: {folder_id[:8]}...", flush=True)
+        page_token = None
+        query = f"'{folder_id}' in parents and trashed = false"
+
+        while True:
+            try:
+                response = (
+                    service.files()
+                    .list(
+                        **get_list_params(
+                            q=query,
+                            fields="nextPageToken, files(id, name, parents)",
+                            pageToken=page_token,
+                            pageSize=1000,
+                        )
+                    )
+                    .execute()
+                )
+
+                files = response.get("files", [])
+                for f in files:
+                    nume = f["name"]
+                    m = pattern_xml.search(nume)
+                    if m:
+                        an = int(m.group(1))
+                        pag = int(m.group(2))
+                        master_data["fisiere"][nume] = {
+                            "id": f["id"],
+                            "folder_id": folder_id,
+                            "an": an,
+                            "pagina": pag,
+                            "downloaded": True,
+                            "Tags_extracted": False,
+                            "processed": False,
+                        }
+                        total_fisiere += 1
+
+                page_token = response.get("nextPageToken")
+                if not page_token:
+                    break
+            except Exception as e:
+                print(f"⚠️ Eroare la scanarea paginii din folderul {folder_id[:8]}: {e}", flush=True)
+                break
+
+    print(f"📊 Reindexare completă finalizată. Total fișiere identificate: {total_fisiere}", flush=True)
+    salveaza_master_index(service, master_data)
+
+
+def executa_incremental_index(service):
+    """Consolidează micro-indecșii temporari în Master Index."""
+    print("⚡ Consolidare incrementală index...", flush=True)
+    master_data = descarca_master_index(service)
+    fisiere_dict = master_data.get("fisiere", {})
 
     query = f"'{FOLDER_TEMP_INDEXES_ID}' in parents and name contains 'temp_index_' and trashed = false"
+
     try:
-        resp = service.files().list(
-            q=query,
-            fields="files(id, name, createdTime)",
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True
-        ).execute()
+        response = (
+            service.files()
+            .list(**get_list_params(q=query, fields="files(id, name)"))
+            .execute()
+        )
+        temp_files = response.get("files", [])
 
-        loguri_temp = resp.get('files', [])
-        if not loguri_temp:
+        if not temp_files:
             print("ℹ️ Nu există micro-indecși temporari de consolidat.", flush=True)
-            return fisiere_master, 0
+            return
 
-        # Sortăm cronologic pentru aplicare ordonată
-        loguri_temp.sort(key=lambda x: x.get('createdTime', ''))
-        print(f"🔄 [Consolidare Mutații] Găsite {len(loguri_temp)} indexuri temporare în Drive. Se procesează...", flush=True)
+        print(f"🧩 Găsiți {len(temp_files)} micro-indecși de consolidat...", flush=True)
+        modificari = False
 
-        mutații_aplicate = 0
-        sterse_count = 0
-
-        for log_file in loguri_temp:
-            file_id = log_file['id']
-            file_name = log_file.get('name', file_id)
+        for tf in temp_files:
+            file_id = tf["id"]
+            nume_temp = tf["name"]
 
             try:
-                # Descărcăm conținutul
-                cerere = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+                request = service.files().get_media(**get_file_params(fileId=file_id))
                 fh = io.BytesIO()
-                downloader = MediaIoBaseDownload(fh, cerere)
-                gata = False
-                while not gata:
-                    _, gata = downloader.next_chunk()
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
 
-                data_log = json.loads(fh.getvalue().decode('utf-8'))
-                flag_updates = data_log.get('flag_updates', {})
+                fh.seek(0)
+                sub_data = json.loads(fh.read().decode("utf-8"))
+                flag_updates = sub_data.get("flag_updates", {})
 
-                for nume_f, modi_flags in flag_updates.items():
-                    if isinstance(modi_flags, dict):
-                        if modi_flags.get("_deleted") is True:
-                            if nume_f in fisiere_master:
-                                del fisiere_master[nume_f]
-                                mutații_aplicate += 1
-                        else:
-                            if nume_f not in fisiere_master:
-                                fisiere_master[nume_f] = {}
-                            fisiere_master[nume_f].update(modi_flags)
-                            mutații_aplicate += 1
+                for nume_xml, meta in flag_updates.items():
+                    fisiere_dict[nume_xml] = meta
+                    modificari = True
 
-                # 🧹 Mutăm în Trash (permis pentru rol de Writer)
-                try:
-                    service.files().update(
-                        fileId=file_id, 
-                        body={'trashed': True}, 
-                        supportsAllDrives=True
-                    ).execute()
-                    sterse_count += 1
-                except Exception:
-                    try:
-                        service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
-                        sterse_count += 1
-                    except Exception:
-                        pass
+                service.files().delete(**get_file_params(fileId=file_id)).execute()
+                print(f"   └─ Consolidat și șters micro-index: {nume_temp}", flush=True)
 
-                time.sleep(0.01)
+            except Exception as ex:
+                print(f"⚠️ Eroare procesare micro-index {nume_temp}: {ex}", flush=True)
 
-            except HttpError as err:
-                if err.resp.status in [404, 410]:
-                    continue
-                print(f"   └─ ⚠️ Eroare procesare temporar {file_name}: {err}", flush=True)
-            except Exception as e:
-                print(f"   └─ ⚠️ Eroare neașteptată temporar {file_name}: {e}", flush=True)
-
-        print(f"   └─ ✅ Consolidate cu succes {mutații_aplicate} mutații în baza master (mutate în Trash: {sterse_count}).", flush=True)
-
-        # 🧹 GOLIRE AUTOMATĂ COSH TRASH
-        try:
-            service.files().emptyTrash().execute()
-            print("   └─ 🧹 [Auto-Curățare] Coșul de gunoi (Trash) a fost golit definitiv cu succes.", flush=True)
-        except Exception as e:
-            print(f"   └─ ⚠️ Nu s-a putut goli automat Coșul de gunoi: {e}", flush=True)
-
-        return fisiere_master, mutații_aplicate
+        if modificari:
+            master_data["fisiere"] = fisiere_dict
+            salveaza_master_index(service, master_data)
 
     except Exception as e:
-        print(f"⚠️ Eroare la consolidarea micro-indecșilor: {e}", flush=True)
-        return fisiere_master, 0
+        print(f"❌ Eroare la consolidarea incrementală: {e}", flush=True)
 
 
-def salveaza_index_master(service, data_master, target_id):
-    """Salvează și urcă indexul master actualizat în Google Drive."""
-    data_master["last_updated"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    data_master["total_fisiere"] = len(data_master.get("fisiere", {}))
-
-    with open(CALE_INDEX_LOCAL, "w", encoding="utf-8") as f:
-        json.dump(data_master, f, ensure_ascii=False, indent=2)
-
-    media = MediaFileUpload(CALE_INDEX_LOCAL, mimetype='application/json', resumable=True)
-
-    try:
-        if target_id:
-            service.files().update(fileId=target_id, media_body=media, supportsAllDrives=True).execute()
-            print(f"{VERDE}✅ Master Index actualizat pe Drive (ID: {target_id}){RESET}", flush=True)
-        else:
-            file_metadata = {'name': NUME_INDEX_DRIVE, 'parents': [FOLDER_METADATE_ID]}
-            f_nou = service.files().create(body=file_metadata, media_body=media, supportsAllDrives=True, fields='id').execute()
-            print(f"{VERDE}🎉 Master Index creat de la zero pe Drive (ID: {f_nou.get('id')}){RESET}", flush=True)
-    except Exception as e:
-        print(f"{ROSU}❌ Eroare la salvarea Master Index pe Drive: {e}{RESET}", flush=True)
-
-
+# ==============================================================================
+# MAIN ENTRY POINT
+# ==============================================================================
 def main():
-    print(f"\n{GALBEN}⚡ [Strategie] Se execută INCREMENTAL INDEX (Delta & Consolidare).{RESET}\n", flush=True)
-    
+    is_full = "--full" in sys.argv or os.getenv("FORCE_FULL_INDEX", "").lower() == "true"
+
+    if is_full:
+        print("🚀 [Strategie] Se execută FULL INDEX (Reindexare completă).", flush=True)
+    else:
+        print("⚡ [Strategie] Se execută INCREMENTAL INDEX (Delta & Consolidare).", flush=True)
+
     service = get_drive_service()
-    data_master, target_id = descarca_index_master(service)
-    fisiere_master = data_master.get("fisiere", {})
 
-    print(f"🧠 [Index Incremental] Încărcate {len(fisiere_master)} fișiere unice din master.", flush=True)
-
-    # 1. Consolidare micro-indecși temporari + Golire Coș
-    fisiere_master, mutatii = aplica_micro_indecsi_si_curata(service, fisiere_master)
-
-    # 2. Salvare finală Master Index pe Drive
-    data_master["fisiere"] = fisiere_master
-    salveaza_index_master(service, data_master, target_id)
+    if is_full:
+        executa_full_index(service)
+    else:
+        executa_incremental_index(service)
 
 
 if __name__ == "__main__":
