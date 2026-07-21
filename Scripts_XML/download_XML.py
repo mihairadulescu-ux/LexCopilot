@@ -40,9 +40,11 @@ WSDL_URL = "http://legislatie.just.ro/api/serviciu.wsdl"
 
 def autenifica_google_drive():
     """Autentificare în Google Drive API folosind Service Account din GitHub Secrets."""
-    creds_json = os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
+    # Verificăm ambele denumiri posibile ale secretului din GitHub Actions
+    creds_json = os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY") or os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    
     if not creds_json:
-        print("❌ [Cloud Mode] Secretul GDRIVE_SERVICE_ACCOUNT_KEY nu a fost găsit!", flush=True)
+        print("❌ [Cloud Mode] Secretul (GDRIVE_SERVICE_ACCOUNT_KEY / GOOGLE_SERVICE_ACCOUNT_JSON) nu a fost găsit!", flush=True)
         sys.exit(1)
 
     try:
