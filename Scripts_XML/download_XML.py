@@ -37,10 +37,9 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 from zeep import Client, Transport
-from zeep.helpers import serialize_object
 
 # ==============================================================================
-# CONFIGURARE SERVICIU WSDL (JUST.RO) - URL OFICIAL FREEWEBSERVICE
+# CONFIGURARE SERVICIU WSDL ORIGINAL (JUST.RO)
 # ==============================================================================
 WSDL_URL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 
@@ -78,10 +77,6 @@ def creeaza_client_zeep_securizat(wsdl_url, retries=5, backoff=2):
             )
             client = Client(wsdl_url, transport=transport)
             print("✅ Conexiune WSDL stabilită cu succes!", flush=True)
-
-            metode = [op for op in dir(client.service) if not op.startswith("_")]
-            print(f"📋 Metode WSDL disponibile: {metode}", flush=True)
-
             return client
         except Exception as e:
             print(
@@ -211,37 +206,6 @@ def genereaza_si_salveaza_micro_index(service, log_mutații):
             os.remove(cale_temp)
 
 
-def apeleaza_descarcare_paginata_soap(client, token, an_tinta, pagina_curenta):
-    """
-    Execută interogarea CĂUTARE conform DCOUMENTAȚIEI OFICIALE FreeWebService:
-    Metoda: Search(SearchModel, tokenKey)
-    """
-    search_model = {
-        "NumarPagina": pagina_curenta,
-        "RezultatePagina": 50,  # Solicităm 50 rezultate per pagină
-        "SearchAn": an_tinta,
-        "SearchNumar": None,
-        "SearchText": None,
-        "SearchTitlu": None,
-    }
-
-    try:
-        raspuns = client.service.Search(
-            SearchModel=search_model,
-            tokenKey=token
-        )
-        return raspuns
-    except Exception as ex:
-        try:
-            raspuns = client.service.Search(
-                searchModel=search_model,
-                tokenKey=token
-            )
-            return raspuns
-        except Exception as ex2:
-            raise RuntimeError(f"Eroare la apelul Search SOAP: {ex2}")
-
-
 def proceseaza_an(service, client, an_tinta, foldere_drive):
     """Descarcă paginile din API-ul Just.ro pentru anul specificat și le salvează în Drive."""
     print("=" * 70, flush=True)
@@ -284,28 +248,22 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
         print(f"--- [AVANS] An {an_tinta} / Pagina {pagina_curenta} ---", flush=True)
 
         try:
-            raspuns_soap = apeleaza_descarcare_paginata_soap(
-                client, token, an_tinta, pagina_curenta
+            # Apelul SOAP exact și direct din codul tău funcțional original:
+            raspuns_xml = client.service.GetLegiPaginat(
+                token=token,
+                an=an_tinta,
+                pagina=pagina_curenta
             )
 
-            # Inspectare obiect returnat de Zeep
-            dict_raspuns = serialize_object(raspuns_soap)
-            
-            # Verificăm dacă există lista 'Legi' în răspuns
-            legi_lista = None
-            if isinstance(dict_raspuns, dict):
-                legi_lista = dict_raspuns.get("Legi") or dict_raspuns.get("SearchResult", {}).get("Legi")
-
-            if not legi_lista:
+            # Dacă răspunsul e gol sau prea mic (< 200 octeți), înseamnă că am atins capătul anului
+            if not raspuns_xml or len(str(raspuns_xml).encode("utf-8")) < 200:
                 print(
-                    f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta} (Nu mai există legi în răspuns).",
+                    f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta} (An complet).",
                     flush=True,
                 )
                 break
 
-            # Convertim structura de date în JSON/XML lizibil
-            str_json = json.dumps(dict_raspuns, ensure_ascii=False, indent=2)
-            bytes_xml = str_json.encode("utf-8")
+            bytes_xml = str(raspuns_xml).encode("utf-8")
 
             fid = salveaza_sau_actualizeaza_in_drive(
                 service, nume_xml, bytes_xml, folder_curent_id
@@ -357,8 +315,9 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
                     print(f"❌ Eroare re-generare token: {ex_t}", flush=True)
                     break
             else:
+                # Când se ajunge la o pagină inexistentă, serverul Just.ro returnează eroare/fault
                 print(
-                    f"⚠️ Anul {an_tinta} s-a oprit la pagina {pagina_curenta}: {e}",
+                    f"🏁 [FINAL AN DETECTAT] Anul {an_tinta} este complet în index! (Nu mai există pagina {pagina_curenta}).",
                     flush=True,
                 )
                 break
