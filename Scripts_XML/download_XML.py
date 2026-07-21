@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 # ==============================================================================
-# CONFIGURARE CAI DE IMPORT (PENTRU RULARE DIN GITHUB ACTIONS SAU LOCAL)
+# CONFIGURARE CĂI DE IMPORT (PENTRU RULARE DIN GITHUB ACTIONS SAU LOCAL)
 # ==============================================================================
 DIRECTOR_CURENT = Path(__file__).resolve().parent
 RADACINA_PROIECT = DIRECTOR_CURENT.parent
@@ -28,23 +28,79 @@ try:
 except ImportError:
     from Scripts_XML import XML_INDEX_READER
 
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from zeep import Client
+
+from zeep import Client, Transport
 
 # ==============================================================================
-# CONFIGURARE SERVICIU WSDL (JUST.RO)
+# CONFIGURARE SERVICIU WSDL (JUST.RO) - STRICT HTTP
 # ==============================================================================
 WSDL_URL = "http://legislatie.just.ro/api/serviciu.wsdl"
 
+
+def creeaza_client_zeep_securizat(wsdl_url, retries=5, backoff=2):
+    """
+    Creează un client Zeep configurat cu un Session robust pe HTTP care
+    include User-Agent de browser și reîncearcă automat la deconectări.
+    """
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+    )
+
+    strategie_retry = Retry(
+        total=5,
+        backoff_factor=1,
+        status_forcelist=[500, 502, 503, 504],
+        raise_on_status=False,
+    )
+
+    adapter = HTTPAdapter(max_retries=strategie_retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+    transport = Transport(session=session, timeout=30)
+
+    for incercare in range(1, retries + 1):
+        try:
+            print(
+                f"🌐 Conectare la serviciul WSDL Just.ro (Încercarea {incercare}/{retries})...",
+                flush=True,
+            )
+            client = Client(wsdl_url, transport=transport)
+            print("✅ Conexiune WSDL stabilită cu succes!", flush=True)
+            return client
+        except Exception as e:
+            print(
+                f"⚠️ Conexiunea la Just.ro a eșuat ({e}). Reîncercare în {backoff} secunde...",
+                flush=True,
+            )
+            time.sleep(backoff)
+            backoff *= 2
+
+    print("❌ Nu s-a putut conecta la serviciul WSDL Just.ro după multiple încercări.", flush=True)
+    sys.exit(1)
+
+
 def autenifica_google_drive():
     """Autentificare în Google Drive API folosind Service Account din GitHub Secrets."""
-    # Verificăm ambele denumiri posibile ale secretului din GitHub Actions
-    creds_json = os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY") or os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    
+    creds_json = os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY") or os.getenv(
+        "GOOGLE_SERVICE_ACCOUNT_JSON"
+    )
+
     if not creds_json:
-        print("❌ [Cloud Mode] Secretul (GDRIVE_SERVICE_ACCOUNT_KEY / GOOGLE_SERVICE_ACCOUNT_JSON) nu a fost găsit!", flush=True)
+        print(
+            "❌ [Cloud Mode] Secretul (GDRIVE_SERVICE_ACCOUNT_KEY / GOOGLE_SERVICE_ACCOUNT_JSON) nu a fost găsit!",
+            flush=True,
+        )
         sys.exit(1)
 
     try:
@@ -54,8 +110,12 @@ def autenifica_google_drive():
         )
         return build("drive", "v3", credentials=creds)
     except Exception as e:
-        print(f"❌ [Cloud Mode] Eroare la autentificarea în Google Drive: {e}", flush=True)
+        print(
+            f"❌ [Cloud Mode] Eroare la autentificarea în Google Drive: {e}",
+            flush=True,
+        )
         sys.exit(1)
+
 
 def salveaza_sau_actualizeaza_in_drive(service, nume_fisier, continut_bytes, folder_id):
     """
@@ -67,43 +127,47 @@ def salveaza_sau_actualizeaza_in_drive(service, nume_fisier, continut_bytes, fol
         f.write(continut_bytes)
 
     query = f"'{folder_id}' in parents and name = '{nume_fisier}' and trashed = false"
-    
+
     try:
-        # Căutare fișier existent pe Shared Drive
-        response = service.files().list(
-            **get_list_params(q=query, fields="files(id)")
-        ).execute()
+        response = (
+            service.files()
+            .list(**get_list_params(q=query, fields="files(id)"))
+            .execute()
+        )
         files = response.get("files", [])
 
         media = MediaFileUpload(cale_temp, mimetype="text/xml", resumable=True)
 
         if files:
             file_id = files[0]["id"]
-            # Actualizare conținut
-            updated_file = service.files().update(
-                **get_file_params(fileId=file_id, media_body=media)
-            ).execute()
+            updated_file = (
+                service.files()
+                .update(**get_file_params(fileId=file_id, media_body=media))
+                .execute()
+            )
             if os.path.exists(cale_temp):
                 os.remove(cale_temp)
             return updated_file.get("id")
         else:
-            # Creare fișier nou
-            metadata = {
-                "name": nume_fisier,
-                "parents": [folder_id]
-            }
-            new_file = service.files().create(
-                **get_file_params(body=metadata, media_body=media)
-            ).execute()
+            metadata = {"name": nume_fisier, "parents": [folder_id]}
+            new_file = (
+                service.files()
+                .create(**get_file_params(body=metadata, media_body=media))
+                .execute()
+            )
             if os.path.exists(cale_temp):
                 os.remove(cale_temp)
             return new_file.get("id")
 
     except Exception as e:
-        print(f"❌ Eroare salvare {nume_fisier} în Drive (Folder: {folder_id[:8]}...): {e}", flush=True)
+        print(
+            f"❌ Eroare salvare {nume_fisier} în Drive (Folder: {folder_id[:8]}...): {e}",
+            flush=True,
+        )
         if os.path.exists(cale_temp):
             os.remove(cale_temp)
         return None
+
 
 def genereaza_si_salveaza_micro_index(service, log_mutații):
     """Generează și salvează un micro-index temporar JSON în folderul TEMPORARY_XML_INDEXES."""
@@ -114,10 +178,7 @@ def genereaza_si_salveaza_micro_index(service, log_mutații):
     nume_micro = f"temp_index_{timestamp}_{os.getpid()}.json"
     cale_temp = f"/tmp/{nume_micro}" if os.name != "nt" else nume_micro
 
-    data_log = {
-        "timestamp": timestamp,
-        "flag_updates": log_mutații
-    }
+    data_log = {"timestamp": timestamp, "flag_updates": log_mutații}
 
     with open(cale_temp, "w", encoding="utf-8") as f:
         json.dump(data_log, f, ensure_ascii=False, indent=2)
@@ -126,15 +187,17 @@ def genereaza_si_salveaza_micro_index(service, log_mutații):
 
     try:
         media = MediaFileUpload(cale_temp, mimetype="application/json")
-        metadata = {
-            "name": nume_micro,
-            "parents": [folder_target]
-        }
-        res = service.files().create(
-            **get_file_params(body=metadata, media_body=media)
-        ).execute()
+        metadata = {"name": nume_micro, "parents": [folder_target]}
+        res = (
+            service.files()
+            .create(**get_file_params(body=metadata, media_body=media))
+            .execute()
+        )
 
-        print(f"⚡ [Micro-Index] Înregistrat micro-index cu {len(log_mutații)} fișiere: {nume_micro} (ID: {res.get('id')})", flush=True)
+        print(
+            f"⚡ [Micro-Index] Înregistrat micro-index cu {len(log_mutații)} fișiere: {nume_micro} (ID: {res.get('id')})",
+            flush=True,
+        )
 
     except Exception as e:
         print(f"⚠️ Eroare la salvarea micro-indexului temporar: {e}", flush=True)
@@ -142,17 +205,16 @@ def genereaza_si_salveaza_micro_index(service, log_mutații):
         if os.path.exists(cale_temp):
             os.remove(cale_temp)
 
+
 def proceseaza_an(service, client, an_tinta, foldere_drive):
     """Descarcă paginile din API-ul Just.ro pentru anul specificat și le salvează în Drive."""
     print("=" * 70, flush=True)
     print(f"📅 AN INDUSTRIAL XML: {an_tinta}", flush=True)
     print("=" * 70, flush=True)
 
-    # Încărcare index virtual unificat
     index_v = XML_INDEX_READER.obtine_index_virtual(service)
     fisiere_map = index_v.get("fisiere", {})
 
-    # Identificăm paginile deja existente în index pentru anul respectiv
     pagini_existente = set()
     pattern = re.compile(rf"brut_legislatie_{an_tinta}_pag(\d+)\.xml")
 
@@ -162,9 +224,11 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
             pagini_existente.add(int(m.group(1)))
 
     max_pag_existenta = max(pagini_existente) if pagini_existente else 0
-    print(f"📦 {len(pagini_existente)} pagini VALIDE în index pentru {an_tinta}. (Ultima scanată: {max_pag_existenta})", flush=True)
+    print(
+        f"📦 {len(pagini_existente)} pagini VALIDE în index pentru {an_tinta}. (Ultima scanată: {max_pag_existenta})",
+        flush=True,
+    )
 
-    # Obținere token din API-ul Just.ro
     token = None
     try:
         token = client.service.GetToken()
@@ -176,7 +240,7 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
     pagina_curenta = max_pag_existenta + 1
     folder_idx = 0
     folder_curent_id = foldere_drive[folder_idx]
-    
+
     log_mutații_sesiune = {}
 
     while True:
@@ -184,37 +248,44 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
         print(f"--- [AVANS] An {an_tinta} / Pagina {pagina_curenta} ---", flush=True)
 
         try:
-            # Apel API Just.ro pentru obținerea XML-ului brut al paginii
             raspuns_xml = client.service.GetLegiPaginat(
-                token=token,
-                an=an_tinta,
-                pagina=pagina_curenta
+                token=token, an=an_tinta, pagina=pagina_curenta
             )
 
-            if not raspuns_xml or len(raspuns_xml.encode('utf-8')) < 200:
-                print(f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta}.", flush=True)
+            if not raspuns_xml or len(raspuns_xml.encode("utf-8")) < 200:
+                print(
+                    f"🏁 Final de date detectat pentru anul {an_tinta} la pagina {pagina_curenta}.",
+                    flush=True,
+                )
                 break
 
-            bytes_xml = raspuns_xml.encode('utf-8')
-            
-            # Salvare fișier pe Drive
-            fid = salveaza_sau_actualizeaza_in_drive(service, nume_xml, bytes_xml, folder_curent_id)
+            bytes_xml = raspuns_xml.encode("utf-8")
+
+            fid = salveaza_sau_actualizeaza_in_drive(
+                service, nume_xml, bytes_xml, folder_curent_id
+            )
 
             if not fid:
-                # Dacă folderul a atins limita de 500k fișiere, comutăm pe următorul
                 if folder_idx + 1 < len(foldere_drive):
                     folder_idx += 1
                     folder_curent_id = foldere_drive[folder_idx]
-                    print(f"⚠️ Shared Drive-ul curent a atins limita! Comutăm automat pe următorul folder: {folder_curent_id[:8]}...", flush=True)
-                    fid = salveaza_sau_actualizeaza_in_drive(service, nume_xml, bytes_xml, folder_curent_id)
+                    print(
+                        f"⚠️ Shared Drive-ul curent a atins limita! Comutăm automat pe următorul folder: {folder_curent_id[:8]}...",
+                        flush=True,
+                    )
+                    fid = salveaza_sau_actualizeaza_in_drive(
+                        service, nume_xml, bytes_xml, folder_curent_id
+                    )
                 else:
-                    print("❌ Toate folderele din lista DRIVE_FOLDER_XML sunt pline!", flush=True)
+                    print(
+                        "❌ Toate folderele din lista DRIVE_FOLDER_XML sunt pline!",
+                        flush=True,
+                    )
                     break
 
             if fid:
                 print(f"✅ Fișier salvat în Drive: {nume_xml} (ID: {fid})", flush=True)
-                
-                # Înregistrăm mutația în micro-indexul local al sesiunii
+
                 log_mutații_sesiune[nume_xml] = {
                     "id": fid,
                     "folder_id": folder_curent_id,
@@ -222,7 +293,7 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
                     "pagina": pagina_curenta,
                     "downloaded": True,
                     "Tags_extracted": False,
-                    "processed": False
+                    "processed": False,
                 }
 
             pagina_curenta += 1
@@ -239,18 +310,20 @@ def proceseaza_an(service, client, an_tinta, foldere_drive):
                     print(f"❌ Eroare re-generare token: {ex_t}", flush=True)
                     break
             else:
-                print(f"⚠️ Eroare procesare An {an_tinta} Pagina {pagina_curenta}: {e}", flush=True)
+                print(
+                    f"⚠️ Eroare procesare An {an_tinta} Pagina {pagina_curenta}: {e}",
+                    flush=True,
+                )
                 break
 
-    # La finalul procesării anului, emitem micro-indexul cu noile pagini adăugate
     if log_mutații_sesiune:
         genereaza_si_salveaza_micro_index(service, log_mutații_sesiune)
+
 
 def main():
     print("🤖 [Cloud Mode] Autentificare în Google Drive...", flush=True)
     service = autenifica_google_drive()
 
-    # Preluare interval ani din argumente (ex: python download_XML.py 2018 2026)
     an_start = 2018
     an_end = 2026
 
@@ -262,12 +335,16 @@ def main():
             pass
 
     print(f"🎯 [Config Matrice XML] Interceptat interval: {an_start} - {an_end}", flush=True)
-    print(f"🚀 Pornire segment industrial paralel XML. Interval: {an_start} – {an_end}...", flush=True)
+    print(
+        f"🚀 Pornire segment industrial paralel XML. Interval: {an_start} – {an_end}...",
+        flush=True,
+    )
 
-    client_zeep = Client(WSDL_URL)
+    client_zeep = creeaza_client_zeep_securizat(WSDL_URL)
 
     for an in range(an_start, an_end + 1):
         proceseaza_an(service, client_zeep, an, FOLDERE_XML_IDS)
+
 
 if __name__ == "__main__":
     main()
