@@ -32,14 +32,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests urllib3 google-api-python-client google-auth
 
-      # PASUL NOU: Redenumirea numelor vechi înainte de orice indexare
-      - name: Redenumire fișiere legacy (brut_legislatie_ -> brut_XML_)
-        env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          XML_STORAGE_INDEX: ${{ secrets.XML_STORAGE_INDEX }}
-        run: |
-          echo "🔄 Rulare pas de omogenizare nume fișiere pe Google Drive..."
-          python -u Scripts_XML/redenumeste_fisiere.py
 
       - name: Executare Construire / Actualizare Index
         env:
