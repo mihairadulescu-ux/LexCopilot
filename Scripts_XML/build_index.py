@@ -136,7 +136,7 @@ def salveaza_master_index_xml(service, data, nume_fisier=NUME_MASTER_INDEX_XML, 
                     current_service.files().create(**params).execute()
 
             total_intrare = len(data.get("fisiere", data.get("inventory", {})))
-            print(f"💾 {mesaj} salvat pe Drive cu succes! ({total_intrare:,} intrări în memorie)", flush=True)
+            print(f"💾 {mesaj} salvat pe Drive cu succes! ({total_intrare:,} intrări)", flush=True)
             if cale_temp.exists():
                 cale_temp.unlink()
             return True
@@ -155,11 +155,11 @@ def salveaza_master_index_xml(service, data, nume_fisier=NUME_MASTER_INDEX_XML, 
 # ==============================================================================
 def executa_trash_multi_threaded(ids_de_sters, max_workers=15):
     if not ids_de_sters:
-        print("✨ Nu există duplicate de șters! Totul este curat.", flush=True)
+        print("✨ Nu există fișiere goale sau duplicate de șters! Totul este curat.", flush=True)
         return
 
     print("\n" + "=" * 60, flush=True)
-    print(f"🚀 TRIMITERE LA COȘ #{len(ids_de_sters):,} DUPLICATE XML ({max_workers} FIRE PARALELE)...", flush=True)
+    print(f"🚀 TRIMITERE LA COȘ #{len(ids_de_sters):,} FIȘIERE (<10B sau DUPLICATE) CU {max_workers} FIRE PARALELE...", flush=True)
     print("=" * 60, flush=True)
 
     counter_lock = threading.Lock()
@@ -202,14 +202,14 @@ def executa_trash_multi_threaded(ids_de_sters, max_workers=15):
     durata_totala = round(time.time() - timp_start, 1)
     print("\n" + "=" * 60, flush=True)
     print(f"🏁 OPERAȚIUNE DE TRASH FINALIZATĂ în {durata_totala}s!", flush=True)
-    print(f"🗑️ Duplicate XML mutate în coș: {total_curatate:,}", flush=True)
+    print(f"🗑️ Fișiere mutate în coș: {total_curatate:,}", flush=True)
     if erori_gunoi > 0:
         print(f"⚠️ Erori întâmpinate la ștergere: {erori_gunoi:,}", flush=True)
     print("=" * 60 + "\n", flush=True)
 
 
 # ==============================================================================
-# MAIN ENGINE: RAW SCAN WITH INCREMENTAL SAVES -> STATE MERGE -> SAVE FIRST -> TRASH
+# MAIN ENGINE: RAW SCAN WITH INCREMENTAL SAVES -> CLEANUP <10B -> SAVE FIRST -> TRASH
 # ==============================================================================
 def main():
     print("============================================================", flush=True)
@@ -319,29 +319,43 @@ def main():
     print(f"📊 GRUPURI DE NUME UNICE IDENTIFICATE: {len(raw_inventory):,}", flush=True)
 
     # ==========================================================================
-    # 3. CONSOLIDARE ÎN MEMORIE ȘI TRANSFER DE STARE (MERGE)
+    # 3. CONSOLIDARE ÎN MEMORIE, FILTRARE <10 BAȚI ȘI TRANSFER DE STARE (MERGE)
     # ==========================================================================
     print("\n" + "=" * 60, flush=True)
-    print("🧠 ANALIZĂ, SORTARE ȘI PRESERVARE FLAG-URI DE PROCESARE...", flush=True)
+    print("🧠 ANALIZĂ, FILTRARE FIȘIERE GOALE (<10B) ȘI PRESERVARE FLAG-URI...", flush=True)
     print("=" * 60, flush=True)
 
     master_index = {"fisiere": {}, "total_fisiere": 0, "last_updated": ""}
     ids_de_sters = []
     stari_recuperate = 0
+    fisiere_mici_eliminate = 0
 
     for nume_fisier, lista_variante in raw_inventory.items():
-        if len(lista_variante) == 1:
-            castigator = lista_variante[0]
+        # 1. Filtram mai intai variantele care au marimea mai mica de 10 bati
+        variante_valide = [v for v in lista_variante if v["size"] >= 10]
+        variante_mici = [v for v in lista_variante if v["size"] < 10]
+
+        # Toate variantele sub 10 bati merg direct la cos!
+        for v_mica in variante_mici:
+            ids_de_sters.append(v_mica["id"])
+            fisiere_mici_eliminate += 1
+
+        # Daca nu exista nicio varianta >= 10 bati pentru acest nume, trecem mai departe
+        if not variante_valide:
+            continue
+
+        # 2. Alegem castigatorul dintre variantele valide (dupa data crearii)
+        if len(variante_valide) == 1:
+            castigator = variante_valide[0]
         else:
-            lista_variante.sort(
-                key=lambda x: (x["size"] > 0, x["createdTime"]), 
-                reverse=True
-            )
-            castigator = lista_variante[0]
+            variante_valide.sort(key=lambda x: x["createdTime"], reverse=True)
+            castigator = variante_valide[0]
             
-            for duplicat in lista_variante[1:]:
+            # Restul variantelor valide sunt duplicate si merg la cos
+            for duplicat in variante_valide[1:]:
                 ids_de_sters.append(duplicat["id"])
 
+        # 3. Preluăm starea veche (flag-urile de prelucrare)
         vechea_stare = old_index_map.get(nume_fisier, {})
         if vechea_stare:
             stari_recuperate += 1
@@ -362,9 +376,10 @@ def main():
 
     master_index["total_fisiere"] = len(master_index["fisiere"])
 
-    print(f"✅ Fișiere XML validate drept MASTER: {master_index['total_fisiere']:,}", flush=True)
+    print(f"✅ Fișiere XML validate drept MASTER (>=10B): {master_index['total_fisiere']:,}", flush=True)
     print(f"🛡️ Stări/Flag-uri de procesare conservate din indexul vechi: {stari_recuperate:,}", flush=True)
-    print(f"🗑️ Duplicate XML identificate pentru eliminare: {len(ids_de_sters):,}", flush=True)
+    print(f"🗑️ Fișiere goale/corupte (<10B) identificate pentru eliminare: {fisiere_mici_eliminate:,}", flush=True)
+    print(f"🗑️ Total ID-uri trimise la coș (goale + duplicate): {len(ids_de_sters):,}", flush=True)
 
     # ==========================================================================
     # 4. SALVĂM MASTER INDEX-UL FINAL PE DRIVE *ÎNAINTE* DE TRASH!
@@ -385,13 +400,13 @@ def main():
         sys.exit(1)
 
     # ==========================================================================
-    # 5. TRIMITEM DUPLICATELE LA COȘ (DUPĂ CE INDEXUL E SALVAT CU SUCCES)
+    # 5. TRIMITEM FIȘIERELE GOALE ȘI DUPLICATELE LA COȘ (DUPĂ SALVAREA INDEXULUI)
     # ==========================================================================
     if ids_de_sters:
         executa_trash_multi_threaded(ids_de_sters, max_workers=15)
 
     print("\n============================================================", flush=True)
-    print("🎉 PROCESUL DE REINDEXARE COMPLETA ȘI CURĂȚARE S-A ÎNCHEIAT CU SUCCES!", flush=True)
+    print("🎉 PROCESUL DE REINDEXARE COMPLETĂ ȘI CURĂȚARE S-A ÎNCHEIAT CU SUCCES!", flush=True)
     print("============================================================", flush=True)
 
 
