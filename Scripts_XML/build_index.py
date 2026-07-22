@@ -4,20 +4,14 @@ import time
 import json
 import socket
 import re
-import threading
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-# Printăm instant pe ecran
-sys.stdout.write("============================================================\n")
-sys.stdout.write("🚀 SCRIPTUL BUILD_INDEX.PY A PORNIT FIZIC ÎN RUNNER!\n")
-sys.stdout.write("============================================================\n")
-sys.stdout.flush()
+print("============================================================", flush=True)
+print("🚀 SCRIPTUL BUILD_INDEX.PY A PORNIT FIZIC ÎN RUNNER!", flush=True)
+print("============================================================", flush=True)
 
-# Setăm timeout dur pe socket global
 socket.setdefaulttimeout(30)
 
-# Configurare căi de import
 DIRECTOR_CURENT = Path(__file__).resolve().parent
 RADACINA_PROIECT = DIRECTOR_CURENT.parent
 
@@ -29,7 +23,6 @@ if str(DIRECTOR_CURENT) not in sys.path:
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from googleapiclient.errors import HttpError
 
 from drive_config import (
     FOLDER_TEMP_INDEXES_ID,
@@ -50,9 +43,6 @@ NUME_MASTER_INDEX_XML = "index_xml.json"
 
 
 def get_drive_service():
-    sys.stdout.write("🔑 Conectare Google Drive API...\n")
-    sys.stdout.flush()
-
     creds_json = (
         os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
         or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
@@ -60,8 +50,7 @@ def get_drive_service():
     )
 
     if not creds_json:
-        sys.stdout.write("❌ NU S-A GĂSIT SECRETUL GOOGLE_SERVICE_ACCOUNT_JSON!\n")
-        sys.stdout.flush()
+        print("❌ NU S-A GĂSIT SECRETUL GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
         sys.exit(1)
 
     try:
@@ -69,13 +58,9 @@ def get_drive_service():
         creds = service_account.Credentials.from_service_account_info(
             info, scopes=["https://www.googleapis.com/auth/drive"]
         )
-        service = build("drive", "v3", credentials=creds, cache_discovery=False)
-        sys.stdout.write("✅ Conexiune Drive API stabilită cu succes!\n")
-        sys.stdout.flush()
-        return service
+        return build("drive", "v3", credentials=creds, cache_discovery=False)
     except Exception as e:
-        sys.stdout.write(f"❌ Eroare la autentificare: {e}\n")
-        sys.stdout.flush()
+        print(f"❌ Eroare la autentificare: {e}", flush=True)
         sys.exit(1)
 
 
@@ -115,94 +100,21 @@ def salveaza_master_index_xml(service, data, nume_fisier=NUME_MASTER_INDEX_XML, 
                     current_service.files().create(**params).execute()
 
             total_intrare = len(data.get("fisiere", data.get("inventory", {})))
-            sys.stdout.write(f"💾 {mesaj} salvat pe Drive cu succes! ({total_intrare:,} intrări)\n")
-            sys.stdout.flush()
+            print(f"💾 {mesaj} salvat pe Drive cu succes! ({total_intrare:,} intrări)", flush=True)
             if cale_temp.exists():
                 cale_temp.unlink()
             return True
         except Exception as e:
-            sys.stdout.write(f"⚠️ Eroare la salvarea indexului pe Drive (încercarea {incercare + 1}/5): {e}\n")
-            sys.stdout.flush()
+            print(f"⚠️ Eroare la salvarea indexului pe Drive ({incercare + 1}/5): {e}", flush=True)
             time.sleep(3)
 
     if cale_temp.exists():
         cale_temp.unlink()
-    sys.stdout.write("❌ CRITICAL: Nu s-a putut salva indexul pe Drive după 5 încercări!\n")
-    sys.stdout.flush()
     return False
 
 
-def curata_micro_indecsi_procesati(service):
-    try:
-        query_temp = f"'{FOLDER_TEMP_INDEXES_ID}' in parents and name contains 'temp_index_' and trashed = false"
-        res = service.files().list(**get_list_params(q=query_temp, fields="files(id, name)")).execute()
-        files = res.get("files", [])
-
-        if files:
-            sys.stdout.write(f"\n🧹 Curățare {len(files)} fișiere de micro-index temporare...\n")
-            sys.stdout.flush()
-            for f in files:
-                try:
-                    params = get_file_params(fileId=f["id"])
-                    params["body"] = {"trashed": True}
-                    service.files().update(**params).execute()
-                except Exception as e:
-                    sys.stdout.write(f"⚠️ Nu s-a putut șterge micro-indexul {f['name']}: {e}\n")
-                    sys.stdout.flush()
-            sys.stdout.write("✅ Micro-indecșii temporari au fost curățați cu succes!\n")
-            sys.stdout.flush()
-    except Exception as e:
-        sys.stdout.write(f"⚠️ Eroare la curățarea micro-indecșilor: {e}\n")
-        sys.stdout.flush()
-
-
-def executa_trash_multi_threaded(ids_de_sters, max_workers=15):
-    if not ids_de_sters:
-        sys.stdout.write("✨ Nu există fișiere goale sau duplicate de șters!\n")
-        sys.stdout.flush()
-        return
-
-    sys.stdout.write(f"\n🚀 TRIMITERE LA COȘ #{len(ids_de_sters):,} FIȘIERE CU {max_workers} FIRE PARALELE...\n")
-    sys.stdout.flush()
-
-    counter_lock = threading.Lock()
-    total_curatate = 0
-    erori_gunoi = 0
-    timp_start = time.time()
-
-    def trashing_worker(file_id):
-        nonlocal total_curatate, erori_gunoi
-        thread_service = get_drive_service()
-        
-        for incercare in range(5):
-            try:
-                params = get_file_params(fileId=file_id)
-                params["body"] = {"trashed": True}
-                thread_service.files().update(**params).execute()
-                
-                with counter_lock:
-                    total_curatate += 1
-                    if total_curatate % 200 == 0 or total_curatate == len(ids_de_sters):
-                        durata = round(time.time() - timp_start, 1)
-                        sys.stdout.write(f"⚡ [TURBO Trash] Mutate la coș #{total_curatate:,}/{len(ids_de_sters):,} ({durata}s)\n")
-                        sys.stdout.flush()
-                return True
-            except Exception:
-                time.sleep(2)
-                thread_service = get_drive_service()
-
-        with counter_lock:
-            erori_gunoi += 1
-        return False
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        executor.map(trashing_worker, ids_de_sters)
-
-
 def main():
-    sys.stdout.write("🚀 Intrăm în main()...\n")
-    sys.stdout.flush()
-    
+    print("🚀 Începem scanarea Google Drive...", flush=True)
     service = get_drive_service()
 
     raw_inventory = {}
@@ -211,11 +123,9 @@ def main():
     timp_start = time.time()
 
     for index_folder, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
-        sys.stdout.write(f"\n🔍 [{index_folder}/{len(FOLDERE_XML_IDS)}] Scanăm folderul Drive ID: {folder_id}...\n")
-        sys.stdout.flush()
+        print(f"\n🔍 [{index_folder}/{len(FOLDERE_XML_IDS)}] Scanăm folderul Drive ID: {folder_id}...", flush=True)
         page_token = None
         query = f"'{folder_id}' in parents and trashed = false"
-
         seen_tokens = set()
 
         while True:
@@ -233,14 +143,12 @@ def main():
                 )
                 response = service.files().list(**list_params).execute()
             except Exception as e:
-                sys.stdout.write(f"⚠️ Eroare/Timeout la citire pagină Drive ({e}). Reîncercăm în 2s...\n")
-                sys.stdout.flush()
+                print(f"⚠️ Eroare/Timeout Drive ({e}). Reîncercăm...", flush=True)
                 time.sleep(2)
                 service = get_drive_service()
                 continue
 
             files = response.get("files", [])
-            
             if not files:
                 break
 
@@ -262,29 +170,27 @@ def main():
                 if not any(x["id"] == f["id"] for x in raw_inventory[nume]):
                     raw_inventory[nume].append(meta_item)
 
-            durata_partiala = round(time.time() - timp_start, 1)
-            sys.stdout.write(f"   ⏳ [LIVE] Scanate: {total_fisiere_gasite:,} fișiere fizice ({durata_partiala}s)...\n")
-            sys.stdout.flush()
+            durata = round(time.time() - timp_start, 1)
+            if total_fisiere_gasite % 10000 == 0:
+                print(f"   ⏳ [LIVE] Scanate: {total_fisiere_gasite:,} fișiere fizice ({durata}s)...", flush=True)
 
-            if fisiere_de_la_ultimul_save >= 10000:
+            if fisiere_de_la_ultimul_save >= 20000:
                 fisiere_de_la_ultimul_save = 0
                 salveaza_master_index_xml(
                     service, 
                     {"inventory": raw_inventory}, 
                     nume_fisier=NUME_MASTER_INDEX_XML, 
-                    mesaj=f"Backup Interimar RAW Inventar ({total_fisiere_gasite:,} fișiere)"
+                    mesaj=f"Backup Interimar RAW ({total_fisiere_gasite:,} fișiere)"
                 )
 
             page_token = response.get("nextPageToken")
             if not page_token:
                 break
 
-    sys.stdout.write(f"\n📊 TOTAL FIȘIERE FIZICE PARCURSE: {total_fisiere_gasite:,}\n")
-    sys.stdout.flush()
+    print(f"\n📊 TOTAL FIȘIERE FIZICE PARCURSE: {total_fisiere_gasite:,}", flush=True)
 
     pattern_xml = re.compile(r"^brut_(?:XML|legislatie)_(\d+)_pag(\d+)\.xml$", re.IGNORECASE)
     grupuri_semantice = {}
-    ids_de_sters = []
 
     for nume_fisier, lista_variante in raw_inventory.items():
         match = pattern_xml.match(nume_fisier)
@@ -302,11 +208,6 @@ def main():
 
     for cheie_semantica, lista_variante in grupuri_semantice.items():
         variante_valide = [v for v in lista_variante if v["size"] >= 10]
-        variante_mici = [v for v in lista_variante if v["size"] < 10]
-
-        for v_mica in variante_mici:
-            ids_de_sters.append(v_mica["id"])
-
         if not variante_valide:
             continue
 
@@ -315,10 +216,6 @@ def main():
             reverse=True
         )
         castigator = variante_valide[0]
-        
-        for duplicat in variante_valide[1:]:
-            ids_de_sters.append(duplicat["id"])
-
         nume_master = castigator["_nume_fisier"].replace("brut_legislatie_", "brut_XML_")
 
         master_index["fisiere"][nume_master] = {
@@ -334,19 +231,8 @@ def main():
     master_index["total_fisiere"] = len(master_index["fisiere"])
 
     salveaza_master_index_xml(service, master_index, nume_fisier=NUME_MASTER_INDEX_XML, mesaj="Master Index XML Final")
-
-    if ids_de_sters:
-        executa_trash_multi_threaded(ids_de_sters, max_workers=15)
-
-    curata_micro_indecsi_procesati(service)
-    sys.stdout.write("\n🎉 REINDEXARE COMPLETĂ FINALIZATĂ!\n")
-    sys.stdout.flush()
+    print("\n🎉 REINDEXARE COMPLETĂ FINALIZATĂ CU SUCCES!", flush=True)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as err:
-        sys.stdout.write(f"\n❌ EROARE FATALĂ ÎN SCRIPT: {err}\n")
-        sys.stdout.flush()
-        sys.exit(1)
+    main()
