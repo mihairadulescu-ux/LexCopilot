@@ -73,7 +73,7 @@ def get_drive_service():
 
 
 # ==============================================================================
-# PASUL 0: INCARCARE SNAPSHOT/BACKUP VECHIUL INDEX PENTRU PRESERVARE FLAG-URI
+# PASUL 0: INCARCARE SNAPSHOT VECHIUL INDEX PENTRU PRESERVARE FLAG-URI
 # ==============================================================================
 def incarca_snapshot_index_vechi(service):
     """Descarcă indexul existent pentru a-i păstra flag-urile de stare (Tags_extracted, processed etc.)."""
@@ -200,7 +200,7 @@ def executa_trash_multi_threaded(ids_de_sters, max_workers=15):
 
 
 # ==============================================================================
-# MAIN ENGINE: RAW SCAN -> STATE MERGE -> CLEAN MASTER INDEX
+# MAIN ENGINE: RAW SCAN WITH TOKEN GUARD -> STATE MERGE -> CLEAN MASTER INDEX
 # ==============================================================================
 def main():
     print("============================================================", flush=True)
@@ -223,11 +223,20 @@ def main():
         page_token = None
         query = f"'{folder_id}' in parents and trashed = false"
 
+        # GUARD ÎMPO TRIVA BUCLILOR INFINITE GOOGLE API
+        seen_tokens = set()
+
         while True:
+            if page_token in seen_tokens:
+                print(f"⚠️ DETECTATĂ BUCLĂ REPETITIVĂ DE PAGINARE! Oprim scanarea pe folderul {folder_id[:8]}.", flush=True)
+                break
+            if page_token:
+                seen_tokens.add(page_token)
+
             response = None
             incercare = 0
 
-            # BUCLĂ PERSISTENTĂ PE PAGE TOKEN
+            # BUCLĂ PERSISTENTĂ PE PAGE TOKEN (Retry infinit pe erori de rețea)
             while True:
                 try:
                     list_params = get_list_params(
@@ -246,6 +255,11 @@ def main():
                     service = get_drive_service()
 
             files = response.get("files", [])
+            
+            # Dacă nu mai sunt fișiere pe pagină, am terminat folderul
+            if not files:
+                break
+
             for f in files:
                 nume = f["name"]
                 total_fisiere_gasite += 1
@@ -260,11 +274,14 @@ def main():
 
                 if nume not in raw_inventory:
                     raw_inventory[nume] = []
-                raw_inventory[nume].append(meta_item)
+
+                # Evităm adăugarea aceluiași ID fizic dacă s-a reluat o pagină
+                if not any(x["id"] == f["id"] for x in raw_inventory[nume]):
+                    raw_inventory[nume].append(meta_item)
 
             if fisiere_de_la_ultimul_save >= 10000:
                 fisiere_de_la_ultimul_save = 0
-                print(f"📊 [Progres Scanare RAW] {total_fisiere_gasite:,} fișiere fizice parcurse...", flush=True)
+                print(f"📊 [Progres Scanare RAW] {total_fisiere_gasite:,} fișiere fizice parcurse ({len(raw_inventory):,} unice)...", flush=True)
 
             page_token = response.get("nextPageToken")
             if not page_token:
@@ -289,7 +306,7 @@ def main():
         if len(lista_variante) == 1:
             castigator = lista_variante[0]
         else:
-            # Sortăm: preferă fișierele cu size > 0 și cel mai recent createdTime
+            # Sortare: preferă fișierele cu size > 0 și cel mai recent createdTime
             lista_variante.sort(
                 key=lambda x: (x["size"] > 0, x["createdTime"]), 
                 reverse=True
@@ -299,7 +316,7 @@ def main():
             for duplicat in lista_variante[1:]:
                 ids_de_sters.append(duplicat["id"])
 
-        # Preluăm starea veche (flag-urile de prelucrare) dacă fișierul a mai fost procesat anterior
+        # Preluăm starea veche (flag-urile de prelucrare)
         vechea_stare = old_index_map.get(nume_fisier, {})
         if vechea_stare:
             stari_recuperate += 1
