@@ -322,9 +322,10 @@ def main():
                 if not any(x["id"] == f["id"] for x in raw_inventory[nume]):
                     raw_inventory[nume].append(meta_item)
 
-            # AFISARE LIVE PROGRES LA FIECARE 1.000 FIȘIERE CITITE
-            durata_partiala = round(time.time() - timp_start, 1)
-            print(f"   ⏳ [LIVE Progres] Parcurse {total_fisiere_gasite:,} fișiere fizice pe Drive ({durata_partiala}s)...", flush=True)
+                # AFISARE RAPIDĂ DE PROGRES LIVE LA FIECARE 500 FIȘIERE CITITE
+                if total_fisiere_gasite % 500 == 0:
+                    durata_partiala = round(time.time() - timp_start, 1)
+                    print(f"   ⏳ [LIVE] Scanate: {total_fisiere_gasite:,} fișiere fizice pe Drive ({durata_partiala}s)...", flush=True)
 
             if fisiere_de_la_ultimul_save >= 10000:
                 unice_curente = len(raw_inventory)
