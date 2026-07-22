@@ -8,11 +8,22 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-# Printam imediat la nivel de STDOUT
+# Printăm instant pe ecran
 sys.stdout.write("============================================================\n")
 sys.stdout.write("🚀 SCRIPTUL BUILD_INDEX.PY A PORNIT FIZIC ÎN RUNNER!\n")
 sys.stdout.write("============================================================\n")
 sys.stdout.flush()
+
+# ==============================================================================
+# CONFIGURARE CĂI DE IMPORT (TREBUIE SĂ FIE ÎNAINTE DE DRIVE_CONFIG)
+# ==============================================================================
+DIRECTOR_CURENT = Path(__file__).resolve().parent
+RADACINA_PROIECT = DIRECTOR_CURENT.parent
+
+if str(RADACINA_PROIECT) not in sys.path:
+    sys.path.insert(0, str(RADACINA_PROIECT))
+if str(DIRECTOR_CURENT) not in sys.path:
+    sys.path.insert(0, str(DIRECTOR_CURENT))
 
 import httplib2
 from google.oauth2 import service_account
@@ -20,6 +31,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
 
+# Importăm drive_config ABIA DUPĂ ce am setat sys.path
 from drive_config import (
     FOLDER_TEMP_INDEXES_ID,
     FOLDERE_XML_IDS,
@@ -58,7 +70,6 @@ def get_drive_service():
         creds = service_account.Credentials.from_service_account_info(
             info, scopes=["https://www.googleapis.com/auth/drive"]
         )
-        # Forțăm un obiect HTTP propriu cu timeout dur ca să prevenim Deadlock-ul
         http_client = httplib2.Http(timeout=15)
         http_auth = creds.authorize(http_client)
 
