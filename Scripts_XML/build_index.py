@@ -1,5 +1,11 @@
-import os
 import sys
+
+# PRINTEAZĂ INSTANTANEU ÎNAINTE DE ORICE IMPORT SAU CONEXIUNE
+print("============================================================", flush=True)
+print("🚀 SCRIPTUL BUILD_INDEX.PY A PORNIT FIZIC ÎN RUNNER!", flush=True)
+print("============================================================", flush=True)
+
+import os
 import time
 import json
 import socket
@@ -8,11 +14,11 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-print("🚀 INIȚIALIZARE SCRIPT BUILD_INDEX.PY...", flush=True)
+print("📦 Modul Python încărcat cu succes. Configurăm importurile Google...", flush=True)
 
-# ==============================================================================
-# CONFIGURARE CĂI DE IMPORT
-# ==============================================================================
+# Setează timeout strict la nivel de socket de rețea (10 secunde max)
+socket.setdefaulttimeout(10)
+
 DIRECTOR_CURENT = Path(__file__).resolve().parent
 RADACINA_PROIECT = DIRECTOR_CURENT.parent
 
@@ -44,11 +50,8 @@ INDEX_FILE_ID = (
 NUME_MASTER_INDEX_XML = "index_xml.json"
 
 
-# ==============================================================================
-# AUTENTIFICARE GOOGLE DRIVE API
-# ==============================================================================
 def get_drive_service():
-    socket.setdefaulttimeout(60)
+    print("🔑 Autentificare și conectare la Google Drive API...", flush=True)
     creds_json = (
         os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
         or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
@@ -61,28 +64,18 @@ def get_drive_service():
             creds = service_account.Credentials.from_service_account_info(
                 info, scopes=["https://www.googleapis.com/auth/drive"]
             )
-            return build("drive", "v3", credentials=creds, cache_discovery=False)
+            # cache_discovery=False previne blocajele la descărcarea schemei API
+            service = build("drive", "v3", credentials=creds, cache_discovery=False)
+            print("✅ Conexiune Drive API stabilită cu succes!", flush=True)
+            return service
         except Exception as e:
-            print(f"❌ Eroare la citirea secretului JSON: {e}", flush=True)
+            print(f"❌ Eroare la autentificare JSON Secret: {e}", flush=True)
             sys.exit(1)
-
-    cale_local = RADACINA_PROIECT / "service_account.json"
-    if cale_local.exists():
-        try:
-            creds = service_account.Credentials.from_service_account_file(
-                str(cale_local), scopes=["https://www.googleapis.com/auth/drive"]
-            )
-            return build("drive", "v3", credentials=creds, cache_discovery=False)
-        except Exception as e:
-            print(f"❌ Eroare la citirea fișierului local service_account.json: {e}", flush=True)
 
     print("❌ Nu s-a găsit secretul GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
     sys.exit(1)
 
 
-# ==============================================================================
-# SALVARE MASTER INDEX PE DRIVE
-# ==============================================================================
 def salveaza_master_index_xml(service, data, nume_fisier=NUME_MASTER_INDEX_XML, mesaj="Master Index XML"):
     data["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
     cale_temp = Path(nume_fisier)
@@ -133,9 +126,6 @@ def salveaza_master_index_xml(service, data, nume_fisier=NUME_MASTER_INDEX_XML, 
     return False
 
 
-# ==============================================================================
-# CURĂȚARE MICRO-INDECȘI TEMPORARI
-# ==============================================================================
 def curata_micro_indecsi_procesati(service):
     try:
         query_temp = f"'{FOLDER_TEMP_INDEXES_ID}' in parents and name contains 'temp_index_' and trashed = false"
@@ -151,16 +141,13 @@ def curata_micro_indecsi_procesati(service):
                     service.files().update(**params).execute()
                 except Exception as e:
                     print(f"⚠️ Nu s-a putut șterge micro-indexul {f['name']}: {e}", flush=True)
-            print("✅ Micro-indecșii temporari au fost curățați cu succes!", flush=True)
+            print("✅ Micro-indecșii temporari au fost curățiți cu succes!", flush=True)
         else:
             print("\n✨ Nu există micro-indecși temporari de curățat.", flush=True)
     except Exception as e:
         print(f"⚠️ Eroare la curățarea micro-indecșilor: {e}", flush=True)
 
 
-# ==============================================================================
-# EXECUȚIE TRASH MULTI-THREADED
-# ==============================================================================
 def executa_trash_multi_threaded(ids_de_sters, max_workers=15):
     if not ids_de_sters:
         print("✨ Nu există fișiere goale sau duplicate de șters! Totul este curat.", flush=True)
@@ -216,26 +203,19 @@ def executa_trash_multi_threaded(ids_de_sters, max_workers=15):
     print("=" * 60 + "\n", flush=True)
 
 
-# ==============================================================================
-# MAIN ENGINE
-# ==============================================================================
 def main():
-    print("============================================================", flush=True)
-    print("🚀 FULL RAW INVENTORY & STATE PRESERVING CLEANUP - XML", flush=True)
-    print("============================================================", flush=True)
-
-    print("🔑 Conectare la Google Drive API...", flush=True)
+    print("🚀 Intrăm în funcția principală main()...", flush=True)
     service = get_drive_service()
-    print("✅ Conectat cu succes!", flush=True)
 
     raw_inventory = {}
     total_fisiere_gasite = 0
     fisiere_de_la_ultimul_save = 0
     timp_start = time.time()
 
-    # Scanare fizică Cross-Drive
+    print(f"📂 Începem scanarea celor {len(FOLDERE_XML_IDS)} foldere Shared Drive...", flush=True)
+
     for index_folder, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
-        print(f"\n📂 [{index_folder}/{len(FOLDERE_XML_IDS)}] Pornire scanare folder Google Drive ID: {folder_id}...", flush=True)
+        print(f"\n🔍 [{index_folder}/{len(FOLDERE_XML_IDS)}] Scanăm folderul Drive ID: {folder_id}...", flush=True)
         page_token = None
         query = f"'{folder_id}' in parents and trashed = false"
 
@@ -245,7 +225,7 @@ def main():
 
         while True:
             if page_token in seen_tokens:
-                print(f"⚠️ DETECTATĂ BUCLĂ REPETITIVĂ DE TOKEN! Oprim scanarea pe folderul {folder_id[:8]}.", flush=True)
+                print(f"⚠️ Detectată buclă de token pe folderul {folder_id[:8]}.", flush=True)
                 break
             if page_token:
                 seen_tokens.add(page_token)
@@ -265,15 +245,15 @@ def main():
                     break
                 except (socket.error, socket.timeout, HttpError, Exception) as e:
                     incercare += 1
-                    pauza = min(2 ** incercare, 30)
-                    print(f"⚠️ Connection Error pe pageToken ({incercare}): {e}. Pauză {pauza}s și reîncercăm...", flush=True)
+                    pauza = min(2 ** incercare, 15)
+                    print(f"⚠️ Connection Error pe pageToken ({incercare}): {e}. Pauză {pauza}s...", flush=True)
                     time.sleep(pauza)
                     service = get_drive_service()
 
             files = response.get("files", [])
             
             if not files:
-                print(f"ℹ️ Niciun fișier găsit pe pagina curentă. Încheiat folderul {folder_id[:8]}.", flush=True)
+                print(f"ℹ️ Folderul {folder_id[:8]} nu mai are pagini suplimentare.", flush=True)
                 break
 
             for f in files:
@@ -314,7 +294,7 @@ def main():
                 )
 
                 if fisiere_parcurse_folder >= 20000 and fisiere_unice_noi < 50:
-                    print(f"🛑 [CIRCUIT BREAKER] Folderul {folder_id[:8]} a atins limita. Trecem mai departe!", flush=True)
+                    print(f"🛑 [CIRCUIT BREAKER] Folderul {folder_id[:8]} atins limita de saturare.", flush=True)
                     break
 
             page_token = response.get("nextPageToken")
@@ -324,9 +304,7 @@ def main():
     print(f"\n📊 SCANARE CROSS-DRIVE FINALIZATĂ!")
     print(f"📊 TOTAL FIȘIERE FIZICE PARCURSE: {total_fisiere_gasite:,}", flush=True)
 
-    # ==========================================================================
     # CONSOLIDARE SEMANTICĂ ȘI DEDUBLARE
-    # ==========================================================================
     print("\n" + "=" * 60, flush=True)
     print("🧠 ANALIZĂ SEMANTICĂ (AN_PAG), FILTRARE <10B...", flush=True)
     print("=" * 60, flush=True)
@@ -401,7 +379,6 @@ def main():
     print(f"🗑️ Fișiere goale (<10B) identificate: {fisiere_mici_eliminate:,}", flush=True)
     print(f"🗑️ Total ID-uri trimise la coș: {len(ids_de_sters):,}", flush=True)
 
-    # SALVARE MASTER INDEX FINAL
     salvat_cu_succes = salveaza_master_index_xml(
         service, 
         master_index, 
@@ -410,14 +387,12 @@ def main():
     )
 
     if not salvat_cu_succes:
-        print("❌ ABORT: Nu s-a putut salva indexul final pe Drive. Se oprește ștergerea.", flush=True)
+        print("❌ ABORT: Nu s-a putut salva indexul final pe Drive.", flush=True)
         sys.exit(1)
 
-    # TRASH MULTI-THREADED
     if ids_de_sters:
         executa_trash_multi_threaded(ids_de_sters, max_workers=15)
 
-    # CURĂȚARE MICRO-INDECȘI
     curata_micro_indecsi_procesati(service)
 
     print("\n============================================================", flush=True)
