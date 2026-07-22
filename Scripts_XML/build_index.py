@@ -259,6 +259,7 @@ def main():
     raw_inventory = {}
     total_fisiere_gasite = 0
     fisiere_de_la_ultimul_save = 0
+    timp_start = time.time()
 
     # 2. Scanare fizică Cross-Drive
     for index_folder, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
@@ -321,13 +322,17 @@ def main():
                 if not any(x["id"] == f["id"] for x in raw_inventory[nume]):
                     raw_inventory[nume].append(meta_item)
 
+            # AFISARE LIVE PROGRES LA FIECARE 1.000 FIȘIERE CITITE
+            durata_partiala = round(time.time() - timp_start, 1)
+            print(f"   ⏳ [LIVE Progres] Parcurse {total_fisiere_gasite:,} fișiere fizice pe Drive ({durata_partiala}s)...", flush=True)
+
             if fisiere_de_la_ultimul_save >= 10000:
                 unice_curente = len(raw_inventory)
                 fisiere_unice_noi = unice_curente - unice_la_ultimul_check
                 fisiere_de_la_ultimul_save = 0
                 unice_la_ultimul_check = unice_curente
 
-                print(f"📊 [Progres Scanare RAW] {total_fisiere_gasite:,} parcurse total ({unice_curente:,} unice | +{fisiere_unice_noi:,} noi în ultimele 10k)...", flush=True)
+                print(f"📊 [Backup Interimar] {total_fisiere_gasite:,} parcurse total ({unice_curente:,} unice | +{fisiere_unice_noi:,} noi în ultimele 10k)...", flush=True)
                 
                 salveaza_master_index_xml(
                     service, 
