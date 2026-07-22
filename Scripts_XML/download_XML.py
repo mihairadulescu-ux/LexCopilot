@@ -57,7 +57,7 @@ URL_WSDL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 REZULTATE_PER_PAGINA = 10
 LIMITA_PAGINI_GOALE_CONSECUTIVE = 20  # Condiție de oprire a anului
 
-# PRELUARE ANI DIN ARGUMENTELE LINIEI DE COMANDĂ (PENTRU GITHUB ACTIONS MATRIX)
+# PRELUARE ANI DIN ARGUMENTELE LINIEI DE COMANDĂ
 if len(sys.argv) >= 3:
     AN_START = int(sys.argv[1])
     AN_END = int(sys.argv[2])
@@ -251,7 +251,7 @@ def main():
     drive_service = get_drive_service()
     soap_client = JustRoSoapClient(URL_WSDL)
 
-    # 1. GENERARE INDEX VIRTUAL LIVE (MASTER INDEX + MICRO-INDEKSI + DELTA DRIVE)
+    # 1. GENERARE INDEX VIRTUAL LIVE
     print("\n⚡ Construire Index Virtual LIVE (Master Index + Micro-Indecși + Delta Drive)...", flush=True)
     fisiere_explicite = set()
     try:
@@ -265,19 +265,21 @@ def main():
     micro_updates = {}
     fisiere_descarcate_sesiune = 0
 
+    # Pattern flexibil care recunoaște și brut_XML_ și brut_legislatie_
+    pattern_an = re.compile(r"^brut_(?:XML|legislatie)_(\d+)_pag(\d+)\.xml$", re.IGNORECASE)
+
     # 2. Parcurgere ani
     for an in range(AN_START, AN_END + 1):
         folder_destinatie_id = obtine_folder_id_pentru_an(an)
         pagini_descarcate_an_curent = 0
 
-        # Identificare pagini existente în index pentru anul curent
-        pattern_an = re.compile(rf"^brut_legislatie_{an}_pag(\d+)\.xml$")
+        # Identificare pagini existente în index pentru anul curent (ambele denumiri)
         set_pagini_existente = set()
 
         for nume_f in fisiere_explicite.union(micro_updates.keys()):
             match = pattern_an.match(nume_f)
-            if match:
-                set_pagini_existente.add(int(match.group(1)))
+            if match and int(match.group(1)) == an:
+                set_pagini_existente.add(int(match.group(2)))
 
         # PASUL A: UMPLEREA GĂURILOR DIN SECVENȚĂ (GAP-FILLING)
         if set_pagini_existente:
@@ -289,7 +291,7 @@ def main():
             if gauri:
                 print(f"🔎 [GAP-FILLING] Identificate {len(gauri)} găuri în secvență: {gauri[:10]}... Se descarcă paginile lipsă...", flush=True)
                 for pag_gap in gauri:
-                    nume_xml_gap = f"brut_legislatie_{an}_pag{pag_gap}.xml"
+                    nume_xml_gap = f"brut_XML_{an}_pag{pag_gap}.xml"
                     print(f"📥 [GAP] Descărcare Just.ro: An={an}, Pagina={pag_gap} -> {nume_xml_gap}...", flush=True)
                     
                     continut_gap = soap_client.descarca_pagina(an, pag_gap, max_retries=2)
@@ -310,7 +312,6 @@ def main():
                             print(f"   ✅ [GAP REPARAT] Salvat cu succes! [ID: {file_id[:10]}...]", flush=True)
                     time.sleep(0.3)
 
-            # După repararea găurilor, continuăm de la următoarea pagină după maximul existent
             pagina_start = max_pag_existenta + 1
             print(f"⏩ Se continuă descărcarea anului {an} de la Pagina {pagina_start}...", flush=True)
         else:
@@ -322,10 +323,12 @@ def main():
         pagini_goale_consecutive = 0
 
         while True:
-            nume_xml = f"brut_legislatie_{an}_pag{pagina}.xml"
+            nume_xml = f"brut_XML_{an}_pag{pagina}.xml"
+            nume_xml_vechi = f"brut_legislatie_{an}_pag{pagina}.xml"
 
-            # Double-check anti-duplicate
-            if nume_xml in fisiere_explicite or nume_xml in micro_updates:
+            # Double-check anti-duplicate (verifică ambele denumiri)
+            if (nume_xml in fisiere_explicite or nume_xml in micro_updates or 
+                nume_xml_vechi in fisiere_explicite or nume_xml_vechi in micro_updates):
                 pagina += 1
                 pagini_goale_consecutive = 0
                 continue
