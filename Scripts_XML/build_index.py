@@ -8,16 +8,16 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-# Printăm direct la nivel de STDOUT (fără buffering)
+# Printăm direct pe STDOUT cu flush instant
 sys.stdout.write("============================================================\n")
 sys.stdout.write("🚀 SCRIPTUL BUILD_INDEX.PY A PORNIT FIZIC ÎN RUNNER!\n")
 sys.stdout.write("============================================================\n")
 sys.stdout.flush()
 
-# Setăm timeout dur pe socket la nivel de sistem
-socket.setdefaulttimeout(15)
+# Setăm timeout dur pe socket global (30s max pe orice cerere de rețea)
+socket.setdefaulttimeout(30)
 
-# Configurare căi import
+# Configurare căi de import
 DIRECTOR_CURENT = Path(__file__).resolve().parent
 RADACINA_PROIECT = DIRECTOR_CURENT.parent
 
@@ -27,7 +27,6 @@ if str(DIRECTOR_CURENT) not in sys.path:
     sys.path.insert(0, str(DIRECTOR_CURENT))
 
 from google.oauth2 import service_account
-from google.auth.transport.requests import AuthorizedSession
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
@@ -50,15 +49,8 @@ INDEX_FILE_ID = (
 NUME_MASTER_INDEX_XML = "index_xml.json"
 
 
-# Wrapper pentru forțare timeout pe fiecare apel HTTP
-class TimeoutAuthorizedSession(AuthorizedSession):
-    def request(self, method, url, **kwargs):
-        kwargs.setdefault('timeout', 15)
-        return super().request(method, url, **kwargs)
-
-
 def get_drive_service():
-    sys.stdout.write("🔑 Conectare Google Drive API (cu Timeout dur pe Request-uri)...\n")
+    sys.stdout.write("🔑 Conectare Google Drive API...\n")
     sys.stdout.flush()
 
     creds_json = (
@@ -77,11 +69,7 @@ def get_drive_service():
         creds = service_account.Credentials.from_service_account_info(
             info, scopes=["https://www.googleapis.com/auth/drive"]
         )
-        
-        # Session custom care forțează un timeout de 15s pe orice request HTTP
-        authed_session = TimeoutAuthorizedSession(creds)
-        service = build("drive", "v3", session=authed_session, cache_discovery=False)
-        
+        service = build("drive", "v3", credentials=creds, cache_discovery=False)
         sys.stdout.write("✅ Conexiune Drive API stabilită cu succes!\n")
         sys.stdout.flush()
         return service
