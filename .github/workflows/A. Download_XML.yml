@@ -20,7 +20,7 @@ jobs:
     
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 10
       matrix:
         include:
           - start_year: 1990
@@ -31,7 +31,11 @@ jobs:
             end_year: 2005
           - start_year: 2006
             end_year: 2010
-
+          - start_year: 2011
+            end_year: 2015
+          - start_year: 2020
+            end_year: 2026
+            
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
