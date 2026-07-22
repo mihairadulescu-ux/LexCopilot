@@ -32,6 +32,7 @@ jobs:
       - name: Executare Construire / Actualizare Index
         env:
           PYTHONUNBUFFERED: "1"
+          PYTHONIOENCODING: "utf-8"
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           XML_STORAGE_INDEX: ${{ secrets.XML_STORAGE_INDEX }}
           IS_FULL_INPUT: ${{ github.event.inputs.full_index }}
