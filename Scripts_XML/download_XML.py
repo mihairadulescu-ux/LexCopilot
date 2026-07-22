@@ -46,6 +46,7 @@ except ImportError:
 # ==============================================================================
 URL_WSDL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 REZULTATE_PER_PAGINA = 10
+LIMITA_PAGINI_GOALE_CONSECUTIVE = 20  # Condiție de oprire a anului
 
 # PRELUARE ANI DIN ARGUMENTELE LINIEI DE COMANDĂ (PENTRU GITHUB ACTIONS MATRIX)
 if len(sys.argv) >= 3:
@@ -118,9 +119,9 @@ class JustRoSoapClient:
         print("❌ Nu s-a putut obține token-ul după 3 încercări!", flush=True)
         return False
 
-    def descarca_pagina(self, an, pagina):
-        """Interogare pagină folosind SearchModel."""
-        for incercare in range(3):
+    def descarca_pagina(self, an, pagina, max_retries=2):
+        """Interogare pagină standard Just.ro."""
+        for incercare in range(1, max_retries + 1):
             try:
                 search_model = self.client.factory.create('SearchModel')
                 search_model.NumarPagina = pagina
@@ -128,14 +129,26 @@ class JustRoSoapClient:
                 search_model.SearchAn = an
 
                 raspuns = self.client.service.Search(search_model, self.token)
-                return str(raspuns)
+                
+                # Verificare răspuns valid cu date reale (minim 50 caractere)
+                if raspuns and "Legi[] = None" not in str(raspuns) and len(str(raspuns).strip()) >= 50:
+                    return str(raspuns)
+                else:
+                    if incercare < max_retries:
+                        time.sleep(1)
+                        continue
+                    return None
+
             except Exception as e:
-                if "token" in str(e).lower() or "expired" in str(e).lower() or "unauthorized" in str(e).lower():
+                err_str = str(e).lower()
+                if "token" in err_str or "expired" in err_str or "unauthorized" in err_str:
                     print("🔄 Token expirat. Se solicită un token nou...", flush=True)
                     self.renoieste_token()
                 else:
-                    print(f"⚠️ Eroare la descărcarea paginii An={an}, Pagina={pagina}: {e}", flush=True)
-                    time.sleep(2)
+                    if incercare < max_retries:
+                        time.sleep(1.5)
+                    else:
+                        return None
         return None
 
 
@@ -243,56 +256,63 @@ def main():
     micro_updates = {}
     fisiere_descarcate_sesiune = 0
 
-    # 2. Parcurgere doar a anilor desemnați
+    # 2. Parcurgere ani
     for an in range(AN_START, AN_END + 1):
         folder_destinatie_id = obtine_folder_id_pentru_an(an)
         pagina = 1
         pagini_sarite_an_curent = 0
         pagini_descarcate_an_curent = 0
+        pagini_goale_consecutive = 0
 
         print(f"\n📅 Începere procesare An: {an}...", flush=True)
 
         while True:
             nume_xml = f"brut_legislatie_{an}_pag{pagina}.xml"
 
-            # 3. VERIFICARE ANTI-DUPLICARE (Skip instant pe paginile care EXISTĂ deja)
+            # 3. VERIFICARE ANTI-DUPLICATE (Skip instant pe fișierele existente)
             if nume_xml in fisiere_explicite or nume_xml in micro_updates:
                 pagini_sarite_an_curent += 1
                 pagina += 1
-                continue  # Sare instant la pagina următoare, FĂRĂ să oprească anul!
+                pagini_goale_consecutive = 0  # Existenta pe Drive confirma ca pagina este valida
+                continue
 
-            # Dacă am trecut de Skip, înseamnă că am găsit prima pagină NOUĂ / LIPSĂ!
-            if pagini_sarite_an_curent > 0 and pagini_descarcate_an_curent == 0:
-                print(f"⏩ Resume automat: S-a făcut Skip peste {pagini_sarite_an_curent} pagini existente. Se reia descărcarea de la Pagina {pagina}...", flush=True)
+            if pagini_sarite_an_curent > 0 and pagini_descarcate_an_curent == 0 and pagini_goale_consecutive == 0:
+                print(f"⏩ Resume automat: S-a făcut Skip peste {pagini_sarite_an_curent} pagini existente. Se verifică de la Pagina {pagina}...", flush=True)
 
             print(f"📥 Descărcare Just.ro: An={an}, Pagina={pagina} -> {nume_xml}...", flush=True)
-            continut_xml = soap_client.descarca_pagina(an, pagina)
+            continut_xml = soap_client.descarca_pagina(an, pagina, max_retries=2)
 
-            # SINGURA CONDIȚIE DE OPRIRE A ANULUI: Răspuns gol de la serverul Just.ro!
-            if not continut_xml or "Legi[] = None" in continut_xml or len(continut_xml.strip()) < 50:
-                total_pagini_an = pagina - 1
-                print(f"ℹ️ S-au terminat paginile pentru anul {an} la pagina {total_pagini_an} (Existente în Index: {pagini_sarite_an_curent}, Descărcate Noi: {pagini_descarcate_an_curent}).", flush=True)
-                break
+            if continut_xml:
+                # Pagina este validă!
+                pagini_goale_consecutive = 0
+                file_id = salveaza_xml_in_drive(drive_service, continut_xml, nume_xml, folder_destinatie_id)
 
-            # Salvare în Drive
-            file_id = salveaza_xml_in_drive(drive_service, continut_xml, nume_xml, folder_destinatie_id)
+                if file_id:
+                    micro_updates[nume_xml] = {
+                        "id": file_id,
+                        "folder_id": folder_destinatie_id,
+                        "an": an,
+                        "pagina": pagina,
+                        "downloaded": True,
+                        "processed": False
+                    }
+                    fisiere_descarcate_sesiune += 1
+                    pagini_descarcate_an_curent += 1
+                    print(f"   ✅ Salvat cu succes! [ID: {file_id[:10]}...]", flush=True)
 
-            if file_id:
-                micro_updates[nume_xml] = {
-                    "id": file_id,
-                    "folder_id": folder_destinatie_id,
-                    "an": an,
-                    "pagina": pagina,
-                    "downloaded": True,
-                    "processed": False
-                }
-                fisiere_descarcate_sesiune += 1
-                pagini_descarcate_an_curent += 1
-                print(f"   ✅ Salvat cu succes! [ID: {file_id[:10]}...]", flush=True)
+                    if len(micro_updates) >= 20:
+                        salveaza_micro_index(drive_service, micro_updates)
+                        micro_updates = {}
+            else:
+                # Răspuns gol (sau pagina nu există)
+                pagini_goale_consecutive += 1
+                print(f"   ⚠️ Pagina {pagina} este GOLĂ/lipsă ({pagini_goale_consecutive}/{LIMITA_PAGINI_GOALE_CONSECUTIVE} consecutive)...", flush=True)
 
-                if len(micro_updates) >= 20:
-                    salveaza_micro_index(drive_service, micro_updates)
-                    micro_updates = {}
+                # CONDIȚIE DE OPRIRE A ANULUI: 20 de pagini goale consecutive!
+                if pagini_goale_consecutive >= LIMITA_PAGINI_GOALE_CONSECUTIVE:
+                    total_pagini_valide = pagina - LIMITA_PAGINI_GOALE_CONSECUTIVE
+                    print(f"\n🛑 S-a atins limita de {LIMITA_PAGINI_GOALE_CONSECUTIVE} pagini goale consecutive! Anul {an} este complet (Aproximativ {total_pagini_valide} pagini reale). Trecem la anul următor.\n", flush=True)
+                    break
 
             pagina += 1
             time.sleep(0.3)
