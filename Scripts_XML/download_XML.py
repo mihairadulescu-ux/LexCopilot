@@ -259,31 +259,72 @@ def main():
     # 2. Parcurgere ani
     for an in range(AN_START, AN_END + 1):
         folder_destinatie_id = obtine_folder_id_pentru_an(an)
-        pagina = 1
-        pagini_sarite_an_curent = 0
         pagini_descarcate_an_curent = 0
-        pagini_goale_consecutive = 0
 
-        print(f"\n📅 Începere procesare An: {an}...", flush=True)
+        # Identificare pagini existente în index pentru anul curent
+        pattern_an = re.compile(rf"^brut_legislatie_{an}_pag(\d+)\.xml$")
+        set_pagini_existente = set()
+
+        for nume_f in fisiere_explicite.union(micro_updates.keys()):
+            match = pattern_an.match(nume_f)
+            if match:
+                set_pagini_existente.add(int(match.group(1)))
+
+        # PASUL A: UMPLEREA GĂURILOR DIN SECVENȚĂ (GAP-FILLING)
+        if set_pagini_existente:
+            max_pag_existenta = max(set_pagini_existente)
+            gauri = [p for p in range(1, max_pag_existenta) if p not in set_pagini_existente]
+
+            print(f"\n📅 Anul {an}: Găsite {len(set_pagini_existente):,} pagini existente pe Drive (Ultima: pag{max_pag_existenta}).", flush=True)
+
+            if gauri:
+                print(f"🔎 [GAP-FILLING] Identificate {len(gauri)} găuri în secvență: {gauri[:10]}... Se descarcă paginile lipsă...", flush=True)
+                for pag_gap in gauri:
+                    nume_xml_gap = f"brut_legislatie_{an}_pag{pag_gap}.xml"
+                    print(f"📥 [GAP] Descărcare Just.ro: An={an}, Pagina={pag_gap} -> {nume_xml_gap}...", flush=True)
+                    
+                    continut_gap = soap_client.descarca_pagina(an, pag_gap, max_retries=2)
+                    if continut_gap:
+                        file_id = salveaza_xml_in_drive(drive_service, continut_gap, nume_xml_gap, folder_destinatie_id)
+                        if file_id:
+                            micro_updates[nume_xml_gap] = {
+                                "id": file_id,
+                                "folder_id": folder_destinatie_id,
+                                "an": an,
+                                "pagina": pag_gap,
+                                "downloaded": True,
+                                "processed": False
+                            }
+                            fisiere_descarcate_sesiune += 1
+                            pagini_descarcate_an_curent += 1
+                            set_pagini_existente.add(pag_gap)
+                            print(f"   ✅ [GAP REPARAT] Salvat cu succes! [ID: {file_id[:10]}...]", flush=True)
+                    time.sleep(0.3)
+
+            # După repararea găurilor, continuăm de la următoarea pagină după maximul existent
+            pagina_start = max_pag_existenta + 1
+            print(f"⏩ Se continuă descărcarea anului {an} de la Pagina {pagina_start}...", flush=True)
+        else:
+            pagina_start = 1
+            print(f"\n📅 Anul {an}: Nicio pagină găsită în Index. Se pornește de la Pagina 1...", flush=True)
+
+        # PASUL B: DESCĂRCARE CONTINUĂ DE LA PAGINA_START PÂNĂ LA LIMITA DE 20 PAGINI GOALE
+        pagina = pagina_start
+        pagini_goale_consecutive = 0
 
         while True:
             nume_xml = f"brut_legislatie_{an}_pag{pagina}.xml"
 
-            # 3. VERIFICARE ANTI-DUPLICATE (Skip instant pe fișierele existente)
+            # Double-check anti-duplicate
             if nume_xml in fisiere_explicite or nume_xml in micro_updates:
-                pagini_sarite_an_curent += 1
                 pagina += 1
-                pagini_goale_consecutive = 0  # Existenta pe Drive confirma ca pagina este valida
+                pagini_goale_consecutive = 0
                 continue
-
-            if pagini_sarite_an_curent > 0 and pagini_descarcate_an_curent == 0 and pagini_goale_consecutive == 0:
-                print(f"⏩ Resume automat: S-a făcut Skip peste {pagini_sarite_an_curent} pagini existente. Se verifică de la Pagina {pagina}...", flush=True)
 
             print(f"📥 Descărcare Just.ro: An={an}, Pagina={pagina} -> {nume_xml}...", flush=True)
             continut_xml = soap_client.descarca_pagina(an, pagina, max_retries=2)
 
             if continut_xml:
-                # Pagina este validă!
                 pagini_goale_consecutive = 0
                 file_id = salveaza_xml_in_drive(drive_service, continut_xml, nume_xml, folder_destinatie_id)
 
@@ -304,11 +345,9 @@ def main():
                         salveaza_micro_index(drive_service, micro_updates)
                         micro_updates = {}
             else:
-                # Răspuns gol (sau pagina nu există)
                 pagini_goale_consecutive += 1
                 print(f"   ⚠️ Pagina {pagina} este GOLĂ/lipsă ({pagini_goale_consecutive}/{LIMITA_PAGINI_GOALE_CONSECUTIVE} consecutive)...", flush=True)
 
-                # CONDIȚIE DE OPRIRE A ANULUI: 20 de pagini goale consecutive!
                 if pagini_goale_consecutive >= LIMITA_PAGINI_GOALE_CONSECUTIVE:
                     total_pagini_valide = pagina - LIMITA_PAGINI_GOALE_CONSECUTIVE
                     print(f"\n🛑 S-a atins limita de {LIMITA_PAGINI_GOALE_CONSECUTIVE} pagini goale consecutive! Anul {an} este complet (Aproximativ {total_pagini_valide} pagini reale). Trecem la anul următor.\n", flush=True)
