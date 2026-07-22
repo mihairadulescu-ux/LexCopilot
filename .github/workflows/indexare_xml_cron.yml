@@ -43,6 +43,6 @@ jobs:
             echo "🚀 [Strategie YML] Se execută FULL RE-INDEX COMPLET (build_index.py)..."
             python -u Scripts_XML/build_index.py
           else
-            echo "⚡ [Strategie YML] Se execută INCREMENTAL INDEX & IGIENIZARE (update_incremental_index.py)..."
+            echo "⚡ [Strategie YML] Se execută INCREMENTAL INDEX (update_incremental_index.py)..."
             python -u Scripts_XML/update_incremental_index.py
           fi
