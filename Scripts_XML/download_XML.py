@@ -229,7 +229,7 @@ def main():
     drive_service = get_drive_service()
     soap_client = JustRoSoapClient(URL_WSDL)
 
-    # 1. GENERARE INDEX VIRTUAL LIVE (MASTER + MICRO-INDEKSI + DELTA)
+    # 1. GENERARE INDEX VIRTUAL LIVE (MASTER INDEX + MICRO-INDEKSI + DELTA DRIVE)
     print("\n⚡ Construire Index Virtual LIVE (Master Index + Micro-Indecși + Delta Drive)...", flush=True)
     fisiere_explicite = set()
     try:
@@ -247,33 +247,34 @@ def main():
     for an in range(AN_START, AN_END + 1):
         folder_destinatie_id = obtine_folder_id_pentru_an(an)
         pagina = 1
-        consecutive_skips = 0
+        pagini_sarite_an_curent = 0
+        pagini_descarcate_an_curent = 0
 
         print(f"\n📅 Începere procesare An: {an}...", flush=True)
 
         while True:
             nume_xml = f"brut_legislatie_{an}_pag{pagina}.xml"
 
-            # 3. Check & Fast-Forward
+            # 3. VERIFICARE ANTI-DUPLICARE (Skip instant pe paginile care EXISTĂ deja)
             if nume_xml in fisiere_explicite or nume_xml in micro_updates:
-                consecutive_skips += 1
+                pagini_sarite_an_curent += 1
                 pagina += 1
-                
-                # Dacă găsim 25 de pagini la rând care există deja în indexul LIVE, trecem la anul următor!
-                if consecutive_skips > 25:
-                    print(f"⏭️ FAST-FORWARD: Găsite 25 pagini consecutive existente în Indexul Virtual pentru {an}. An marcat complet!", flush=True)
-                    break
-                continue
+                continue  # Sare instant la pagina următoare, FĂRĂ să oprească anul!
 
-            consecutive_skips = 0  # Resetăm numărătorul la prima pagină lipsă
+            # Dacă am trecut de Skip, înseamnă că am găsit prima pagină NOUĂ / LIPSĂ!
+            if pagini_sarite_an_curent > 0 and pagini_descarcate_an_curent == 0:
+                print(f"⏩ Resume automat: S-a făcut Skip peste {pagini_sarite_an_curent} pagini existente. Se reia descărcarea de la Pagina {pagina}...", flush=True)
 
             print(f"📥 Descărcare Just.ro: An={an}, Pagina={pagina} -> {nume_xml}...", flush=True)
             continut_xml = soap_client.descarca_pagina(an, pagina)
 
+            # SINGURA CONDIȚIE DE OPRIRE A ANULUI: Răspuns gol de la serverul Just.ro!
             if not continut_xml or "Legi[] = None" in continut_xml or len(continut_xml.strip()) < 50:
-                print(f"ℹ️ S-au terminat paginile pentru anul {an} la pagina {pagina - 1}.", flush=True)
+                total_pagini_an = pagina - 1
+                print(f"ℹ️ S-au terminat paginile pentru anul {an} la pagina {total_pagini_an} (Existente în Index: {pagini_sarite_an_curent}, Descărcate Noi: {pagini_descarcate_an_curent}).", flush=True)
                 break
 
+            # Salvare în Drive
             file_id = salveaza_xml_in_drive(drive_service, continut_xml, nume_xml, folder_destinatie_id)
 
             if file_id:
@@ -286,6 +287,7 @@ def main():
                     "processed": False
                 }
                 fisiere_descarcate_sesiune += 1
+                pagini_descarcate_an_curent += 1
                 print(f"   ✅ Salvat cu succes! [ID: {file_id[:10]}...]", flush=True)
 
                 if len(micro_updates) >= 20:
@@ -299,7 +301,7 @@ def main():
         salveaza_micro_index(drive_service, micro_updates)
 
     print("\n============================================================", flush=True)
-    print(f"🏁 PROCES FINALIZAT PENTRU {AN_START}-{AN_END}! Fișiere noi descărcate: {fisiere_descarcate_sesiune:,}", flush=True)
+    print(f"🏁 PROCES FINALIZAT PENTRU {AN_START}-{AN_END}! Total fișiere noi descărcate: {fisiere_descarcate_sesiune:,}", flush=True)
     print("============================================================", flush=True)
 
 
