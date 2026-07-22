@@ -15,7 +15,7 @@ sys.stdout.write("============================================================\n
 sys.stdout.flush()
 
 # ==============================================================================
-# CONFIGURARE CĂI DE IMPORT (TREBUIE SĂ FIE ÎNAINTE DE DRIVE_CONFIG)
+# CONFIGURARE CĂI DE IMPORT
 # ==============================================================================
 DIRECTOR_CURENT = Path(__file__).resolve().parent
 RADACINA_PROIECT = DIRECTOR_CURENT.parent
@@ -25,13 +25,11 @@ if str(RADACINA_PROIECT) not in sys.path:
 if str(DIRECTOR_CURENT) not in sys.path:
     sys.path.insert(0, str(DIRECTOR_CURENT))
 
-import httplib2
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
 
-# Importăm drive_config ABIA DUPĂ ce am setat sys.path
 from drive_config import (
     FOLDER_TEMP_INDEXES_ID,
     FOLDERE_XML_IDS,
@@ -51,8 +49,11 @@ NUME_MASTER_INDEX_XML = "index_xml.json"
 
 
 def get_drive_service():
-    sys.stdout.write("🔑 Conectare Google Drive API (cu Timeout HTTP 15s)...\n")
+    sys.stdout.write("🔑 Conectare Google Drive API...\n")
     sys.stdout.flush()
+
+    # Setează timeout pe socket-ul global la nivel de sistem
+    socket.setdefaulttimeout(30)
 
     creds_json = (
         os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -70,10 +71,9 @@ def get_drive_service():
         creds = service_account.Credentials.from_service_account_info(
             info, scopes=["https://www.googleapis.com/auth/drive"]
         )
-        http_client = httplib2.Http(timeout=15)
-        http_auth = creds.authorize(http_client)
 
-        service = build("drive", "v3", http=http_auth, cache_discovery=False)
+        # Construcția standard, fără obiecte intermediare incompatibile
+        service = build("drive", "v3", credentials=creds, cache_discovery=False)
         sys.stdout.write("✅ Conexiune Drive API stabilită cu succes!\n")
         sys.stdout.flush()
         return service
