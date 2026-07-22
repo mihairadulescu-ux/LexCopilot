@@ -8,13 +8,13 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-# Printăm direct pe STDOUT cu flush instant
+# Printăm direct pe STDOUT
 sys.stdout.write("============================================================\n")
 sys.stdout.write("🚀 SCRIPTUL BUILD_INDEX.PY A PORNIT FIZIC ÎN RUNNER!\n")
 sys.stdout.write("============================================================\n")
 sys.stdout.flush()
 
-# Setăm timeout dur pe socket global (30s max pe orice cerere de rețea)
+# Setăm timeout dur pe socket global
 socket.setdefaulttimeout(30)
 
 # Configurare căi de import
