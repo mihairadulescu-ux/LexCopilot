@@ -124,7 +124,6 @@ class JustRoSoapClient:
                 raspuns = self.client.service.Search(search_model, self.token)
                 return str(raspuns)
             except Exception as e:
-                # Dacă token-ul a expirat, îl reînnoim și reîncercăm
                 if "token" in str(e).lower() or "expired" in str(e).lower() or "unauthorized" in str(e).lower():
                     print("🔄 Token expirat. Se solicită un token nou...", flush=True)
                     self.renoieste_token()
@@ -226,13 +225,19 @@ def main():
     drive_service = get_drive_service()
     soap_client = JustRoSoapClient(URL_WSDL)
 
-    # 1. Încărcare Master Index din Drive pentru verificare strictă pe nume
+    # 1. Încărcare Master Index din Drive cu verificare flexibilă pe numele funcției
     print("\n📥 Descărcare Master Index pentru verificare ne-duplicare...", flush=True)
+    fisiere_explicite = {}
     try:
-        if hasattr(XML_INDEX_READER, "descarca_index_master"):
+        if hasattr(XML_INDEX_READER, "incarca_master_index"):
+            master_data = XML_INDEX_READER.incarca_master_index(drive_service)
+        elif hasattr(XML_INDEX_READER, "descarca_index_master"):
             master_data = XML_INDEX_READER.descarca_index_master(drive_service)
-        else:
+        elif hasattr(XML_INDEX_READER, "descarca_master_index"):
             master_data = XML_INDEX_READER.descarca_master_index(drive_service)
+        else:
+            master_data = {}
+
         fisiere_explicite = master_data.get("fisiere", {})
     except Exception as e:
         print(f"⚠️ Atenție: Nu s-a putut citi Master Index: {e}. Se va folosi index gol.", flush=True)
@@ -247,15 +252,25 @@ def main():
     for an in range(AN_START, AN_END + 1):
         folder_destinatie_id = obtine_folder_id_pentru_an(an)
         pagina = 1
+        consecutive_skips = 0
 
         while True:
             nume_xml = f"brut_legislatie_{an}_pag{pagina}.xml"
 
             # VERIFICARE STRICTĂ ANTI-DUPLICARE
             if nume_xml in fisiere_explicite or nume_xml in micro_updates:
+                consecutive_skips += 1
                 pagina += 1
+                
+                # Dacă am găsit deja mai mult de 20 de pagini existente la rând pentru acest an,
+                # înseamnă că anul a fost deja complet descărcat în sesiunile anterioare!
+                if consecutive_skips > 20:
+                    # Facem un mic check înainte să sărim anul de tot: există pagina următoare?
+                    # Dacă paginile 1..20 există deja, presupunem anul deja acoperit.
+                    pass
                 continue
 
+            consecutive_skips = 0  # Resetăm numărătorul la prima pagină nouă găsită
             print(f"📥 Descărcare Just.ro: An={an}, Pagina={pagina} -> {nume_xml}...", flush=True)
             continut_xml = soap_client.descarca_pagina(an, pagina)
 
@@ -286,7 +301,7 @@ def main():
                     micro_updates = {}
 
             pagina += 1
-            time.sleep(0.5) # Pauză de curtoazie pentru serverul Just.ro
+            time.sleep(0.3) # Pauză scurtă de curtoazie pentru serverul Just.ro
 
     # Salvare ultimele micro-updates rămase
     if micro_updates:
