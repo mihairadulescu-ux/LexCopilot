@@ -159,6 +159,35 @@ def salveaza_master_index_xml(service, data, nume_fisier=NUME_MASTER_INDEX_XML, 
 
 
 # ==============================================================================
+# CURĂȚARE MICRO-INDECȘI TEMPORARI
+# ==============================================================================
+def curata_micro_indecsi_procesati(service):
+    """
+    Șterge toate fișierele de micro-index temporare (temp_index_*.json) din Drive 
+    după ce Master Index-ul a fost consolidat și salvat cu succes.
+    """
+    try:
+        query_temp = f"'{FOLDER_TEMP_INDEXES_ID}' in parents and name contains 'temp_index_' and trashed = false"
+        res = service.files().list(**get_list_params(q=query_temp, fields="files(id, name)")).execute()
+        files = res.get("files", [])
+
+        if files:
+            print(f"\n🧹 Curățare {len(files)} fișiere de micro-index temporare...", flush=True)
+            for f in files:
+                try:
+                    params = get_file_params(fileId=f["id"])
+                    params["body"] = {"trashed": True}
+                    service.files().update(**params).execute()
+                except Exception as e:
+                    print(f"⚠️ Nu s-a putut șterge micro-indexul {f['name']}: {e}", flush=True)
+            print("✅ Micro-indecșii temporari au fost curățați cu succes!", flush=True)
+        else:
+            print("\n✨ Nu există micro-indecși temporari de curățat.", flush=True)
+    except Exception as e:
+        print(f"⚠️ Eroare la curățarea micro-indecșilor: {e}", flush=True)
+
+
+# ==============================================================================
 # EXECUȚIE TRASH MULTI-THREADED
 # ==============================================================================
 def executa_trash_multi_threaded(ids_de_sters, max_workers=15):
@@ -217,7 +246,7 @@ def executa_trash_multi_threaded(ids_de_sters, max_workers=15):
 
 
 # ==============================================================================
-# MAIN ENGINE: RAW SCAN WITH INCREMENTAL SAVES -> CLEANUP <10B -> SAVE FIRST -> TRASH
+# MAIN ENGINE
 # ==============================================================================
 def main():
     print("============================================================", flush=True)
@@ -412,6 +441,11 @@ def main():
     # ==========================================================================
     if ids_de_sters:
         executa_trash_multi_threaded(ids_de_sters, max_workers=15)
+
+    # ==========================================================================
+    # 6. CURĂȚAREA MICRO-INDECȘILOR TEMPORARI (DUPĂ CONSOLIDARE)
+    # ==========================================================================
+    curata_micro_indecsi_procesati(service)
 
     print("\n============================================================", flush=True)
     print("🎉 PROCESUL DE REINDEXARE COMPLETĂ ȘI CURĂȚARE S-A ÎNCHEIAT CU SUCCES!", flush=True)
