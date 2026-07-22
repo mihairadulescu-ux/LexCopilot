@@ -1,4 +1,4 @@
-import os
+mport os
 import sys
 import time
 import json
@@ -27,7 +27,7 @@ from drive_config import (
     get_list_params,
 )
 
-# Import/Instalare automată suds
+# Import/Instalare automată suds pentru comunicare SOAP WSDL
 try:
     from suds.client import Client
 except ImportError:
@@ -229,27 +229,16 @@ def main():
     drive_service = get_drive_service()
     soap_client = JustRoSoapClient(URL_WSDL)
 
-    # 1. Citire Master Index flexibilă din XML_INDEX_READER
-    print("\n📥 Descărcare Master Index pentru verificare ne-duplicare...", flush=True)
+    # 1. GENERARE INDEX VIRTUAL LIVE (MASTER + MICRO-INDEKSI + DELTA)
+    print("\n⚡ Construire Index Virtual LIVE (Master Index + Micro-Indecși + Delta Drive)...", flush=True)
     fisiere_explicite = set()
     try:
-        master_data = {}
-        for func_name in ["incarca_master_index", "descarca_index_master", "descarca_master_index"]:
-            if hasattr(XML_INDEX_READER, func_name):
-                master_data = getattr(XML_INDEX_READER, func_name)(drive_service)
-                break
-
-        # Colectăm toate fișierele din indexul master
-        fisiere_dict = master_data.get("fisiere", {})
-        if isinstance(fisiere_dict, dict):
-            fisiere_explicite.update(fisiere_dict.keys())
-        elif isinstance(fisiere_dict, list):
-            fisiere_explicite.update(fisiere_dict)
-
+        index_virtual = XML_INDEX_READER.obtine_index_virtual(drive_service)
+        fisiere_map = index_virtual.get("fisiere", {})
+        fisiere_explicite = set(fisiere_map.keys())
+        print(f"✅ Index Virtual generat cu succes! Total fișiere cunoscute: {len(fisiere_explicite):,}", flush=True)
     except Exception as e:
-        print(f"⚠️ Atenție: Nu s-a putut citi Master Index: {e}.", flush=True)
-
-    print(f"🛡️ Fișiere deja existente protejate în Master Index: {len(fisiere_explicite):,}", flush=True)
+        print(f"⚠️ Eroare la generarea Index-ului Virtual: {e}. Se va continua cu index gol.", flush=True)
 
     micro_updates = {}
     fisiere_descarcate_sesiune = 0
@@ -258,16 +247,25 @@ def main():
     for an in range(AN_START, AN_END + 1):
         folder_destinatie_id = obtine_folder_id_pentru_an(an)
         pagina = 1
+        consecutive_skips = 0
 
         print(f"\n📅 Începere procesare An: {an}...", flush=True)
 
         while True:
             nume_xml = f"brut_legislatie_{an}_pag{pagina}.xml"
 
-            # Check dacă fișierul există deja în Master sau în sesiunea curentă
+            # 3. Check & Fast-Forward
             if nume_xml in fisiere_explicite or nume_xml in micro_updates:
+                consecutive_skips += 1
                 pagina += 1
+                
+                # Dacă găsim 25 de pagini la rând care există deja în indexul LIVE, trecem la anul următor!
+                if consecutive_skips > 25:
+                    print(f"⏭️ FAST-FORWARD: Găsite 25 pagini consecutive existente în Indexul Virtual pentru {an}. An marcat complet!", flush=True)
+                    break
                 continue
+
+            consecutive_skips = 0  # Resetăm numărătorul la prima pagină lipsă
 
             print(f"📥 Descărcare Just.ro: An={an}, Pagina={pagina} -> {nume_xml}...", flush=True)
             continut_xml = soap_client.descarca_pagina(an, pagina)
@@ -301,7 +299,7 @@ def main():
         salveaza_micro_index(drive_service, micro_updates)
 
     print("\n============================================================", flush=True)
-    print(f"🏁 PROCES FINALIZAT PENTRU {AN_START}-{AN_END}! Fișiere noi: {fisiere_descarcate_sesiune:,}", flush=True)
+    print(f"🏁 PROCES FINALIZAT PENTRU {AN_START}-{AN_END}! Fișiere noi descărcate: {fisiere_descarcate_sesiune:,}", flush=True)
     print("============================================================", flush=True)
 
 
