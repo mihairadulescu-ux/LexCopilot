@@ -73,6 +73,31 @@ def get_drive_service():
 
 
 # ==============================================================================
+# PASUL 0: INCARCARE SNAPSHOT/BACKUP VECHIUL INDEX PENTRU PRESERVARE FLAG-URI
+# ==============================================================================
+def incarca_snapshot_index_vechi(service):
+    """Descarcă indexul existent pentru a-i păstra flag-urile de stare (Tags_extracted, processed etc.)."""
+    print("\n📦 [SNAPSHOT] Descărcare Index Vechi pentru conservarea stărilor...", flush=True)
+    if not INDEX_FILE_ID:
+        print("⚠️ INDEX_FILE_ID nu este definit. Se va porni fără istoric de flag-uri.", flush=True)
+        return {}
+
+    try:
+        continut_bytes = (
+            service.files()
+            .get_media(**get_file_params(fileId=INDEX_FILE_ID, acknowledgeAbuse=True))
+            .execute()
+        )
+        data = json.loads(continut_bytes.decode("utf-8"))
+        fisiere_map = data.get("fisiere", {})
+        print(f"✅ [SNAPSHOT REUȘIT] Am încărcat în memorie stările pentru {len(fisiere_map):,} fișiere existente!", flush=True)
+        return fisiere_map
+    except Exception as e:
+        print(f"⚠️ Nu s-a putut descărca vechiul index ({e}). Se va construi fără istoric de flag-uri.", flush=True)
+        return {}
+
+
+# ==============================================================================
 # SALVARE MASTER INDEX XML PE DRIVE
 # ==============================================================================
 def salveaza_master_index_xml(service, data, nume_fisier=NUME_MASTER_INDEX_XML, mesaj="Master Index XML"):
@@ -175,22 +200,24 @@ def executa_trash_multi_threaded(ids_de_sters, max_workers=15):
 
 
 # ==============================================================================
-# MAIN ENGINE: CROSS-DRIVE RAW SCANNING -> IN-MEMORY CONSOLIDATION -> TRASH
+# MAIN ENGINE: RAW SCAN -> STATE MERGE -> CLEAN MASTER INDEX
 # ==============================================================================
 def main():
     print("============================================================", flush=True)
-    print("🚀 FULL RAW INVENTORY & CROSS-DRIVE CLEANUP - LEGISLAȚIE XML", flush=True)
+    print("🚀 FULL RAW INVENTORY & STATE PRESERVING CLEANUP - XML", flush=True)
     print("============================================================", flush=True)
 
     service = get_drive_service()
     
+    # 1. Preluăm snapshot-ul cu vechile flag-uri de procesare
+    old_index_map = incarca_snapshot_index_vechi(service)
+
     # Inventar global peste cele 4 Shared Drive-uri: { nume_fisier: [list_of_metadata] }
     raw_inventory = {}
-
     total_fisiere_gasite = 0
     fisiere_de_la_ultimul_save = 0
 
-    # Parcurgem toate cele 4 Shared Drive-uri istorice de XML-uri
+    # 2. Scanare fizică Cross-Drive
     for index_folder, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
         print(f"\n📂 [{index_folder}/{len(FOLDERE_XML_IDS)}] Scanare Drive XML Folder ID: {folder_id}...", flush=True)
         page_token = None
@@ -200,7 +227,7 @@ def main():
             response = None
             incercare = 0
 
-            # BUCLĂ PERSISTENTĂ PE PAGE TOKEN (Retry infinit pe erori de rețea/socket)
+            # BUCLĂ PERSISTENTĂ PE PAGE TOKEN
             while True:
                 try:
                     list_params = get_list_params(
@@ -235,16 +262,9 @@ def main():
                     raw_inventory[nume] = []
                 raw_inventory[nume].append(meta_item)
 
-            # Salvare de backup interimar pe Drive la fiecare 10.000 fișiere
             if fisiere_de_la_ultimul_save >= 10000:
                 fisiere_de_la_ultimul_save = 0
                 print(f"📊 [Progres Scanare RAW] {total_fisiere_gasite:,} fișiere fizice parcurse...", flush=True)
-                salveaza_master_index_xml(
-                    service,
-                    {"inventory": raw_inventory},
-                    nume_fisier=NUME_MASTER_INDEX_XML,
-                    mesaj=f"Backup RAW Inventar XML ({total_fisiere_gasite:,} fișiere fizice)"
-                )
 
             page_token = response.get("nextPageToken")
             if not page_token:
@@ -255,55 +275,67 @@ def main():
     print(f"📊 GRUPURI DE NUME UNICE IDENTIFICATE: {len(raw_inventory):,}", flush=True)
 
     # ==========================================================================
-    # CONSOLIDARE ÎN MEMORIE (SORTARE & SELECȚIE MASTER)
+    # 3. CONSOLIDARE ÎN MEMORIE ȘI TRANSFER DE STARE (MERGE)
     # ==========================================================================
     print("\n" + "=" * 60, flush=True)
-    print("🧠 ANALIZĂ ȘI SORTARE ÎN MEMORIE (SELECȚIE MASTER UNIQUE)...", flush=True)
+    print("🧠 ANALIZĂ, SORTARE ȘI PRESERVARE FLAG-URI DE PROCESARE...", flush=True)
     print("=" * 60, flush=True)
 
     master_index = {"fisiere": {}, "total_fisiere": 0, "last_updated": ""}
     ids_de_sters = []
+    stari_recuperate = 0
 
     for nume_fisier, lista_variante in raw_inventory.items():
         if len(lista_variante) == 1:
             castigator = lista_variante[0]
         else:
-            # Preferă fișierele cu dimensiune > 0 și cel mai recent createdTime
+            # Sortăm: preferă fișierele cu size > 0 și cel mai recent createdTime
             lista_variante.sort(
                 key=lambda x: (x["size"] > 0, x["createdTime"]), 
                 reverse=True
             )
             castigator = lista_variante[0]
             
-            # Variantele vechi / duplicate merg la coș
             for duplicat in lista_variante[1:]:
                 ids_de_sters.append(duplicat["id"])
 
+        # Preluăm starea veche (flag-urile de prelucrare) dacă fișierul a mai fost procesat anterior
+        vechea_stare = old_index_map.get(nume_fisier, {})
+        if vechea_stare:
+            stari_recuperate += 1
+
+        # Construim intrarea curată în noul Master Index
         master_index["fisiere"][nume_fisier] = {
             "id": castigator["id"],
             "folder_id": castigator["folder_id"],
             "createdTime": castigator["createdTime"],
             "size": castigator["size"],
-            "downloaded": True,
-            "Tags_extracted": False,
-            "processed": False
+            "downloaded": vechea_stare.get("downloaded", True),
+            "Tags_extracted": vechea_stare.get("Tags_extracted", False),
+            "processed": vechea_stare.get("processed", False)
         }
+
+        # Transferăm orice alt flag personalizat existent în vechiul index
+        for cheie, valoare in vechea_stare.items():
+            if cheie not in master_index["fisiere"][nume_fisier]:
+                master_index["fisiere"][nume_fisier][cheie] = valoare
 
     master_index["total_fisiere"] = len(master_index["fisiere"])
 
-    print(f"✅ Fișiere XML validate drept MASTER (de păstrat): {master_index['total_fisiere']:,}", flush=True)
+    print(f"✅ Fișiere XML validate drept MASTER: {master_index['total_fisiere']:,}", flush=True)
+    print(f"🛡️ Stări/Flag-uri de procesare conservate din indexul vechi: {stari_recuperate:,}", flush=True)
     print(f"🗑️ Duplicate XML identificate pentru eliminare: {len(ids_de_sters):,}", flush=True)
 
-    # Pasul 1: Trimitem la coș duplicatele identificate
+    # 4. Executăm curățarea duplicatelor
     if ids_de_sters:
         executa_trash_multi_threaded(ids_de_sters, max_workers=15)
 
-    # Pasul 2: Salvăm varianta finală curată în index_xml.json
+    # 5. Salvăm varianta finală curată cu toate flag-urile conservate
     salveaza_master_index_xml(
         service, 
         master_index, 
         nume_fisier=NUME_MASTER_INDEX_XML, 
-        mesaj="Master Index XML Final Curat"
+        mesaj="Master Index XML Final Curat (Cu Stări Conservate)"
     )
 
 
