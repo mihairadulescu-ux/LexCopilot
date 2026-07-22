@@ -200,7 +200,7 @@ def executa_trash_multi_threaded(ids_de_sters, max_workers=15):
 
 
 # ==============================================================================
-# MAIN ENGINE: RAW SCAN WITH TOKEN GUARD -> STATE MERGE -> CLEAN MASTER INDEX
+# MAIN ENGINE: RAW SCAN WITH CIRCUIT BREAKER -> STATE MERGE -> CLEAN INDEX
 # ==============================================================================
 def main():
     print("============================================================", flush=True)
@@ -217,18 +217,19 @@ def main():
     total_fisiere_gasite = 0
     fisiere_de_la_ultimul_save = 0
 
-    # 2. Scanare fizică Cross-Drive
+    # 2. Scanare fizică Cross-Drive cu Circuit Breaker pe Progres Real
     for index_folder, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
         print(f"\n📂 [{index_folder}/{len(FOLDERE_XML_IDS)}] Scanare Drive XML Folder ID: {folder_id}...", flush=True)
         page_token = None
         query = f"'{folder_id}' in parents and trashed = false"
 
-        # GUARD ÎMPO TRIVA BUCLILOR INFINITE GOOGLE API
         seen_tokens = set()
+        unice_la_ultimul_check = len(raw_inventory)
+        fisiere_parcurse_folder = 0
 
         while True:
             if page_token in seen_tokens:
-                print(f"⚠️ DETECTATĂ BUCLĂ REPETITIVĂ DE PAGINARE! Oprim scanarea pe folderul {folder_id[:8]}.", flush=True)
+                print(f"⚠️ DETECTATĂ BUCLĂ REPETITIVĂ DE TOKEN! Oprim scanarea pe folderul {folder_id[:8]}.", flush=True)
                 break
             if page_token:
                 seen_tokens.add(page_token)
@@ -256,7 +257,6 @@ def main():
 
             files = response.get("files", [])
             
-            # Dacă nu mai sunt fișiere pe pagină, am terminat folderul
             if not files:
                 break
 
@@ -264,6 +264,7 @@ def main():
                 nume = f["name"]
                 total_fisiere_gasite += 1
                 fisiere_de_la_ultimul_save += 1
+                fisiere_parcurse_folder += 1
                 
                 meta_item = {
                     "id": f["id"],
@@ -275,13 +276,23 @@ def main():
                 if nume not in raw_inventory:
                     raw_inventory[nume] = []
 
-                # Evităm adăugarea aceluiași ID fizic dacă s-a reluat o pagină
                 if not any(x["id"] == f["id"] for x in raw_inventory[nume]):
                     raw_inventory[nume].append(meta_item)
 
+            # CHECK PROGRES ȘI CIRCUIT BREAKER LA FIECARE 10.000 FIȘIERE PARCURSE
             if fisiere_de_la_ultimul_save >= 10000:
+                unice_curente = len(raw_inventory)
+                fisiere_unice_noi = unice_curente - unice_la_ultimul_check
                 fisiere_de_la_ultimul_save = 0
-                print(f"📊 [Progres Scanare RAW] {total_fisiere_gasite:,} fișiere fizice parcurse ({len(raw_inventory):,} unice)...", flush=True)
+                unice_la_ultimul_check = unice_curente
+
+                print(f"📊 [Progres Scanare RAW] {total_fisiere_gasite:,} parcurse total ({unice_curente:,} unice | +{fisiere_unice_noi:,} noi în ultimele 10k)...", flush=True)
+
+                # CIRCUIT BREAKER: Dacă am parcurs deja >20k fișiere și în ultimele 10k am găsit <50 fișiere noi,
+                # înseamnă că am atins capătul folderului și API-ul dă pagini repetitive/duplicate!
+                if fisiere_parcurse_folder >= 20000 and fisiere_unice_noi < 50:
+                    print(f"🛑 [CIRCUIT BREAKER] Folderul {folder_id[:8]} a atins limita de saturare (+{fisiere_unice_noi} unice noi la ultimele 10k parcurse). Trecem la folderul următor!", flush=True)
+                    break
 
             page_token = response.get("nextPageToken")
             if not page_token:
