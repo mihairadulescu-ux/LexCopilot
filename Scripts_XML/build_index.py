@@ -8,15 +8,16 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-# Printăm instant pe ecran
+# Printăm direct la nivel de STDOUT (fără buffering)
 sys.stdout.write("============================================================\n")
 sys.stdout.write("🚀 SCRIPTUL BUILD_INDEX.PY A PORNIT FIZIC ÎN RUNNER!\n")
 sys.stdout.write("============================================================\n")
 sys.stdout.flush()
 
-# ==============================================================================
-# CONFIGURARE CĂI DE IMPORT
-# ==============================================================================
+# Setăm timeout dur pe socket la nivel de sistem
+socket.setdefaulttimeout(15)
+
+# Configurare căi import
 DIRECTOR_CURENT = Path(__file__).resolve().parent
 RADACINA_PROIECT = DIRECTOR_CURENT.parent
 
@@ -26,6 +27,7 @@ if str(DIRECTOR_CURENT) not in sys.path:
     sys.path.insert(0, str(DIRECTOR_CURENT))
 
 from google.oauth2 import service_account
+from google.auth.transport.requests import AuthorizedSession
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
@@ -48,12 +50,16 @@ INDEX_FILE_ID = (
 NUME_MASTER_INDEX_XML = "index_xml.json"
 
 
-def get_drive_service():
-    sys.stdout.write("🔑 Conectare Google Drive API...\n")
-    sys.stdout.flush()
+# Wrapper pentru forțare timeout pe fiecare apel HTTP
+class TimeoutAuthorizedSession(AuthorizedSession):
+    def request(self, method, url, **kwargs):
+        kwargs.setdefault('timeout', 15)
+        return super().request(method, url, **kwargs)
 
-    # Setează timeout pe socket-ul global la nivel de sistem
-    socket.setdefaulttimeout(30)
+
+def get_drive_service():
+    sys.stdout.write("🔑 Conectare Google Drive API (cu Timeout dur pe Request-uri)...\n")
+    sys.stdout.flush()
 
     creds_json = (
         os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -71,9 +77,11 @@ def get_drive_service():
         creds = service_account.Credentials.from_service_account_info(
             info, scopes=["https://www.googleapis.com/auth/drive"]
         )
-
-        # Construcția standard, fără obiecte intermediare incompatibile
-        service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        
+        # Session custom care forțează un timeout de 15s pe orice request HTTP
+        authed_session = TimeoutAuthorizedSession(creds)
+        service = build("drive", "v3", session=authed_session, cache_discovery=False)
+        
         sys.stdout.write("✅ Conexiune Drive API stabilită cu succes!\n")
         sys.stdout.flush()
         return service
@@ -237,9 +245,9 @@ def main():
                 )
                 response = service.files().list(**list_params).execute()
             except Exception as e:
-                sys.stdout.write(f"⚠️ Eroare la citire pagină Drive ({e}). Reîncercăm...\n")
+                sys.stdout.write(f"⚠️ Eroare/Timeout la citire pagină Drive ({e}). Reîncercăm în 2s...\n")
                 sys.stdout.flush()
-                time.sleep(3)
+                time.sleep(2)
                 service = get_drive_service()
                 continue
 
