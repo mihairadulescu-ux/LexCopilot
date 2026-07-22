@@ -24,14 +24,14 @@ from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
 
 from drive_config import (
+    INDEX_FILE_ID,
     FOLDER_TEMP_INDEXES_ID,
+    FOLDERE_XML_IDS,
     get_file_params,
     get_list_params,
 )
 
-# Folderul de PDF-uri pentru Monitoare Oficiale
-DRIVE_FOLDER_PDF_ID = "1gRh-rWe32RNJU2PmN67XoFvkaCSotTA1"
-NUME_MASTER_INDEX_MO = "index_monitoare.json"
+NUME_MASTER_INDEX_XML = "index_xml.json"
 
 
 # ==============================================================================
@@ -73,39 +73,45 @@ def get_drive_service():
 
 
 # ==============================================================================
-# SALVARE MASTER INDEX SAU DRAFT INDEX PE DRIVE
+# SALVARE MASTER INDEX XML PE DRIVE
 # ==============================================================================
-def salveaza_master_index_mo(service, data, nume_fisier=NUME_MASTER_INDEX_MO, mesaj="Master Index MO"):
+def salveaza_master_index_xml(service, data, nume_fisier=NUME_MASTER_INDEX_XML, mesaj="Master Index XML"):
     data["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
     cale_temp = Path(nume_fisier)
     try:
         with open(cale_temp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-        query = f"'{FOLDER_TEMP_INDEXES_ID}' in parents and name = '{nume_fisier}' and trashed = false"
-        list_params = get_list_params(q=query, fields="files(id)")
-        res = service.files().list(**list_params).execute()
-        files = res.get("files", [])
-
         media = MediaFileUpload(str(cale_temp), mimetype="application/json")
 
-        if files:
-            file_id = files[0]["id"]
-            params = get_file_params(fileId=file_id)
+        if INDEX_FILE_ID:
+            params = get_file_params(fileId=INDEX_FILE_ID)
             params["media_body"] = media
             service.files().update(**params).execute()
         else:
-            file_metadata = {"name": nume_fisier, "parents": [FOLDER_TEMP_INDEXES_ID]}
-            params = get_file_params()
-            params["body"] = file_metadata
-            params["media_body"] = media
-            service.files().create(**params).execute()
+            query = f"'{FOLDER_TEMP_INDEXES_ID}' in parents and name = '{nume_fisier}' and trashed = false"
+            list_params = get_list_params(q=query, fields="files(id)")
+            res = service.files().list(**list_params).execute()
+            files = res.get("files", [])
 
-        print(f"💾 {mesaj} actualizat pe Drive! ({len(data.get('inventory', data.get('fisiere', {}))):,} intrări)", flush=True)
+            if files:
+                file_id = files[0]["id"]
+                params = get_file_params(fileId=file_id)
+                params["media_body"] = media
+                service.files().update(**params).execute()
+            else:
+                file_metadata = {"name": nume_fisier, "parents": [FOLDER_TEMP_INDEXES_ID]}
+                params = get_file_params()
+                params["body"] = file_metadata
+                params["media_body"] = media
+                service.files().create(**params).execute()
+
+        total_intrare = len(data.get("fisiere", data.get("inventory", {})))
+        print(f"💾 {mesaj} salvat pe Drive! ({total_intrare:,} intrări)", flush=True)
         if cale_temp.exists():
             cale_temp.unlink()
     except Exception as e:
-        print(f"❌ Eroare la salvarea indexului: {e}", flush=True)
+        print(f"❌ Eroare la salvarea Master Index XML: {e}", flush=True)
         if cale_temp.exists():
             cale_temp.unlink()
 
@@ -119,7 +125,7 @@ def executa_trash_multi_threaded(ids_de_sters, max_workers=15):
         return
 
     print("\n" + "=" * 60, flush=True)
-    print(f"🚀 TRIMITERE LA COȘ #{len(ids_de_sters):,} DUPLICATE ({max_workers} FIRE PARALELE)...", flush=True)
+    print(f"🚀 TRIMITERE LA COȘ #{len(ids_de_sters):,} DUPLICATE XML ({max_workers} FIRE PARALELE)...", flush=True)
     print("=" * 60, flush=True)
 
     counter_lock = threading.Lock()
@@ -143,7 +149,7 @@ def executa_trash_multi_threaded(ids_de_sters, max_workers=15):
                         durata = round(time.time() - timp_start, 1)
                         viteza = round(total_curatate / (durata if durata > 0 else 1), 1)
                         print(
-                            f"⚡ [TURBO Trash MO] Mutate la coș #{total_curatate:,}/{len(ids_de_sters):,} | Ritm: {viteza} f/sec ({durata}s)",
+                            f"⚡ [TURBO Trash XML] Mutate la coș #{total_curatate:,}/{len(ids_de_sters):,} | Ritm: {viteza} f/sec ({durata}s)",
                             flush=True,
                         )
                 return True
@@ -162,132 +168,142 @@ def executa_trash_multi_threaded(ids_de_sters, max_workers=15):
     durata_totala = round(time.time() - timp_start, 1)
     print("\n" + "=" * 60, flush=True)
     print(f"🏁 OPERAȚIUNE DE TRASH FINALIZATĂ în {durata_totala}s!", flush=True)
-    print(f"🗑️ Duplicate mutate în coș: {total_curatate:,}", flush=True)
+    print(f"🗑️ Duplicate XML mutate în coș: {total_curatate:,}", flush=True)
     if erori_gunoi > 0:
         print(f"⚠️ Erori întâmpinate la ștergere: {erori_gunoi:,}", flush=True)
     print("=" * 60 + "\n", flush=True)
 
 
 # ==============================================================================
-# MAIN ENGINE: PERSISTENT SCANNING WITH INCREMENTAL DRIVE BACKUPS
+# MAIN ENGINE: CROSS-DRIVE RAW SCANNING -> IN-MEMORY CONSOLIDATION -> TRASH
 # ==============================================================================
 def main():
     print("============================================================", flush=True)
-    print("🚀 FULL RAW INVENTORY & ANALYTICAL CLEANUP - MONITOARE OFICIALE", flush=True)
+    print("🚀 FULL RAW INVENTORY & CROSS-DRIVE CLEANUP - LEGISLAȚIE XML", flush=True)
     print("============================================================", flush=True)
 
     service = get_drive_service()
     
+    # Inventar global peste cele 4 Shared Drive-uri: { nume_fisier: [list_of_metadata] }
     raw_inventory = {}
+
     total_fisiere_gasite = 0
     fisiere_de_la_ultimul_save = 0
-    page_token = None
-    query = f"'{DRIVE_FOLDER_PDF_ID}' in parents and trashed = false"
 
-    print(f"📂 Scanare RAW pe Shared Drive Folder MO: {DRIVE_FOLDER_PDF_ID}...", flush=True)
+    # Parcurgem toate cele 4 Shared Drive-uri istorice de XML-uri
+    for index_folder, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
+        print(f"\n📂 [{index_folder}/{len(FOLDERE_XML_IDS)}] Scanare Drive XML Folder ID: {folder_id}...", flush=True)
+        page_token = None
+        query = f"'{folder_id}' in parents and trashed = false"
 
-    while True:
-        response = None
-        incercare = 0
-
-        # BUCLĂ DE RETRY PERSISTENTĂ PE PAGINĂ (Nu sare nicio pagină la erori de socket)
         while True:
-            try:
-                list_params = get_list_params(
-                    q=query,
-                    fields="nextPageToken, files(id, name, createdTime, size)",
-                    pageToken=page_token,
-                    pageSize=1000,
+            response = None
+            incercare = 0
+
+            # BUCLĂ PERSISTENTĂ PE PAGE TOKEN (Retry infinit pe erori de rețea/socket)
+            while True:
+                try:
+                    list_params = get_list_params(
+                        q=query,
+                        fields="nextPageToken, files(id, name, createdTime, size)",
+                        pageToken=page_token,
+                        pageSize=1000,
+                    )
+                    response = service.files().list(**list_params).execute()
+                    break
+                except (socket.error, socket.timeout, HttpError, Exception) as e:
+                    incercare += 1
+                    pauza = min(2 ** incercare, 30)
+                    print(f"⚠️ Connection Error pe pageToken ({incercare}): {e}. Pauză {pauza}s și reîncercăm...", flush=True)
+                    time.sleep(pauza)
+                    service = get_drive_service()
+
+            files = response.get("files", [])
+            for f in files:
+                nume = f["name"]
+                total_fisiere_gasite += 1
+                fisiere_de_la_ultimul_save += 1
+                
+                meta_item = {
+                    "id": f["id"],
+                    "folder_id": folder_id,
+                    "createdTime": f.get("createdTime", "1970-01-01T00:00:00.000Z"),
+                    "size": int(f.get("size", 0))
+                }
+
+                if nume not in raw_inventory:
+                    raw_inventory[nume] = []
+                raw_inventory[nume].append(meta_item)
+
+            # Salvare de backup interimar pe Drive la fiecare 10.000 fișiere
+            if fisiere_de_la_ultimul_save >= 10000:
+                fisiere_de_la_ultimul_save = 0
+                print(f"📊 [Progres Scanare RAW] {total_fisiere_gasite:,} fișiere fizice parcurse...", flush=True)
+                salveaza_master_index_xml(
+                    service,
+                    {"inventory": raw_inventory},
+                    nume_fisier=NUME_MASTER_INDEX_XML,
+                    mesaj=f"Backup RAW Inventar XML ({total_fisiere_gasite:,} fișiere fizice)"
                 )
-                response = service.files().list(**list_params).execute()
-                break  # Pagina descarcata cu succes
-            except (socket.error, socket.timeout, HttpError, Exception) as e:
-                incercare += 1
-                pauza = min(2 ** incercare, 30)
-                print(f"⚠️ Connection Error pe pageToken ({incercare}): {e}. Pauză {pauza}s și reîncercăm de la același punct...", flush=True)
-                time.sleep(pauza)
-                service = get_drive_service()
 
-        files = response.get("files", [])
-        for f in files:
-            nume = f["name"]
-            total_fisiere_gasite += 1
-            fisiere_de_la_ultimul_save += 1
-            
-            meta_item = {
-                "id": f["id"],
-                "createdTime": f.get("createdTime", "1970-01-01T00:00:00.000Z"),
-                "size": int(f.get("size", 0))
-            }
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
 
-            if nume not in raw_inventory:
-                raw_inventory[nume] = []
-            raw_inventory[nume].append(meta_item)
-
-        # SALVARE ÎN BUCĂȚI LA FIECARE 10.000 DE FIȘIERE
-        if fisiere_de_la_ultimul_save >= 10000:
-            fisiere_de_la_ultimul_save = 0
-            print(f"📊 [Progres Scanare] {total_fisiere_gasite:,} fișiere fizice colectate...", flush=True)
-            salveaza_master_index_mo(
-                service, 
-                {"inventory": raw_inventory}, 
-                nume_fisier=NUME_MASTER_INDEX_MO, 
-                mesaj=f"Backup Interimar ({total_fisiere_gasite:,} fișiere)"
-            )
-
-        page_token = response.get("nextPageToken")
-        if not page_token:
-            break
-
-    print(f"\n📊 SCANARE FINALIZATĂ!")
-    print(f"📊 TOTAL FIȘIERE FIZICE PARCURSE: {total_fisiere_gasite:,}", flush=True)
+    print(f"\n📊 SCANARE CROSS-DRIVE FINALIZATĂ!")
+    print(f"📊 TOTAL FIȘIERE FIZICE PARCURSE PE CELE 4 DRIVE-URI: {total_fisiere_gasite:,}", flush=True)
     print(f"📊 GRUPURI DE NUME UNICE IDENTIFICATE: {len(raw_inventory):,}", flush=True)
 
     # ==========================================================================
     # CONSOLIDARE ÎN MEMORIE (SORTARE & SELECȚIE MASTER)
     # ==========================================================================
     print("\n" + "=" * 60, flush=True)
-    print("🧠 ANALIZĂ ȘI SORTARE ÎN MEMORIE PENTRU CURĂȚARE...", flush=True)
+    print("🧠 ANALIZĂ ȘI SORTARE ÎN MEMORIE (SELECȚIE MASTER UNIQUE)...", flush=True)
     print("=" * 60, flush=True)
 
-    master_index = {"fisiere": {}, "last_updated": ""}
+    master_index = {"fisiere": {}, "total_fisiere": 0, "last_updated": ""}
     ids_de_sters = []
 
     for nume_fisier, lista_variante in raw_inventory.items():
         if len(lista_variante) == 1:
             castigator = lista_variante[0]
         else:
-            # Sortare: preferă dimensiune > 0 și cel mai recent createdTime
+            # Preferă fișierele cu dimensiune > 0 și cel mai recent createdTime
             lista_variante.sort(
                 key=lambda x: (x["size"] > 0, x["createdTime"]), 
                 reverse=True
             )
             castigator = lista_variante[0]
             
+            # Variantele vechi / duplicate merg la coș
             for duplicat in lista_variante[1:]:
                 ids_de_sters.append(duplicat["id"])
 
         master_index["fisiere"][nume_fisier] = {
             "id": castigator["id"],
-            "name": nume_fisier,
+            "folder_id": castigator["folder_id"],
             "createdTime": castigator["createdTime"],
             "size": castigator["size"],
+            "downloaded": True,
+            "Tags_extracted": False,
             "processed": False
         }
 
-    print(f"✅ Fișiere validate drept MASTER (de păstrat): {len(master_index['fisiere']):,}", flush=True)
-    print(f"🗑️ Duplicate identificate pentru eliminare: {len(ids_de_sters):,}", flush=True)
+    master_index["total_fisiere"] = len(master_index["fisiere"])
+
+    print(f"✅ Fișiere XML validate drept MASTER (de păstrat): {master_index['total_fisiere']:,}", flush=True)
+    print(f"🗑️ Duplicate XML identificate pentru eliminare: {len(ids_de_sters):,}", flush=True)
 
     # Pasul 1: Trimitem la coș duplicatele identificate
     if ids_de_sters:
         executa_trash_multi_threaded(ids_de_sters, max_workers=15)
 
-    # Pasul 2: Salvăm varianta finală, curată și consolidată a Master Index-ului
-    salveaza_master_index_mo(
+    # Pasul 2: Salvăm varianta finală curată în index_xml.json
+    salveaza_master_index_xml(
         service, 
         master_index, 
-        nume_fisier=NUME_MASTER_INDEX_MO, 
-        mesaj="Master Index MO Final Curat"
+        nume_fisier=NUME_MASTER_INDEX_XML, 
+        mesaj="Master Index XML Final Curat"
     )
 
 
