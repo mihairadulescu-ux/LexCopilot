@@ -24,11 +24,19 @@ from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
 
 from drive_config import (
-    INDEX_FILE_ID,
     FOLDER_TEMP_INDEXES_ID,
     FOLDERE_XML_IDS,
     get_file_params,
     get_list_params,
+)
+
+# MAPARE UNITARĂ PENTRU ID-UL MASTER INDEXULUI XML
+INDEX_FILE_ID = (
+    os.getenv("XML_STORAGE_INDEX")
+    or os.getenv("INDEX_FILE_ID")
+    or getattr(sys.modules.get("drive_config"), "XML_STORAGE_INDEX", None)
+    or getattr(sys.modules.get("drive_config"), "INDEX_FILE_ID", None)
+    or "1OkPgwX_F6FKwupuhD9kO3rynj4zdel0N"
 )
 
 NUME_MASTER_INDEX_XML = "index_xml.json"
@@ -77,7 +85,7 @@ def get_drive_service():
 # ==============================================================================
 def incarca_snapshot_index_vechi(service):
     """Descarcă indexul existent pentru a-i păstra flag-urile de stare (Tags_extracted, processed etc.)."""
-    print("\n📦 [SNAPSHOT] Descărcare Index Vechi pentru conservarea stărilor...", flush=True)
+    print(f"\n📦 [SNAPSHOT] Descărcare Index Vechi din Drive (ID: {INDEX_FILE_ID})...", flush=True)
     if not INDEX_FILE_ID:
         print("⚠️ INDEX_FILE_ID nu este definit. Se va porni fără istoric de flag-uri.", flush=True)
         return {}
