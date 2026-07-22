@@ -31,6 +31,15 @@ from drive_config import (
 
 import XML_INDEX_READER
 
+# MAPARE UNITARĂ PENTRU ID-UL MASTER INDEXULUI XML
+INDEX_FILE_ID = (
+    os.getenv("XML_STORAGE_INDEX")
+    or os.getenv("INDEX_FILE_ID")
+    or getattr(sys.modules.get("drive_config"), "XML_STORAGE_INDEX", None)
+    or getattr(sys.modules.get("drive_config"), "INDEX_FILE_ID", None)
+    or "1OkPgwX_F6FKwupuhD9kO3rynj4zdel0N"
+)
+
 # Folderul de destinație specificat pentru salvarea metadatelor
 METADATA_FOLDER_ID = "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
 
