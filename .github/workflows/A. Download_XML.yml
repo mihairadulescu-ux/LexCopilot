@@ -6,7 +6,7 @@ on:
       start_year:
         description: 'Anul de start'
         required: false
-        default: '2000'
+        default: '1990'
       end_year:
         description: 'Anul de final'
         required: false
@@ -39,7 +39,7 @@ jobs:
             end_year: 2012
           - start_year: 2013
             end_year: 2015
-          - start_year: 20016
+          - start_year: 2016
             end_year: 2018
           - start_year: 2019
             end_year: 2021
