@@ -20,15 +20,14 @@ jobs:
       - name: Checkout cod din repozitoriu
         uses: actions/checkout@v4
 
-      - name: Configurare Python & Cache Pip
+      - name: Configurare Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-          cache: 'pip'
 
       - name: Instalare dependențe
         run: |
-          pip install --no-cache-dir google-api-python-client google-auth suds-py3
+          pip install google-api-python-client google-auth suds-py3
 
       - name: Executare Construire / Actualizare Index
         env:
