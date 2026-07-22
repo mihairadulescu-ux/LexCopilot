@@ -4,7 +4,7 @@ on:
   schedule:
     # 1. Rulează din 2 în 2 ore (la minutul 0)
     - cron: '0 */2 * * *'
-    # 2. Rulează zilnic la ora 07:00 Dimineața (05:00 UTC = 08:00 EEST / 07:00 EEST iarna - aprox. 07:00-08:00 ora României)
+    # 2. Rulează zilnic la ora 07:00 Dimineața (05:00 UTC = ora 07:00-08:00 RO)
     - cron: '0 5 * * *'
 
   workflow_dispatch:
@@ -32,6 +32,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests urllib3 google-api-python-client google-auth
 
+      # PASUL NOU: Redenumirea numelor vechi înainte de orice indexare
+      - name: Redenumire fișiere legacy (brut_legislatie_ -> brut_XML_)
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          XML_STORAGE_INDEX: ${{ secrets.XML_STORAGE_INDEX }}
+        run: |
+          echo "🔄 Rulare pas de omogenizare nume fișiere pe Google Drive..."
+          python -u Scripts_XML/redenumeste_fisiere.py
+
       - name: Executare Construire / Actualizare Index
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
@@ -40,7 +49,7 @@ jobs:
         run: |
           VAL_LOWER=$(echo "${IS_FULL_INPUT}" | tr '[:upper:]' '[:lower:]')
           
-          # Verificăm dacă declanșarea automată (cron) corespunde orei 05:00 UTC (ora 07:00/08:00 RO)
+          # Verificăm dacă declanșarea automată (cron) corespunde orei 05:00 UTC (ora 07:00 RO)
           HOUR_UTC=$(date -u +%H)
           
           if [ "${VAL_LOWER}" = "true" ] || [ "${HOUR_UTC}" = "05" ]; then
