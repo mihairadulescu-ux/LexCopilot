@@ -27,7 +27,7 @@ from drive_config import (
     get_list_params,
 )
 
-# Import/Instalare automată suds pentru comunicare SOAP WSDL
+# Import/Instalare automată suds
 try:
     from suds.client import Client
 except ImportError:
@@ -46,15 +46,21 @@ except ImportError:
 # ==============================================================================
 URL_WSDL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 REZULTATE_PER_PAGINA = 10
-AN_START = 1990
-AN_END = 2026
+
+# PRELUARE ANI DIN ARGUMENTELE LINIEI DE COMANDĂ (PENTRU GITHUB ACTIONS MATRIX)
+if len(sys.argv) >= 3:
+    AN_START = int(sys.argv[1])
+    AN_END = int(sys.argv[2])
+else:
+    AN_START = 1990
+    AN_END = 2026
 
 
 # ==============================================================================
 # AUTENTIFICARE GOOGLE DRIVE API
 # ==============================================================================
 def get_drive_service():
-    """Autentificare în Google Drive API folosind GOOGLE_SERVICE_ACCOUNT_JSON."""
+    """Autentificare în Google Drive API."""
     creds_json = (
         os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
         or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
@@ -87,7 +93,7 @@ def get_drive_service():
 
 
 # ==============================================================================
-# CLASĂ CLIENT JUST.RO SOAP (CU RE-AUTENTIFICARE AUTOMATĂ)
+# CLASĂ CLIENT JUST.RO SOAP
 # ==============================================================================
 class JustRoSoapClient:
     def __init__(self, wsdl_url):
@@ -149,10 +155,9 @@ def obtine_folder_id_pentru_an(an):
 
 
 # ==============================================================================
-# SALVARE ÎN GOOGLE DRIVE & SALVARE MICRO-INDEX
+# SALVARE ÎN GOOGLE DRIVE & MICRO-INDEX
 # ==============================================================================
 def salveaza_xml_in_drive(service, continut_xml, nume_fisier, folder_id):
-    """Salvează fișierul XML pe Google Drive și returnează ID-ul generat."""
     cale_temp = Path(nume_fisier)
     try:
         with open(cale_temp, "w", encoding="utf-8") as f:
@@ -183,7 +188,6 @@ def salveaza_xml_in_drive(service, continut_xml, nume_fisier, folder_id):
 
 
 def salveaza_micro_index(service, flag_updates):
-    """Creează un micro-index temporar în FOLDER_TEMP_INDEXES_ID."""
     timestamp = int(time.time() * 1000)
     nume_temp = f"temp_index_{timestamp}.json"
     data = {"flag_updates": flag_updates}
@@ -219,67 +223,59 @@ def salveaza_micro_index(service, flag_updates):
 # ==============================================================================
 def main():
     print("============================================================", flush=True)
-    print("🚀 PORNIRE PROCES DESCĂRCARE XML DE LA LEGISLATE.JUST.RO (SOAP)", flush=True)
+    print(f"🚀 PORNIRE DESCĂRCARE XML JUST.RO | INTERVAL ANI: {AN_START} - {AN_END}", flush=True)
     print("============================================================", flush=True)
 
     drive_service = get_drive_service()
     soap_client = JustRoSoapClient(URL_WSDL)
 
-    # 1. Încărcare Master Index din Drive cu verificare flexibilă pe numele funcției
+    # 1. Citire Master Index flexibilă din XML_INDEX_READER
     print("\n📥 Descărcare Master Index pentru verificare ne-duplicare...", flush=True)
-    fisiere_explicite = {}
+    fisiere_explicite = set()
     try:
-        if hasattr(XML_INDEX_READER, "incarca_master_index"):
-            master_data = XML_INDEX_READER.incarca_master_index(drive_service)
-        elif hasattr(XML_INDEX_READER, "descarca_index_master"):
-            master_data = XML_INDEX_READER.descarca_index_master(drive_service)
-        elif hasattr(XML_INDEX_READER, "descarca_master_index"):
-            master_data = XML_INDEX_READER.descarca_master_index(drive_service)
-        else:
-            master_data = {}
+        master_data = {}
+        for func_name in ["incarca_master_index", "descarca_index_master", "descarca_master_index"]:
+            if hasattr(XML_INDEX_READER, func_name):
+                master_data = getattr(XML_INDEX_READER, func_name)(drive_service)
+                break
 
-        fisiere_explicite = master_data.get("fisiere", {})
+        # Colectăm toate fișierele din indexul master
+        fisiere_dict = master_data.get("fisiere", {})
+        if isinstance(fisiere_dict, dict):
+            fisiere_explicite.update(fisiere_dict.keys())
+        elif isinstance(fisiere_dict, list):
+            fisiere_explicite.update(fisiere_dict)
+
     except Exception as e:
-        print(f"⚠️ Atenție: Nu s-a putut citi Master Index: {e}. Se va folosi index gol.", flush=True)
-        fisiere_explicite = {}
+        print(f"⚠️ Atenție: Nu s-a putut citi Master Index: {e}.", flush=True)
 
     print(f"🛡️ Fișiere deja existente protejate în Master Index: {len(fisiere_explicite):,}", flush=True)
 
     micro_updates = {}
     fisiere_descarcate_sesiune = 0
 
-    # 2. Parcurgere Ani și Pagini
+    # 2. Parcurgere doar a anilor desemnați
     for an in range(AN_START, AN_END + 1):
         folder_destinatie_id = obtine_folder_id_pentru_an(an)
         pagina = 1
-        consecutive_skips = 0
+
+        print(f"\n📅 Începere procesare An: {an}...", flush=True)
 
         while True:
             nume_xml = f"brut_legislatie_{an}_pag{pagina}.xml"
 
-            # VERIFICARE STRICTĂ ANTI-DUPLICARE
+            # Check dacă fișierul există deja în Master sau în sesiunea curentă
             if nume_xml in fisiere_explicite or nume_xml in micro_updates:
-                consecutive_skips += 1
                 pagina += 1
-                
-                # Dacă am găsit deja mai mult de 20 de pagini existente la rând pentru acest an,
-                # înseamnă că anul a fost deja complet descărcat în sesiunile anterioare!
-                if consecutive_skips > 20:
-                    # Facem un mic check înainte să sărim anul de tot: există pagina următoare?
-                    # Dacă paginile 1..20 există deja, presupunem anul deja acoperit.
-                    pass
                 continue
 
-            consecutive_skips = 0  # Resetăm numărătorul la prima pagină nouă găsită
             print(f"📥 Descărcare Just.ro: An={an}, Pagina={pagina} -> {nume_xml}...", flush=True)
             continut_xml = soap_client.descarca_pagina(an, pagina)
 
-            # Dacă pagina nu returnează date (s-au terminat legile pe anul respectiv)
             if not continut_xml or "Legi[] = None" in continut_xml or len(continut_xml.strip()) < 50:
                 print(f"ℹ️ S-au terminat paginile pentru anul {an} la pagina {pagina - 1}.", flush=True)
                 break
 
-            # Salvare în Drive
             file_id = salveaza_xml_in_drive(drive_service, continut_xml, nume_xml, folder_destinatie_id)
 
             if file_id:
@@ -289,26 +285,23 @@ def main():
                     "an": an,
                     "pagina": pagina,
                     "downloaded": True,
-                    "Tags_extracted": False,
                     "processed": False
                 }
                 fisiere_descarcate_sesiune += 1
                 print(f"   ✅ Salvat cu succes! [ID: {file_id[:10]}...]", flush=True)
 
-                # Micro-index salvat la fiecare 20 de fișiere descărcate
                 if len(micro_updates) >= 20:
                     salveaza_micro_index(drive_service, micro_updates)
                     micro_updates = {}
 
             pagina += 1
-            time.sleep(0.3) # Pauză scurtă de curtoazie pentru serverul Just.ro
+            time.sleep(0.3)
 
-    # Salvare ultimele micro-updates rămase
     if micro_updates:
         salveaza_micro_index(drive_service, micro_updates)
 
     print("\n============================================================", flush=True)
-    print(f"🏁 PROCES FINALIZAT! Total fișiere noi descărcate în această sesiune: {fisiere_descarcate_sesiune:,}", flush=True)
+    print(f"🏁 PROCES FINALIZAT PENTRU {AN_START}-{AN_END}! Fișiere noi: {fisiere_descarcate_sesiune:,}", flush=True)
     print("============================================================", flush=True)
 
 
