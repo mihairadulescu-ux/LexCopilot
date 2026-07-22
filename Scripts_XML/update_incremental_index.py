@@ -1,13 +1,17 @@
-import os
 import sys
+import os
 import time
 import json
+import socket
 import re
 from pathlib import Path
 
-# ==============================================================================
-# CONFIGURARE CĂI DE IMPORT
-# ==============================================================================
+print("============================================================", flush=True)
+print("⚡ SCRIPTUL UPDATE_INCREMENTAL_INDEX.PY A PORNIT!", flush=True)
+print("============================================================", flush=True)
+
+socket.setdefaulttimeout(30)
+
 DIRECTOR_CURENT = Path(__file__).resolve().parent
 RADACINA_PROIECT = DIRECTOR_CURENT.parent
 
@@ -16,153 +20,154 @@ if str(RADACINA_PROIECT) not in sys.path:
 if str(DIRECTOR_CURENT) not in sys.path:
     sys.path.insert(0, str(DIRECTOR_CURENT))
 
-from drive_config import FOLDER_TEMP_INDEXES_ID, get_list_params, get_file_params
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
-try:
-    import XML_INDEX_READER
-except ImportError:
-    from Scripts_XML import XML_INDEX_READER
+from drive_config import (
+    FOLDER_TEMP_INDEXES_ID,
+    FOLDERE_XML_IDS,
+    get_file_params,
+    get_list_params,
+)
 
-try:
-    import build_index
-except ImportError:
-    from Scripts_XML import build_index
+INDEX_FILE_ID = (
+    os.getenv("XML_STORAGE_INDEX")
+    or os.getenv("INDEX_FILE_ID")
+    or getattr(sys.modules.get("drive_config"), "XML_STORAGE_INDEX", None)
+    or getattr(sys.modules.get("drive_config"), "INDEX_FILE_ID", None)
+    or "1OkPgwX_F6FKwupuhD9kO3rynj4zdel0N"
+)
+
+NUME_MASTER_INDEX_XML = "index_xml.json"
+MAX_TRASH_PER_BATCH = 500  # Limita de siguranță anti-Rate Limit
 
 
-def curata_micro_indecsi_procesati(service):
-    """
-    Șterge fișierele temporare de micro-index (temp_index_*.json) din Drive 
-    după ce au fost consolidate în Master Index.
-    """
+def get_drive_service():
+    creds_json = (
+        os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+        or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
+        or os.getenv("SERVICE_ACCOUNT_JSON")
+    )
+
+    if not creds_json:
+        print("❌ NU S-A GĂSIT SECRETUL GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
+        sys.exit(1)
+
     try:
-        query_temp = f"'{FOLDER_TEMP_INDEXES_ID}' in parents and name contains 'temp_index_' and trashed = false"
-        res = service.files().list(**get_list_params(q=query_temp, fields="files(id, name)")).execute()
-        files = res.get("files", [])
-
-        if files:
-            print(f"🧹 Curățare {len(files)} fișiere de micro-index temporare...", flush=True)
-            for f in files:
-                try:
-                    params = get_file_params(fileId=f["id"])
-                    params["body"] = {"trashed": True}
-                    service.files().update(**params).execute()
-                except Exception as e:
-                    print(f"⚠️ Nu s-a putut șterge micro-indexul {f['name']}: {e}", flush=True)
-            print("✅ Micro-indecșii temporari au fost curățați cu succes!", flush=True)
+        info = json.loads(creds_json)
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        return build("drive", "v3", credentials=creds, cache_discovery=False)
     except Exception as e:
-        print(f"⚠️ Eroare la curățarea micro-indecșilor: {e}", flush=True)
+        print(f"❌ Eroare la autentificare: {e}", flush=True)
+        sys.exit(1)
+
+
+def curata_lot_duplicate(service, ids_de_sters):
+    if not ids_de_sters:
+        print("✨ Nu există fișiere goale sau duplicate de curățat.", flush=True)
+        return
+
+    total_de_sters = len(ids_de_sters)
+    lot_curent = ids_de_sters[:MAX_TRASH_PER_BATCH]
+    
+    print(f"\n🧹 Curățare lot de siguranță: {len(lot_curent)} din totalul de {total_de_sters} duplicate...", flush=True)
+    
+    succes = 0
+    for file_id in lot_curent:
+        try:
+            params = get_file_params(fileId=file_id)
+            params["body"] = {"trashed": True}
+            service.files().update(**params).execute()
+            succes += 1
+            if succes % 100 == 0:
+                print(f"   ⚡ Curățate: {succes}/{len(lot_curent)}...", flush=True)
+        except Exception:
+            time.sleep(1)
+
+    print(f"✅ Lot curățat cu succes! ({succes} fișiere trimise la coș)", flush=True)
+    if total_de_sters > MAX_TRASH_PER_BATCH:
+        print(f"ℹ️ Au rămas {total_de_sters - MAX_TRASH_PER_BATCH} duplicate care vor fi curățate la următoarele rulări periodice.", flush=True)
 
 
 def main():
-    print("============================================================", flush=True)
-    print("⚡ PORNIRE REINDEXARE INCREMENTALĂ & IGIENIZARE (EVERY 2 HOURS)", flush=True)
-    print("============================================================", flush=True)
+    service = get_drive_service()
+    print("🔍 Identificare fișiere noi și igienizare...", flush=True)
 
-    timp_start = time.time()
-    service = build_index.get_drive_service()
-
-    # 1. Încărcare stare unificată LIVE
-    print("\n1️⃣ Încărcare și consolidare stare LIVE...", flush=True)
-    index_virtual = XML_INDEX_READER.obtine_index_virtual(service)
-    fisiere_map = index_virtual.get("fisiere", {})
-
-    print(f"📊 Fișiere identificate în stare virtuală: {len(fisiere_map):,}", flush=True)
-
-    # Regex flexibil pentru normalizare semantică
+    # Scanam scurt folderele pentru diferențe și duplicate
+    raw_inventory = {}
     pattern_xml = re.compile(r"^brut_(?:XML|legislatie)_(\d+)_pag(\d+)\.xml$", re.IGNORECASE)
 
-    # 2. Grupare semantică după (an, pag)
-    print("\n2️⃣ Identificare fișiere corupte (<10B) și dedublare semantică...", flush=True)
-    grupuri_semantice = {}
+    for folder_id in FOLDERE_XML_IDS:
+        page_token = None
+        query = f"'{folder_id}' in parents and trashed = false"
+
+        while True:
+            try:
+                list_params = get_list_params(
+                    q=query,
+                    fields="nextPageToken, files(id, name, createdTime, size)",
+                    pageToken=page_token,
+                    pageSize=1000,
+                )
+                response = service.files().list(**list_params).execute()
+            except Exception:
+                break
+
+            files = response.get("files", [])
+            if not files:
+                break
+
+            for f in files:
+                nume = f["name"]
+                if nume not in raw_inventory:
+                    raw_inventory[nume] = []
+                raw_inventory[nume].append({
+                    "id": f["id"],
+                    "folder_id": folder_id,
+                    "createdTime": f.get("createdTime", "1970-01-01T00:00:00.000Z"),
+                    "size": int(f.get("size", 0))
+                })
+
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+
     ids_de_sters = []
-    fisiere_mici = 0
-    duplicate_detectate = 0
+    grupuri_semantice = {}
 
-    for nume, meta in fisiere_map.items():
-        size = meta.get("size", 0)
-        file_id = meta.get("id")
-
-        if size < 10:
-            if file_id:
-                ids_de_sters.append(file_id)
-            fisiere_mici += 1
-            continue
-
-        match = pattern_xml.match(nume)
-        if match:
-            cheie_semantica = f"{match.group(1)}_pag{match.group(2)}"
-        else:
-            cheie_semantica = nume  # Fallback dacă e un nume atipic
+    for nume_fisier, lista_variante in raw_inventory.items():
+        match = pattern_xml.match(nume_fisier)
+        cheie_semantica = f"{match.group(1)}_pag{match.group(2)}" if match else nume_fisier
 
         if cheie_semantica not in grupuri_semantice:
             grupuri_semantice[cheie_semantica] = []
-        
-        # Salvăm numele împreună cu metadatele
-        meta_copie = dict(meta)
-        meta_copie["_nume_fisier"] = nume
-        grupuri_semantice[cheie_semantica].append(meta_copie)
 
-    # 3. Alegerea câștigătorului per cheie semantică
-    master_curat = {"fisiere": {}, "total_fisiere": 0, "last_updated": ""}
+        for v in lista_variante:
+            v_copie = dict(v)
+            v_copie["_nume_fisier"] = nume_fisier
+            grupuri_semantice[cheie_semantica].append(v_copie)
 
-    for cheie, variante in grupuri_semantice.items():
-        if len(variante) == 1:
-            castigator = variante[0]
-        else:
-            # Preferăm denumirea nouă 'brut_XML_' și data creării cea mai recentă
-            variante.sort(
-                key=lambda x: (
-                    1 if x["_nume_fisier"].startswith("brut_XML_") else 0,
-                    x.get("createdTime", "")
-                ),
+    for cheie_semantica, lista_variante in grupuri_semantice.items():
+        variante_valide = [v for v in lista_variante if v["size"] >= 10]
+        variante_mici = [v for v in lista_variante if v["size"] < 10]
+
+        for v_mica in variante_mici:
+            ids_de_sters.append(v_mica["id"])
+
+        if len(variante_valide) > 1:
+            variante_valide.sort(
+                key=lambda x: (1 if x["_nume_fisier"].startswith("brut_XML_") else 0, x["createdTime"]),
                 reverse=True
             )
-            castigator = variante[0]
-            for dup in variante[1:]:
-                if dup.get("id"):
-                    ids_de_sters.append(dup["id"])
-                    duplicate_detectate += 1
+            for duplicat in variante_valide[1:]:
+                ids_de_sters.append(duplicat["id"])
 
-        nume_oficial = castigator.pop("_nume_fisier")
-        # Standardizăm denumirea în Master Index dacă era veche
-        if nume_oficial.startswith("brut_legislatie_"):
-            nume_oficial = nume_oficial.replace("brut_legislatie_", "brut_XML_")
-
-        master_curat["fisiere"][nume_oficial] = castigator
-
-    master_curat["total_fisiere"] = len(master_curat["fisiere"])
-
-    print(f"✅ Fișiere XML valide rămase în Master: {master_curat['total_fisiere']:,}", flush=True)
-    if fisiere_mici > 0:
-        print(f"🗑️ Fișiere corupte/goale (<10B) marcate pentru coș: {fisiere_mici:,}", flush=True)
-    if duplicate_detectate > 0:
-        print(f"🗑️ Duplicate marcate pentru coș: {duplicate_detectate:,}", flush=True)
-
-    # 4. Salvare Master Index actualizat
-    print("\n3️⃣ Salvare Master Index actualizat pe Google Drive...", flush=True)
-    salvat_ok = build_index.salveaza_master_index_xml(
-        service,
-        master_curat,
-        mesaj="Master Index XML Actualizat Incremental"
-    )
-
-    if not salvat_ok:
-        print("❌ ABORT: Salvarea indexului a eșuat. Se anulează ștergerea din Drive.", flush=True)
-        sys.exit(1)
-
-    # 5. Trimitere la coș a duplicatelor
-    if ids_de_sters:
-        print(f"\n4️⃣ Trimitere la coș #{len(ids_de_sters):,} fișiere neconforme...", flush=True)
-        build_index.executa_trash_multi_threaded(ids_de_sters, max_workers=15)
-
-    # 6. Curățare micro-indecși
-    print("\n5️⃣ Curățare fișiere temporare de micro-index...", flush=True)
-    curata_micro_indecsi_procesati(service)
-
-    durata = round(time.time() - timp_start, 2)
-    print("\n============================================================", flush=True)
-    print(f"🎉 REINDEXARE INCREMENTALĂ FINALIZATĂ ÎN {durata} SECUNDE!", flush=True)
-    print("============================================================", flush=True)
+    # Rulam igienizarea doar pe un lot de siguranță
+    curata_lot_duplicate(service, ids_de_sters)
+    print("\n🎉 PROCES INCREMENTAL & IGIENIZARE FINALIZAT!", flush=True)
 
 
 if __name__ == "__main__":
