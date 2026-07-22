@@ -1,27 +1,18 @@
-import os
+import io
+import json
+import re
 import sys
 import time
-import json
 import socket
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-
-# ==============================================================================
-# CONFIGURARE CĂI DE IMPORT
-# ==============================================================================
-DIRECTOR_CURENT = Path(__file__).resolve().parent
-RADACINA_PROIECT = DIRECTOR_CURENT.parent
-
-if str(RADACINA_PROIECT) not in sys.path:
-    sys.path.insert(0, str(RADACINA_PROIECT))
-if str(DIRECTOR_CURENT) not in sys.path:
-    sys.path.insert(0, str(DIRECTOR_CURENT))
-
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+from concurrent.futures import ThreadPoolExecutor
 from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaIoBaseDownload
+
+# Rezolvare automată căi de import
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+sys.path.append(str(Path(__file__).resolve().parent))
 
 from drive_config import (
     INDEX_FILE_ID,
@@ -31,56 +22,79 @@ from drive_config import (
     get_list_params,
 )
 
-NUME_MASTER_INDEX_XML = "index_xml.json"
+CALE_INDEX_LOCAL = "index_xml.json"
 
 
-# ==============================================================================
-# AUTENTIFICARE GOOGLE DRIVE API (ROBUSTĂ)
-# ==============================================================================
-def get_drive_service():
-    """Creează un client Drive API robust cu timeout setat pentru prevenirea blocajelor."""
+def get_drive_service_internal():
+    """Client intern scurt cu socket timeout pentru operațiunile de curățare pe Delta."""
     socket.setdefaulttimeout(60)
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
 
     creds_json = (
         os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
         or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
         or os.getenv("SERVICE_ACCOUNT_JSON")
     )
-
     if creds_json:
-        try:
-            info = json.loads(creds_json)
-            creds = service_account.Credentials.from_service_account_info(
-                info, scopes=["https://www.googleapis.com/auth/drive"]
-            )
-            return build("drive", "v3", credentials=creds, cache_discovery=False)
-        except Exception as e:
-            print(f"❌ Eroare la citirea secretului JSON: {e}", flush=True)
-            sys.exit(1)
-
-    cale_local = RADACINA_PROIECT / "service_account.json"
+        info = json.loads(creds_json)
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        return build("drive", "v3", credentials=creds, cache_discovery=False)
+    
+    cale_local = Path(__file__).resolve().parent.parent / "service_account.json"
     if cale_local.exists():
-        try:
-            creds = service_account.Credentials.from_service_account_file(
-                str(cale_local), scopes=["https://www.googleapis.com/auth/drive"]
-            )
-            return build("drive", "v3", credentials=creds, cache_discovery=False)
-        except Exception as e:
-            print(f"❌ Eroare la citirea fișierului local service_account.json: {e}", flush=True)
-
-    print("❌ Nu s-a găsit secretul GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
-    sys.exit(1)
+        creds = service_account.Credentials.from_service_account_file(
+            str(cale_local), scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        return build("drive", "v3", credentials=creds, cache_discovery=False)
+    return None
 
 
-# ==============================================================================
-# PASUL 0: INCARCARE SNAPSHOT VECHIUL INDEX PENTRU PRESERVARE FLAG-URI
-# ==============================================================================
-def incarca_snapshot_index_vechi(service):
-    """Descarcă indexul existent pentru a-i păstra flag-urile de stare (Tags_extracted, processed etc.)."""
-    print("\n📦 [SNAPSHOT] Descărcare Index Vechi pentru conservarea stărilor...", flush=True)
+def curata_duplicate_delta_multi_threaded(ids_de_sters, max_workers=10):
+    """Șterge rapid la coș duplicatele identificate în timpul scanării Delta."""
+    if not ids_de_sters:
+        return
+
+    print(f"🧹 [Auto-Trash Delta] S-au găsit {len(ids_de_sters)} duplicate noi pe Drive. Se trimit la coș...", flush=True)
+    
+    def trash_worker(file_id):
+        srv = get_drive_service_internal()
+        if not srv:
+            return
+        for _ in range(5):
+            try:
+                params = get_file_params(fileId=file_id)
+                params["body"] = {"trashed": True}
+                srv.files().update(**params).execute()
+                return
+            except Exception:
+                time.sleep(1)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        executor.map(trash_worker, ids_de_sters)
+    print(f"✨ [Auto-Trash Delta] {len(ids_de_sters)} duplicate eliminate cu succes!", flush=True)
+
+
+def verifica_si_descarca_index_master(service):
+    """PASUL 0 & 1: Verificare strictă și descărcare Master Index."""
     if not INDEX_FILE_ID:
-        print("⚠️ INDEX_FILE_ID nu este definit. Se va porni fără istoric de flag-uri.", flush=True)
-        return {}
+        print("❌ [ABORT] Variabila 'XML_STORAGE_INDEX' este GOLĂ sau NESETATĂ!", flush=True)
+        sys.exit(1)
+
+    params_get = get_file_params(
+        fileId=INDEX_FILE_ID,
+        fields="id, name, size, mimeType, parents, trashed"
+    )
+
+    try:
+        meta = service.files().get(**params_get).execute()
+        size_mb = round(int(meta.get("size", 0)) / (1024 * 1024), 2)
+        print(f"✅ [Master Index Identificat] Nume: {meta.get('name')} | MB: {size_mb}", flush=True)
+    except Exception as ex:
+        print(f"❌ [ABORT] Eroare la citire metadate Master Index: {ex}", flush=True)
+        sys.exit(1)
 
     try:
         continut_bytes = (
@@ -88,284 +102,199 @@ def incarca_snapshot_index_vechi(service):
             .get_media(**get_file_params(fileId=INDEX_FILE_ID, acknowledgeAbuse=True))
             .execute()
         )
-        data = json.loads(continut_bytes.decode("utf-8"))
-        fisiere_map = data.get("fisiere", {})
-        print(f"✅ [SNAPSHOT REUȘIT] Am încărcat în memorie stările pentru {len(fisiere_map):,} fișiere existente!", flush=True)
+
+        with open(CALE_INDEX_LOCAL, "wb") as f:
+            f.write(continut_bytes)
+
+        with open(CALE_INDEX_LOCAL, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            total = len(data.get("fisiere", {}))
+            print(f"✅ [Master Index Loaded] {total:,} fișiere existente în memorie.", flush=True)
+            return data
+    except Exception as e:
+        print(f"❌ [ABORT] Eroare descărcare Master Index: {e}", flush=True)
+        sys.exit(1)
+
+
+def aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map):
+    """Citește și aplică micro-indecșii temporari din TEMPORARY_XML_INDEXES."""
+    if not FOLDER_TEMP_INDEXES_ID:
         return fisiere_map
-    except Exception as e:
-        print(f"⚠️ Nu s-a putut descărca vechiul index ({e}). Se va construi fără istoric de flag-uri.", flush=True)
-        return {}
 
-
-# ==============================================================================
-# SALVARE MASTER INDEX XML PE DRIVE
-# ==============================================================================
-def salveaza_master_index_xml(service, data, nume_fisier=NUME_MASTER_INDEX_XML, mesaj="Master Index XML"):
-    data["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    cale_temp = Path(nume_fisier)
+    query = f"'{FOLDER_TEMP_INDEXES_ID}' in parents and name contains 'temp_index_' and trashed = false"
     try:
-        with open(cale_temp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        resp = (
+            service.files()
+            .list(**get_list_params(q=query, fields="files(id, name, createdTime)"))
+            .execute()
+        )
 
-        media = MediaFileUpload(str(cale_temp), mimetype="application/json")
+        loguri_temp = resp.get("files", [])
+        if not loguri_temp:
+            return fisiere_map
 
-        if INDEX_FILE_ID:
-            params = get_file_params(fileId=INDEX_FILE_ID)
-            params["media_body"] = media
-            service.files().update(**params).execute()
-        else:
-            query = f"'{FOLDER_TEMP_INDEXES_ID}' in parents and name = '{nume_fisier}' and trashed = false"
-            list_params = get_list_params(q=query, fields="files(id)")
-            res = service.files().list(**list_params).execute()
-            files = res.get("files", [])
+        loguri_temp.sort(key=lambda x: x.get("createdTime", ""))
+        print(f"⚡ [Micro-Indecși] Aplicare {len(loguri_temp)} fișiere temporare...", flush=True)
 
-            if files:
-                file_id = files[0]["id"]
-                params = get_file_params(fileId=file_id)
-                params["media_body"] = media
-                service.files().update(**params).execute()
-            else:
-                file_metadata = {"name": nume_fisier, "parents": [FOLDER_TEMP_INDEXES_ID]}
-                params = get_file_params()
-                params["body"] = file_metadata
-                params["media_body"] = media
-                service.files().create(**params).execute()
-
-        total_intrare = len(data.get("fisiere", data.get("inventory", {})))
-        print(f"💾 {mesaj} salvat pe Drive! ({total_intrare:,} intrări)", flush=True)
-        if cale_temp.exists():
-            cale_temp.unlink()
-    except Exception as e:
-        print(f"❌ Eroare la salvarea Master Index XML: {e}", flush=True)
-        if cale_temp.exists():
-            cale_temp.unlink()
-
-
-# ==============================================================================
-# EXECUȚIE TRASH MULTI-THREADED
-# ==============================================================================
-def executa_trash_multi_threaded(ids_de_sters, max_workers=15):
-    if not ids_de_sters:
-        print("✨ Nu există duplicate de șters! Totul este curat.", flush=True)
-        return
-
-    print("\n" + "=" * 60, flush=True)
-    print(f"🚀 TRIMITERE LA COȘ #{len(ids_de_sters):,} DUPLICATE XML ({max_workers} FIRE PARALELE)...", flush=True)
-    print("=" * 60, flush=True)
-
-    counter_lock = threading.Lock()
-    total_curatate = 0
-    erori_gunoi = 0
-    timp_start = time.time()
-
-    def trashing_worker(file_id):
-        nonlocal total_curatate, erori_gunoi
-        thread_service = get_drive_service()
-        
-        for incercare in range(10):
+        mutații_aplicate = 0
+        for log_file in loguri_temp:
+            file_id = log_file["id"]
             try:
-                params = get_file_params(fileId=file_id)
-                params["body"] = {"trashed": True}
-                thread_service.files().update(**params).execute()
-                
-                with counter_lock:
-                    total_curatate += 1
-                    if total_curatate % 200 == 0 or total_curatate == len(ids_de_sters):
-                        durata = round(time.time() - timp_start, 1)
-                        viteza = round(total_curatate / (durata if durata > 0 else 1), 1)
-                        print(
-                            f"⚡ [TURBO Trash XML] Mutate la coș #{total_curatate:,}/{len(ids_de_sters):,} | Ritm: {viteza} f/sec ({durata}s)",
-                            flush=True,
-                        )
-                return True
-            except Exception as e:
-                pauza = min(2 ** incercare, 30)
-                time.sleep(pauza)
-                thread_service = get_drive_service()
+                content_bytes = (
+                    service.files()
+                    .get_media(**get_file_params(fileId=file_id, acknowledgeAbuse=True))
+                    .execute()
+                )
+                data_log = json.loads(content_bytes.decode("utf-8"))
+                flag_updates = data_log.get("flag_updates", {})
 
-        with counter_lock:
-            erori_gunoi += 1
-        return False
+                for nume_f, modi_flags in flag_updates.items():
+                    if isinstance(modi_flags, dict):
+                        if modi_flags.get("_deleted") is True:
+                            if nume_f in fisiere_map:
+                                del fisiere_map[nume_f]
+                                mutații_aplicate += 1
+                        else:
+                            if nume_f not in fisiere_map:
+                                fisiere_map[nume_f] = {}
+                            fisiere_map[nume_f].update(modi_flags)
+                            mutații_aplicate += 1
+            except HttpError as err:
+                if err.resp.status in [404, 410]:
+                    continue
+            except Exception:
+                pass
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        executor.map(trashing_worker, ids_de_sters)
+        print(f"   └─ ✅ Aplicat în memorie {mutații_aplicate} mutații din Micro-Indecși.", flush=True)
 
-    durata_totala = round(time.time() - timp_start, 1)
-    print("\n" + "=" * 60, flush=True)
-    print(f"🏁 OPERAȚIUNE DE TRASH FINALIZATĂ în {durata_totala}s!", flush=True)
-    print(f"🗑️ Duplicate XML mutate în coș: {total_curatate:,}", flush=True)
-    if erori_gunoi > 0:
-        print(f"⚠️ Erori întâmpinate la ștergere: {erori_gunoi:,}", flush=True)
-    print("=" * 60 + "\n", flush=True)
+    except Exception as e:
+        print(f"⚠️ Eroare la citirea micro-indecșilor temporari: {e}", flush=True)
+
+    return fisiere_map
 
 
-# ==============================================================================
-# MAIN ENGINE: RAW SCAN WITH CIRCUIT BREAKER -> STATE MERGE -> CLEAN INDEX
-# ==============================================================================
-def main():
-    print("============================================================", flush=True)
-    print("🚀 FULL RAW INVENTORY & STATE PRESERVING CLEANUP - XML", flush=True)
-    print("============================================================", flush=True)
+def obtine_index_virtual(service):
+    """
+    Construiește starea unificată a bazei de date.
+    Dacă găsește fișiere duplicate nou create pe Drive (Delta), le elimină AUTOMAT la coș!
+    """
+    data_master = verifica_si_descarca_index_master(service)
+    fisiere_map = data_master.get("fisiere", {})
+    last_updated = data_master.get("last_updated")
 
-    service = get_drive_service()
+    fisiere_map = aplica_micro_indecsi_temporari_in_memorie(service, fisiere_map)
+
+    pattern_nume = re.compile(r"brut_legislatie_(\d+)_pag(\d+)\.xml")
     
-    # 1. Preluăm snapshot-ul cu vechile flag-uri de procesare
-    old_index_map = incarca_snapshot_index_vechi(service)
+    # Mapare pentru colectarea delta-ului și identificarea duplicatelor:
+    # { nume_fisier: [list_of_drive_candidates] }
+    delta_candidates = {}
+    ids_de_sters_delta = []
 
-    # Inventar global peste cele 4 Shared Drive-uri: { nume_fisier: [list_of_metadata] }
-    raw_inventory = {}
-    total_fisiere_gasite = 0
-    fisiere_de_la_ultimul_save = 0
+    if last_updated:
+        print(f"🔍 SCANARE DELTA (fișiere modificate/create după {last_updated})...", flush=True)
+        for folder_id in FOLDERE_XML_IDS:
+            query = f"'{folder_id}' in parents and name contains 'brut_legislatie_' and modifiedTime > '{last_updated}' and trashed = false"
+            page_token = None
 
-    # 2. Scanare fizică Cross-Drive cu Circuit Breaker pe Progres Real
-    for index_folder, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
-        print(f"\n📂 [{index_folder}/{len(FOLDERE_XML_IDS)}] Scanare Drive XML Folder ID: {folder_id}...", flush=True)
-        page_token = None
-        query = f"'{folder_id}' in parents and trashed = false"
-
-        seen_tokens = set()
-        unice_la_ultimul_check = len(raw_inventory)
-        fisiere_parcurse_folder = 0
-
-        while True:
-            if page_token in seen_tokens:
-                print(f"⚠️ DETECTATĂ BUCLĂ REPETITIVĂ DE TOKEN! Oprim scanarea pe folderul {folder_id[:8]}.", flush=True)
-                break
-            if page_token:
-                seen_tokens.add(page_token)
-
-            response = None
-            incercare = 0
-
-            # BUCLĂ PERSISTENTĂ PE PAGE TOKEN (Retry infinit pe erori de rețea)
-            while True:
-                try:
-                    list_params = get_list_params(
-                        q=query,
-                        fields="nextPageToken, files(id, name, createdTime, size)",
-                        pageToken=page_token,
-                        pageSize=1000,
+            try:
+                while True:
+                    response = (
+                        service.files()
+                        .list(**get_list_params(
+                            q=query,
+                            spaces="drive",
+                            fields="nextPageToken, files(id, name, description, createdTime, size)",
+                            pageSize=1000,
+                            pageToken=page_token,
+                        ))
+                        .execute()
                     )
-                    response = service.files().list(**list_params).execute()
-                    break
-                except (socket.error, socket.timeout, HttpError, Exception) as e:
-                    incercare += 1
-                    pauza = min(2 ** incercare, 30)
-                    print(f"⚠️ Connection Error pe pageToken ({incercare}): {e}. Pauză {pauza}s și reîncercăm...", flush=True)
-                    time.sleep(pauza)
-                    service = get_drive_service()
 
-            files = response.get("files", [])
-            
-            if not files:
-                break
+                    files = response.get("files", [])
+                    for f in files:
+                        nume = f["name"]
+                        item_meta = {
+                            "id": f["id"],
+                            "folder_id": folder_id,
+                            "createdTime": f.get("createdTime", "1970-01-01T00:00:00.000Z"),
+                            "size": int(f.get("size", 0)),
+                            "description": f.get("description", "")
+                        }
 
-            for f in files:
-                nume = f["name"]
-                total_fisiere_gasite += 1
-                fisiere_de_la_ultimul_save += 1
-                fisiere_parcurse_folder += 1
-                
-                meta_item = {
-                    "id": f["id"],
-                    "folder_id": folder_id,
-                    "createdTime": f.get("createdTime", "1970-01-01T00:00:00.000Z"),
-                    "size": int(f.get("size", 0))
-                }
+                        if nume not in delta_candidates:
+                            delta_candidates[nume] = []
+                        delta_candidates[nume].append(item_meta)
 
-                if nume not in raw_inventory:
-                    raw_inventory[nume] = []
+                    page_token = response.get("nextPageToken", None)
+                    if not page_token:
+                        break
+            except Exception as e:
+                print(f"⚠️ Eroare verificare delta folder {folder_id[:8]}: {e}", flush=True)
 
-                if not any(x["id"] == f["id"] for x in raw_inventory[nume]):
-                    raw_inventory[nume].append(meta_item)
+    # --------------------------------------------------------------------------
+    # PROCESARE DELTA & DEDUPLICARE AUTOMATĂ LA COȘ (AUTO-TRASH DELTA)
+    # --------------------------------------------------------------------------
+    noutati_validate = 0
+    if delta_candidates:
+        for nume_f, variante in delta_candidates.items():
+            # Alege cel mai bun candidat
+            variante.sort(key=lambda x: (x["size"] > 0, x["createdTime"]), reverse=True)
+            castigator = variante[0]
 
-            # CHECK PROGRES ȘI CIRCUIT BREAKER LA FIECARE 10.000 FIȘIERE PARCURSE
-            if fisiere_de_la_ultimul_save >= 10000:
-                unice_curente = len(raw_inventory)
-                fisiere_unice_noi = unice_curente - unice_la_ultimul_check
-                fisiere_de_la_ultimul_save = 0
-                unice_la_ultimul_check = unice_curente
+            # Dacă existau duplicate în noua sesiune Delta, restul merg la coș!
+            for dup in variante[1:]:
+                ids_de_sters_delta.append(dup["id"])
 
-                print(f"📊 [Progres Scanare RAW] {total_fisiere_gasite:,} parcurse total ({unice_curente:,} unice | +{fisiere_unice_noi:,} noi în ultimele 10k)...", flush=True)
+            # Dacă în Master Index exista deja un fișier cu același nume, dar cu alt ID:
+            if nume_f in fisiere_map and fisiere_map[nume_f].get("id"):
+                vechiul_id = fisiere_map[nume_f]["id"]
+                if vechiul_id != castigator["id"]:
+                    # Vechiul ID devine duplicat și trimis la coș!
+                    ids_de_sters_delta.append(vechiul_id)
 
-                # CIRCUIT BREAKER: Dacă am parcurs deja >20k fișiere și în ultimele 10k am găsit <50 fișiere noi,
-                # înseamnă că am atins capătul folderului și API-ul dă pagini repetitive/duplicate!
-                if fisiere_parcurse_folder >= 20000 and fisiere_unice_noi < 50:
-                    print(f"🛑 [CIRCUIT BREAKER] Folderul {folder_id[:8]} a atins limita de saturare (+{fisiere_unice_noi} unice noi la ultimele 10k parcurse). Trecem la folderul următor!", flush=True)
-                    break
+            match = pattern_nume.search(nume_f)
+            an_val = int(match.group(1)) if match else None
+            pag_val = int(match.group(2)) if match else None
 
-            page_token = response.get("nextPageToken")
-            if not page_token:
-                break
+            # Actualizăm sau adăugăm în Indexul Virtual
+            str_desc = castigator["description"]
+            stare_existenta = fisiere_map.get(nume_f, {})
 
-    print(f"\n📊 SCANARE CROSS-DRIVE FINALIZATĂ!")
-    print(f"📊 TOTAL FIȘIERE FIZICE PARCURSE PE CELE 4 DRIVE-URI: {total_fisiere_gasite:,}", flush=True)
-    print(f"📊 GRUPURI DE NUME UNICE IDENTIFICATE: {len(raw_inventory):,}", flush=True)
+            fisiere_map[nume_f] = {
+                "id": castigator["id"],
+                "folder_id": castigator["folder_id"],
+                "an": an_val,
+                "pagina": pag_val,
+                "createdTime": castigator["createdTime"],
+                "size": castigator["size"],
+                "downloaded": True,
+                "Tags_extracted": stare_existenta.get("Tags_extracted", False),
+                "processed": stare_existenta.get("processed", ("processed=true" in str_desc)),
+            }
+            noutati_validate += 1
 
-    # ==========================================================================
-    # 3. CONSOLIDARE ÎN MEMORIE ȘI TRANSFER DE STARE (MERGE)
-    # ==========================================================================
-    print("\n" + "=" * 60, flush=True)
-    print("🧠 ANALIZĂ, SORTARE ȘI PRESERVARE FLAG-URI DE PROCESARE...", flush=True)
-    print("=" * 60, flush=True)
+        print(f"⚡ [Delta Processed] Integrate {noutati_validate} fișiere noi în Indexul Virtual.", flush=True)
 
-    master_index = {"fisiere": {}, "total_fisiere": 0, "last_updated": ""}
-    ids_de_sters = []
-    stari_recuperate = 0
+    # Executăm curățarea duplicatelor Delta (dacă s-au găsit)
+    if ids_de_sters_delta:
+        curata_duplicate_delta_multi_threaded(ids_de_sters_delta)
 
-    for nume_fisier, lista_variante in raw_inventory.items():
-        if len(lista_variante) == 1:
-            castigator = lista_variante[0]
-        else:
-            # Sortare: preferă fișierele cu size > 0 și cel mai recent createdTime
-            lista_variante.sort(
-                key=lambda x: (x["size"] > 0, x["createdTime"]), 
-                reverse=True
-            )
-            castigator = lista_variante[0]
-            
-            for duplicat in lista_variante[1:]:
-                ids_de_sters.append(duplicat["id"])
-
-        # Preluăm starea veche (flag-urile de prelucrare)
-        vechea_stare = old_index_map.get(nume_fisier, {})
-        if vechea_stare:
-            stari_recuperate += 1
-
-        # Construim intrarea curată în noul Master Index
-        master_index["fisiere"][nume_fisier] = {
-            "id": castigator["id"],
-            "folder_id": castigator["folder_id"],
-            "createdTime": castigator["createdTime"],
-            "size": castigator["size"],
-            "downloaded": vechea_stare.get("downloaded", True),
-            "Tags_extracted": vechea_stare.get("Tags_extracted", False),
-            "processed": vechea_stare.get("processed", False)
-        }
-
-        # Transferăm orice alt flag personalizat existent în vechiul index
-        for cheie, valoare in vechea_stare.items():
-            if cheie not in master_index["fisiere"][nume_fisier]:
-                master_index["fisiere"][nume_fisier][cheie] = valoare
-
-    master_index["total_fisiere"] = len(master_index["fisiere"])
-
-    print(f"✅ Fișiere XML validate drept MASTER: {master_index['total_fisiere']:,}", flush=True)
-    print(f"🛡️ Stări/Flag-uri de procesare conservate din indexul vechi: {stari_recuperate:,}", flush=True)
-    print(f"🗑️ Duplicate XML identificate pentru eliminare: {len(ids_de_sters):,}", flush=True)
-
-    # 4. Executăm curățarea duplicatelor
-    if ids_de_sters:
-        executa_trash_multi_threaded(ids_de_sters, max_workers=15)
-
-    # 5. Salvăm varianta finală curată cu toate flag-urile conservate
-    salveaza_master_index_xml(
-        service, 
-        master_index, 
-        nume_fisier=NUME_MASTER_INDEX_XML, 
-        mesaj="Master Index XML Final Curat (Cu Stări Conservate)"
-    )
+    data_master["fisiere"] = fisiere_map
+    data_master["total_fisiere"] = len(fisiere_map)
+    return data_master
 
 
-if __name__ == "__main__":
-    main()
+def obtine_fisiere_neprocesate(service, nume_flag="Tags_extracted"):
+    index_v = obtine_index_virtual(service)
+    fisiere_map = index_v.get("fisiere", {})
+
+    rezultat = []
+    for nume, date in fisiere_map.items():
+        if not date.get(nume_flag, False) and date.get("id"):
+            item = dict(date)
+            item["nume"] = nume
+            rezultat.append(item)
+
+    print(f"🎯 [Filtrare Target] Găsite {len(rezultat)} fișiere neprocesate pentru '{nume_flag}'.", flush=True)
+    return rezultat
