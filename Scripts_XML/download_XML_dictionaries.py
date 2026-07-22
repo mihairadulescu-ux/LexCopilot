@@ -1,15 +1,15 @@
 import os
 import sys
-import csv
-import json
-import re
-import io
 import time
-from datetime import datetime, timezone
+import json
+import csv
+import io
+import re
 from pathlib import Path
+from bs4 import BeautifulSoup
 
 # ==============================================================================
-# CONFIGURARE CĂI DE IMPORT (PENTRU RULARE DIN GITHUB ACTIONS SAU LOCAL)
+# CONFIGURARE CĂI DE IMPORT
 # ==============================================================================
 DIRECTOR_CURENT = Path(__file__).resolve().parent
 RADACINA_PROIECT = DIRECTOR_CURENT.parent
@@ -21,221 +21,288 @@ if str(DIRECTOR_CURENT) not in sys.path:
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
-# Importăm configurația centralizată și parametrii legați pentru Shared Drive
 from drive_config import (
-    FOLDER_METADATA_ID,
     FOLDER_TEMP_INDEXES_ID,
     get_file_params,
     get_list_params,
 )
 
-# Importăm cititorul de index virtual actualizat
-try:
-    import XML_INDEX_READER
-except ImportError:
-    from Scripts_XML import XML_INDEX_READER
+import XML_INDEX_READER
 
-VERDE = "\033[92m"
-GALBEN = "\033[93m"
-ROSU = "\033[91m"
-RESET = "\033[0m"
+# Folderul de destinație specificat pentru salvarea metadatelor
+METADATA_FOLDER_ID = "1NduQgFpbAPIPEEc7tvcfR6gLI6LuxfYR"
+
+NUME_CSV_EMITENTI = "emitenți_brut.csv"
+NUME_CSV_TIPURI_ACTE = "tipuri_acte_brut.csv"
+INTERVAL_SALVARE = 10000  # Salvare la fiecare 10.000 de fișiere prelucrate
 
 
+# ==============================================================================
+# AUTENTIFICARE GOOGLE DRIVE API
+# ==============================================================================
 def get_drive_service():
     """Autentificare în Google Drive API."""
-    scopes = ["https://www.googleapis.com/auth/drive"]
-    github_secret = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
-    
-    if github_secret:
-        service_account_info = json.loads(github_secret)
-        creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=scopes)
-    else:
-        credentials_path = "service_account.json"
-        if not os.path.exists(credentials_path):
-            raise FileNotFoundError(f"Nu s-a găsit fișierul '{credentials_path}'!")
-        creds = service_account.Credentials.from_service_account_file(credentials_path, scopes=scopes)
-        
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
+    creds_json = (
+        os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+        or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
+        or os.getenv("SERVICE_ACCOUNT_JSON")
+    )
 
-
-def salveaza_micro_index_temporar(service, flag_updates):
-    """
-    Creează un fișier temporar de mutații pe Drive (în TEMPORARY_XML_INDEXES) 
-    pentru a anunța toate celelalte scripturi că aceste fișiere au Tags_extracted = True.
-    """
-    if not flag_updates:
-        return
-
-    timestamp = int(time.time())
-    nume_temp = f"temp_index_dictionaries_{timestamp}.json"
-    
-    structura_log = {
-        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "source": "download_XML_dictionaries.py",
-        "flag_updates": flag_updates
-    }
-
-    # Salvare locală temporară
-    with open(nume_temp, "w", encoding="utf-8") as f:
-        json.dump(structura_log, f, ensure_ascii=False, indent=2)
-
-    # Încărcare pe Drive în folderul temporar cu parametrii securizați pentru Shared Drive
-    try:
-        media = MediaFileUpload(nume_temp, mimetype='application/json')
-        file_metadata = {
-            'name': nume_temp,
-            'parents': [FOLDER_TEMP_INDEXES_ID]
-        }
-        res = service.files().create(
-            **get_file_params(
-                body=file_metadata, 
-                media_body=media, 
-                fields='id'
+    if creds_json:
+        try:
+            info = json.loads(creds_json)
+            creds = service_account.Credentials.from_service_account_info(
+                info, scopes=["https://www.googleapis.com/auth/drive"]
             )
-        ).execute()
-        
-        print(f"{VERDE}⚡ [Micro-Index Publicat] Înregistrat flag-ul 'Tags_extracted: True' pentru {len(flag_updates)} fișiere (ID Temp: {res.get('id')}){RESET}", flush=True)
-    except Exception as e:
-        print(f"{ROSU}⚠️ Nu s-a putut publica micro-indexul temporar pe Drive: {e}{RESET}", flush=True)
-    finally:
-        if os.path.exists(nume_temp):
-            os.remove(nume_temp)
+            return build("drive", "v3", credentials=creds)
+        except Exception as e:
+            print(f"❌ Eroare la citirea secretului JSON: {e}", flush=True)
+            sys.exit(1)
+
+    cale_local = RADACINA_PROIECT / "service_account.json"
+    if cale_local.exists():
+        try:
+            creds = service_account.Credentials.from_service_account_file(
+                str(cale_local), scopes=["https://www.googleapis.com/auth/drive"]
+            )
+            return build("drive", "v3", credentials=creds)
+        except Exception as e:
+            print(f"❌ Eroare la citirea fișierului local service_account.json: {e}", flush=True)
+
+    print("❌ Nu s-a găsit secretul GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
+    sys.exit(1)
 
 
-def incarca_pe_drive(service, cale_fisier_local, folder_id):
-    """Încărcare sau actualizare fișier CSV pe Google Drive."""
-    if not folder_id:
-        print(f"⚠️ Nu s-a specificat ID-ul folderului de destinație pe Drive pentru {cale_fisier_local}.", flush=True)
-        return
-
-    nume_fisier = os.path.basename(cale_fisier_local)
-    media = MediaFileUpload(cale_fisier_local, mimetype='text/csv', resumable=True)
-
+# ==============================================================================
+# DESCĂRCARE ȘI INCARCARE CSV EXISTENT DIN DRIVE
+# ==============================================================================
+def descarca_sau_creeaza_set_csv(service, nume_fisier):
+    """Citește CSV-ul existent din Drive pentru a menține unicitatea și frecvența acumulată."""
+    set_valori = {}
+    query = f"'{METADATA_FOLDER_ID}' in parents and name = '{nume_fisier}' and trashed = false"
+    
     try:
-        query = f"'{folder_id}' in parents and name = '{nume_fisier}' and trashed = false"
-        res = service.files().list(
-            **get_list_params(q=query, spaces='drive', fields='files(id)')
-        ).execute()
-        files = res.get('files', [])
+        res = service.files().list(**get_list_params(q=query, fields="files(id)")).execute()
+        files = res.get("files", [])
+        
+        if files:
+            file_id = files[0]["id"]
+            content = service.files().get_media(**get_file_params(fileId=file_id)).execute()
+            reader = csv.reader(io.StringIO(content.decode("utf-8")))
+            
+            # Omitem antetul
+            header = next(reader, None)
+            for row in reader:
+                if row and len(row) >= 2:
+                    valoare, aparitii = row[0].strip(), int(row[1])
+                    if valoare:
+                        set_valori[valoare] = aparitii
+            print(f"📥 Încărcat CSV existent '{nume_fisier}': {len(set_valori):,} intrări anterioare.", flush=True)
+    except Exception as e:
+        print(f"⚠️ Nu s-a putut descărca {nume_fisier} ({e}). Se va începe un fișier nou.", flush=True)
+        
+    return set_valori
+
+
+def salveaza_csv_pe_drive(service, set_valori, nume_fisier, antet_coloana):
+    """Actualizează fișierul CSV pe Drive în METADATA_FOLDER_ID cu datele consolidate la zi."""
+    cale_temp = Path(nume_fisier)
+    try:
+        # Sortăm după frecvență descrescătoare
+        intrarile_sortate = sorted(set_valori.items(), key=lambda x: x[1], reverse=True)
+
+        with open(cale_temp, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([antet_coloana, "Aparitii"])
+            for val, count in intrarile_sortate:
+                writer.writerow([val, count])
+
+        media = MediaFileUpload(str(cale_temp), mimetype="text/csv")
+        query = f"'{METADATA_FOLDER_ID}' in parents and name = '{nume_fisier}' and trashed = false"
+        res = service.files().list(**get_list_params(q=query, fields="files(id)")).execute()
+        files = res.get("files", [])
 
         if files:
-            file_id = files[0]['id']
-            service.files().update(
-                **get_file_params(fileId=file_id, media_body=media)
-            ).execute()
-            print(f"{VERDE}✅ Sincronizat pe Drive (Update) în Metadate: {nume_fisier} (ID: {file_id}){RESET}", flush=True)
-            return
+            file_id = files[0]["id"]
+            params = get_file_params(fileId=file_id)
+            params["media_body"] = media
+            service.files().update(**params).execute()
+        else:
+            file_metadata = {"name": nume_fisier, "parents": [METADATA_FOLDER_ID]}
+            params = get_file_params()
+            params["body"] = file_metadata
+            params["media_body"] = media
+            service.files().create(**params).execute()
 
-        file_metadata = {'name': nume_fisier, 'parents': [folder_id]}
-        f_nou = service.files().create(
-            **get_file_params(body=file_metadata, media_body=media, fields='id')
-        ).execute()
-        print(f"{VERDE}🎉 Încarcat pe Drive (Nou) în Metadate: {nume_fisier} (ID: {f_nou.get('id')}){RESET}", flush=True)
-
+        print(f"💾 [FLUSH CSV] Actualizat pe Drive: {nume_fisier} ({len(set_valori):,} intrări unice)", flush=True)
+        if cale_temp.exists():
+            cale_temp.unlink()
     except Exception as e:
-        print(f"{ROSU}❌ Eroare încărcare Drive {nume_fisier}:{RESET} {e}", flush=True)
+        print(f"❌ Eroare la salvarea CSV-ului {nume_fisier}: {e}", flush=True)
+        if cale_temp.exists():
+            cale_temp.unlink()
 
 
-def extrage_taguri_din_matrice(service, ani_procesare):
-    """Obține fișierele neprocesate din indexul virtual și extrage tag-urile Emitent și TipAct."""
-    # Obținem indexul virtual ultra-actualizat
-    index_v = XML_INDEX_READER.obtine_index_virtual(service)
-    fisiere_map = index_v.get("fisiere", {})
+def salveaza_micro_index(service, flag_updates):
+    """Persistă starea de procesare a fișierelor prin micro-indecși."""
+    if not flag_updates:
+        return
+    timestamp = int(time.time() * 1000)
+    nume_temp = f"temp_index_tags_{timestamp}.json"
+    data = {"flag_updates": flag_updates}
 
-    emitenti_gasiti = set()
-    tipuri_acte_gasite = set()
+    cale_temp = Path(nume_temp)
+    try:
+        with open(cale_temp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
-    regex_emitent = re.compile(r"<[^>]*?Emitent[^>]*?>(.*?)</[^>]*?Emitent>", re.DOTALL | re.IGNORECASE)
-    regex_tip_act = re.compile(r"<[^>]*?TipAct[^>]*?>(.*?)</[^>]*?TipAct>", re.DOTALL | re.IGNORECASE)
+        media = MediaFileUpload(str(cale_temp), mimetype="application/json")
+        file_metadata = {"name": nume_temp, "parents": [FOLDER_TEMP_INDEXES_ID]}
 
-    # Filtrăm doar fișierele din anii ceruți care NU au fost procesate deja (Tags_extracted == False)
-    fisiere_tinta = [
-        (nume, info) for nume, info in fisiere_map.items() 
-        if info.get('an') in ani_procesare and not info.get('Tags_extracted', False)
-    ]
+        params = get_file_params()
+        params["body"] = file_metadata
+        params["media_body"] = media
 
-    string_ani = "_".join([str(a) for a in ani_procesare])
-    print(f"\n{GALBEN}⚡ [Dictionare] Scanare pe indexul virtual pentru anii {string_ani} ({len(fisiere_tinta)} fișiere neprocesate selectate)...{RESET}", flush=True)
+        service.files().create(**params).execute()
+        print(f"🧩 Micro-index salvat în Drive: {nume_temp} ({len(flag_updates)} fișiere marcate)", flush=True)
 
-    contor_total_procesat = 0
-    flag_updates = {}
+        if cale_temp.exists():
+            cale_temp.unlink()
+    except Exception as e:
+        print(f"⚠️ Eroare la salvarea micro-index-ului: {e}", flush=True)
+        if cale_temp.exists():
+            cale_temp.unlink()
 
-    for nume_fisier, info in fisiere_tinta:
-        file_id = info.get('id')
-        if not file_id:
-            continue
+
+# ==============================================================================
+# PARSARE CONȚINUT XML BRUT
+# ==============================================================================
+def extrage_metadate_din_xml(continut_xml):
+    """Extrage lista de Emitenți și Tipuri de Acte din fișierul XML brut Just.ro."""
+    emitenți_gasiti = []
+    tipuri_acte_gasite = []
+
+    try:
+        soup = BeautifulSoup(continut_xml, "xml")
+        
+        # Căutare tag-uri Emitent
+        for tag_emitent in soup.find_all(["Emitent", "emitent", "EMITENT"]):
+            text_emitent = tag_emitent.get_text().strip()
+            if text_emitent and len(text_emitent) > 1:
+                emitenți_gasiti.append(text_emitent)
+
+        # Căutare tag-uri TipAct
+        for tag_tip in soup.find_all(["TipAct", "tipAct", "TIPACT", "Tip_Act"]):
+            text_tip = tag_tip.get_text().strip()
+            if text_tip and len(text_tip) > 1:
+                tipuri_acte_gasite.append(text_tip)
+
+    except Exception:
+        pass
+
+    return emitenți_gasiti, tipuri_acte_gasite
+
+
+# ==============================================================================
+# MAIN ENGINE
+# ==============================================================================
+def main():
+    print("============================================================", flush=True)
+    print("🚀 PORNIRE EXTRAGERE TAG-URI (EMITENȚI ȘI TIPURI ACTE)", flush=True)
+    print("============================================================", flush=True)
+
+    service = get_drive_service()
+
+    # 1. Citim fișierele CSV existente din Drive
+    map_emitenti = descarca_sau_creeaza_set_csv(service, NUME_CSV_EMITENTI)
+    map_tipuri_acte = descarca_sau_creeaza_set_csv(service, NUME_CSV_TIPURI_ACTE)
+
+    # 2. Obținem fișierele neprocesate prin XML_INDEX_READER
+    fisiere_tinta = XML_INDEX_READER.obtine_fisiere_neprocesate(service, nume_flag="Tags_extracted")
+
+    if not fisiere_tinta:
+        print("✨ Toate fișierele brute au deja tag-urile extrase! Nimic de procesat.", flush=True)
+        return
+
+    print(f"📊 Fișiere brute neprocesate identificate: {len(fisiere_tinta):,}", flush=True)
+
+    micro_updates = {}
+    fisiere_procesate_sesiune = 0
+    fisiere_de_la_ultimul_flush = 0
+    timp_start = time.time()
+
+    # 3. Procesare în loturi
+    for idx, item in enumerate(fisiere_tinta, start=1):
+        nume_fisier = item["nume"]
+        file_id = item["id"]
 
         try:
-            # Preluare stream media cu parametri securizați pentru Shared Drive
-            continut_bytes = service.files().get_media(
-                **get_file_params(fileId=file_id, acknowledgeAbuse=True)
-            ).execute()
+            # Descărcare conținut XML în memorie
+            continut_bytes = (
+                service.files()
+                .get_media(**get_file_params(fileId=file_id, acknowledgeAbuse=True))
+                .execute()
+            )
+            continut_xml = continut_bytes.decode("utf-8", errors="ignore")
 
-            xml_text = continut_bytes.decode("utf-8", errors="ignore")
-            
-            for em in regex_emitent.findall(xml_text):
-                val = em.strip()
-                if val: 
-                    emitenti_gasiti.add(val)
+            # Extragere entități
+            emitenți, tipuri = extrage_metadate_din_xml(continut_xml)
+
+            for em in emitenți:
+                map_emitenti[em] = map_emitenti.get(em, 0) + 1
+
+            for tp in tipuri:
+                map_tipuri_acte[tp] = map_tipuri_acte.get(tp, 0) + 1
+
+            # Marcăm fișierul ca având tag-urile extrase
+            micro_updates[nume_fisier] = {"Tags_extracted": True}
+            fisiere_procesate_sesiune += 1
+            fisiere_de_la_ultimul_flush += 1
+
+            # Afișare progres intermediar din 1.000 în 1.000
+            if idx % 1000 == 0:
+                durata = round(time.time() - timp_start, 1)
+                ritm = round(idx / (durata if durata > 0 else 1), 1)
+                print(
+                    f"⚡ [Progres Processing] {idx:,}/{len(fisiere_tinta):,} fișiere | Ritm: {ritm} f/sec | "
+                    f"Emitenți unici: {len(map_emitenti):,} | Tipuri acte unice: {len(map_tipuri_acte):,}",
+                    flush=True,
+                )
+
+            # SALVARE PERIODICĂ DIN 10.000 ÎN 10.000 DE FIȘIERE
+            if fisiere_de_la_ultimul_flush >= INTERVAL_SALVARE or idx == len(fisiere_tinta):
+                print(f"\n🔄 [MILESTONE {idx:,}] Se execută salvarea incrementală pe Drive...", flush=True)
                 
-            for ta in regex_tip_act.findall(xml_text):
-                val = ta.strip()
-                if val: 
-                    tipuri_acte_gasite.add(val)
+                # Persistare micro-indecși
+                salveaza_micro_index(service, micro_updates)
+                micro_updates = {}
 
-            # Marcăm fișierul ca procesat pentru starea de mutație
-            flag_updates[nume_fisier] = {"Tags_extracted": True}
-            contor_total_procesat += 1
+                # Salvare/Update CSV-uri
+                salveaza_csv_pe_drive(service, map_emitenti, NUME_CSV_EMITENTI, "Emitent_Brut")
+                salveaza_csv_pe_drive(service, map_tipuri_acte, NUME_CSV_TIPURI_ACTE, "TipAct_Brut")
 
-            if contor_total_procesat % 500 == 0:
-                print(f"   📊 [Progres] Procesate: {contor_total_procesat}/{len(fisiere_tinta)} fișiere", flush=True)
+                fisiere_de_la_ultimul_flush = 0
+                print(f"✅ Milestone {idx:,} salvat cu succes pe Drive!\n", flush=True)
 
         except Exception as e:
-            continue
+            print(f"⚠️ Eroare la procesarea fișierului {nume_fisier}: {e}", flush=True)
 
-    print(f"\n✅ [Procesare Finalizată] Total fișiere scanate: {contor_total_procesat}", flush=True)
+    # Save final de siguranță (dacă au rămas resturi)
+    if micro_updates:
+        salveaza_micro_index(service, micro_updates)
+        salveaza_csv_pe_drive(service, map_emitenti, NUME_CSV_EMITENTI, "Emitent_Brut")
+        salveaza_csv_pe_drive(service, map_tipuri_acte, NUME_CSV_TIPURI_ACTE, "TipAct_Brut")
 
-    # Salvăm mutațiile în folderul temporar de pe Drive
-    salveaza_micro_index_temporar(service, flag_updates)
-
-    cale_emitenti = f"lista_emitenti_{string_ani}.csv"
-    cale_acte = f"lista_tip_acte_{string_ani}.csv"
-    
-    with open(cale_emitenti, mode='w', newline='', encoding='utf-8') as fh:
-        writer = csv.writer(fh)
-        writer.writerow(['Emitent'])
-        for e in sorted(list(emitenti_gasiti)):
-            writer.writerow([e])
-            
-    with open(cale_acte, mode='w', newline='', encoding='utf-8') as fh:
-        writer = csv.writer(fh)
-        writer.writerow(['Tip_Act'])
-        for t in sorted(list(tipuri_acte_gasite)):
-            writer.writerow([t])
-            
-    print(f"{VERDE}✅ [Salvat Local] '{cale_emitenti}' și '{cale_acte}'. Se încarcă în folderul Metadate...{RESET}", flush=True)
-
-    incarca_pe_drive(service, cale_emitenti, FOLDER_METADATA_ID)
-    incarca_pe_drive(service, cale_acte, FOLDER_METADATA_ID)
+    durata_totala = round(time.time() - timp_start, 1)
+    print("\n============================================================", flush=True)
+    print(f"🎉 EXTRAGERE FINALIZATĂ în {durata_totala}s!")
+    print(f"📊 Fișiere procesate în această sesiune: {fisiere_procesate_sesiune:,}")
+    print(f"📊 Total Emitenți unici colectați: {len(map_emitenti):,}")
+    print(f"📊 Total Tipuri de Acte unice colectate: {len(map_tipuri_acte):,}")
+    print("============================================================", flush=True)
 
 
 if __name__ == "__main__":
-    argumente_numerice = []
-    for arg in sys.argv[1:]:
-        piese = arg.split()
-        for piesa in piese:
-            if piesa.isdigit():
-                argumente_numerice.append(int(piesa))
-
-    if len(argumente_numerice) == 1:
-        ani_finali = [argumente_numerice[0]]
-    elif len(argumente_numerice) >= 2:
-        ani_finali = list(range(argumente_numerice[0], argumente_numerice[1] + 1))
-    else:
-        print(f"{ROSU}🛑 Eroare: Lipsesc anii ca parametru!{RESET}")
-        sys.exit(1)
-        
-    drive_service = get_drive_service()
-    extrage_taguri_din_matrice(drive_service, ani_finali)
+    main()
