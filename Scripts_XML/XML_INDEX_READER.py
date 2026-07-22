@@ -14,11 +14,19 @@ if str(RADACINA_PROIECT) not in sys.path:
     sys.path.insert(0, str(RADACINA_PROIECT))
 
 from drive_config import (
-    INDEX_FILE_ID,
     FOLDER_TEMP_INDEXES_ID,
     FOLDERE_XML_IDS,
     get_file_params,
     get_list_params,
+)
+
+# MAPARE DE SIGURANȚĂ PENTRU ID-UL MASTER INDEXULUI XML
+INDEX_FILE_ID = (
+    os.getenv("XML_STORAGE_INDEX")
+    or os.getenv("INDEX_FILE_ID")
+    or getattr(sys.modules.get("drive_config"), "XML_STORAGE_INDEX", None)
+    or getattr(sys.modules.get("drive_config"), "INDEX_FILE_ID", None)
+    or "1OkPgwX_F6FKwupuhD9kO3rynj4zdel0N"
 )
 
 
@@ -59,10 +67,12 @@ def obtine_index_virtual(service):
             index_virtual["last_updated"] = data.get("last_updated", "")
             
             size_mb = round(len(res) / (1024 * 1024), 2)
-            print(f"✅ [Master Index Identificat] Nume: index_xml.json | MB: {size_mb}", flush=True)
+            print(f"✅ [Master Index Identificat] ID: {INDEX_FILE_ID} | MB: {size_mb}", flush=True)
             print(f"✅ [Master Index Loaded] {len(index_virtual['fisiere']):,} fișiere existente în memorie.", flush=True)
         except Exception as e:
             print(f"⚠️ Nu s-a putut încărca Master Index ({e}). Se pornește de la zero.", flush=True)
+    else:
+        print("⚠️ ID-ul pentru Master Index nu este configurat! Se pornește fără istoric.", flush=True)
 
     # --------------------------------------------------------------------------
     # 2. APLICARE MICRO-INDECȘI (temp_index_*.json)
@@ -106,7 +116,7 @@ def obtine_index_virtual(service):
 
         for folder_id in FOLDERE_XML_IDS:
             try:
-                # Query corectat cu T și Z conform standardului Google Drive API ISO 8601
+                # Query ISO 8601 strict pentru Google Drive API
                 query_delta = (
                     f"'{folder_id}' in parents and name contains 'brut_legislatie_' "
                     f"and modifiedTime > '{timestamp_iso}' and trashed = false"
