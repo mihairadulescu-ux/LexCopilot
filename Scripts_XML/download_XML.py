@@ -7,7 +7,7 @@ import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
-# Logare live instantanee (fără buffering pe consola GitHub Actions)
+# Evacuare live din buffer pentru afișare instantanee în GitHub Actions
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
@@ -26,7 +26,11 @@ from drive_config import FOLDERE_XML_IDS, FOLDER_TEMP_INDEXES_ID, get_file_param
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
 
-SOAP_ENDPOINT = os.getenv("SOAP_SEARCH_ENDPOINT", "http://legislatie.just.ro/api/legiservice.asmx")
+# Endpoint-ul HTTPS oficial al FreeWebService Just.ro
+SOAP_ENDPOINT = "https://legislatie.just.ro/apiws/FreeWebService.svc/SOAP"
+
+# Variabilă globală pentru stocarea token-ului activ
+CURRENT_TOKEN = None
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Downloader XML Just.ro")
@@ -37,7 +41,7 @@ def parse_arguments():
 def get_drive_service():
     service_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("GDRIVE_SERVICE_ACCOUNT_JSON")
     if not service_json:
-        print_live("🛑 [EROARE CRITICĂ] Credențialele Google Drive (GOOGLE_SERVICE_ACCOUNT_JSON) lipsesc din mediu!")
+        print_live("🛑 [EROARE CRITICĂ] Credențialele Google Drive lipsesc din mediu!")
         sys.exit(1)
     
     creds_dict = json.loads(service_json)
@@ -80,41 +84,129 @@ def salveaza_micro_index(service, micro_data, interval_str):
         if os.path.exists(cale_local):
             os.remove(cale_local)
 
-def adu_acte_an(an):
-    print_live(f"🔍 [SOAP API] Interogare acte normative pentru anul {an}...")
+def obtine_token_sesiune(force_refresh=False):
+    """Generează un token nou DOAR dacă nu există unul activ sau dacă force_refresh=True (când a expirat)."""
+    global CURRENT_TOKEN
     
-    headers = {'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': 'http://tempuri.org/Search'}
-    body = f"""<?xml version="1.0" encoding="utf-8"?>
-    <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
-      <soap:Body>
-        <Search xmlns="http://tempuri.org/">
-          <an>{an}</an>
-        </Search>
-      </soap:Body>
-    </soap:Envelope>"""
+    if CURRENT_TOKEN and not force_refresh:
+        return CURRENT_TOKEN
+
+    print_live("🔑 [SOAP API] Solicitare token nou de sesiune (GetToken)...")
+    
+    headers = {
+        'Content-Type': 'text/xml; charset=utf-8',
+        'SOAPAction': 'http://tempuri.org/IFreeWebService/GetToken'
+    }
+    
+    body = """<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+      <s:Body>
+        <GetToken xmlns="http://tempuri.org/" />
+      </s:Body>
+    </s:Envelope>"""
     
     try:
         response = requests.post(SOAP_ENDPOINT, data=body, headers=headers, timeout=30)
-        print_live(f"📡 [SOAP API] Răspuns primit (Status: {response.status_code})")
+        if response.status_code == 200:
+            tree = ET.fromstring(response.text)
+            for elem in tree.iter():
+                if elem.tag.endswith('GetTokenResult') or elem.tag.endswith('string'):
+                    if elem.text and len(elem.text.strip()) > 10:
+                        CURRENT_TOKEN = elem.text.strip()
+                        print_live(f"🔑 [SOAP API] Token obținut cu succes: {CURRENT_TOKEN[:12]}...")
+                        return CURRENT_TOKEN
+        print_live(f"⚠️ [SOAP API] Nu s-a putut genera token-ul. Status HTTP: {response.status_code}")
+    except Exception as e:
+        print_live(f"🛑 [SOAP API] Eroare la obținerea token-ului: {e}")
+    
+    return None
+
+def cauta_acte_an_pagina(an, pagina=0, rezultate_pagina=100, reincercare=True):
+    """Execută interogarea folosind token-ul curent. Cere un token nou DOAR dacă serverul indică o expirare/eroare."""
+    token = obtine_token_sesiune()
+    if not token:
+        return []
+
+    headers = {
+        'Content-Type': 'text/xml; charset=utf-8',
+        'SOAPAction': 'http://tempuri.org/IFreeWebService/Search'
+    }
+    
+    body = f"""<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+      <s:Body>
+        <Search xmlns="http://tempuri.org/">
+          <model xmlns:a="http://schemas.datacontract.org/2004/07/EPI.Model.FreeWebService" xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+            <a:NumarPagina>{pagina}</a:NumarPagina>
+            <a:RezultatePagina>{rezultate_pagina}</a:RezultatePagina>
+            <a:SearchAn>{an}</a:SearchAn>
+          </model>
+          <token>{token}</token>
+        </Search>
+      </s:Body>
+    </s:Envelope>"""
+    
+    try:
+        response = requests.post(SOAP_ENDPOINT, data=body, headers=headers, timeout=30)
         
-        if response.status_code != 200:
-            print_live(f"⚠️ [SOAP API] Eroare la interogare HTTP {response.status_code}")
-            return []
-            
+        # Detectăm dacă token-ul a expirat sau este invalid
+        status_invalida = response.status_code != 200 or "InvalidToken" in response.text or "TokenExpired" in response.text or "token" in response.text.lower() and "expir" in response.text.lower()
+        
+        if status_invalida:
+            if reincercare:
+                print_live(f"🔄 [TOKEN EXPIRAT DETECTAT] Token-ul a expirat. Solicitare token nou și reincercare pagina {pagina}...")
+                obtine_token_sesiune(force_refresh=True)
+                return cauta_acte_an_pagina(an, pagina, rezultate_pagina, reincercare=False)
+            else:
+                print_live(f"⚠️ [SOAP API] Pagina {pagina} a eșuat după reîncercare (Status HTTP {response.status_code}).")
+                return []
+
         tree = ET.fromstring(response.text)
         acte = []
+        
         for elem in tree.iter():
-            if elem.tag.endswith('ActId') or elem.tag.endswith('id'):
-                if elem.text:
+            if elem.tag.endswith('Id') or elem.tag.endswith('IdAct') or elem.tag.endswith('ActId'):
+                if elem.text and elem.text.strip().isdigit():
                     acte.append(elem.text.strip())
         
-        # Deduplicare
-        acte_unice = list(set(acte))
-        print_live(f"📊 [SOAP API] S-au identificat {len(acte_unice)} acte unice pentru anul {an}.")
-        return acte_unice
+        return list(set(acte))
+        
     except Exception as e:
-        print_live(f"🛑 [SOAP API] Excepție întâmpinată la interogare: {e}")
-        return []
+        print_live(f"🛑 [SOAP API] Excepție întâmpinată pe pagina {pagina}: {e}")
+        if reincercare:
+            print_live("🔄 Reîncercare generare token după excepție rețea/SOAP...")
+            obtine_token_sesiune(force_refresh=True)
+            return cauta_acte_an_pagina(an, pagina, rezultate_pagina, reincercare=False)
+    
+    return []
+
+def adu_toate_actele_an(an):
+    print_live(f"🔍 [SOAP API] Începe descărcarea paginată a actelor din anul {an}...")
+    
+    toate_actele = set()
+    pagina = 0
+    rezultate_pe_pagina = 100
+    
+    while True:
+        acte_pagina = cauta_acte_an_pagina(an, pagina=pagina, rezultate_pagina=rezultate_pe_pagina)
+        if not acte_pagina:
+            break
+            
+        dimensiune_inainte = len(toate_actele)
+        toate_actele.update(acte_pagina)
+        
+        print_live(f" 📄 [An {an}] Pagina {pagina}: +{len(acte_pagina)} acte găsite (Total cumulat: {len(toate_actele)})")
+        
+        if len(acte_pagina) < rezultate_pe_pagina:
+            break
+            
+        if len(toate_actele) == dimensiune_inainte:
+            break
+            
+        pagina += 1
+        time.sleep(0.2)
+        
+    act_list = list(toate_actele)
+    print_live(f"📊 [SOAP API] Total final: {len(act_list)} acte unice identificate pentru anul {an}.")
+    return act_list
 
 def main():
     interval_raw = parse_arguments()
@@ -136,7 +228,7 @@ def main():
 
     for an in ani:
         print_live(f"\n--- ÎNCEPUT PROCESARE ANUL {an} ---")
-        acte = adu_acte_an(an)
+        acte = adu_toate_actele_an(an)
         total_acte = len(acte)
         
         if not acte:
@@ -146,7 +238,6 @@ def main():
         for idx, act_id in enumerate(acte, start=1):
             nume_fisier = f"brut_XML_{act_id}.xml"
             
-            # Simulăm salvarea/verificarea cu jurnalizare pas-cu-pas live
             micro_index[nume_fisier] = {
                 "drive_id": drive_tinta,
                 "tip_stocare": "individual",
@@ -155,12 +246,11 @@ def main():
             
             total_descarcate += 1
             
-            # Afișăm în consolă live la fiecare 100 de acte sau la finalul anului
             if idx % 100 == 0 or idx == total_acte:
                 print_live(f" 📥 Progres [An {an}]: {idx}/{total_acte} acte procesate | Total general sesiune: {total_descarcate}")
 
-    print_live(f"\n✅ [DOWNLOADER] Descărcare finalizată! Total acte procesate: {total_descarcate}")
-    salveaza_micro_index(service, micro_index, interval_raw)
+    print_live(f"\n✅ [DOWNLOADER] Procesare completă! Total general acte înregistrate: {total_descarcate}")
+    salveaza_micro_index(service, micro_data, interval_raw)
 
 if __name__ == "__main__":
     main()
