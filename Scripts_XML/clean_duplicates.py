@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 print("============================================================", flush=True)
-print("🧹 SCRIPT DEDICAT PENTRU IGIENIZARE INTENSIVĂ DUPLICATE", flush=True)
+print("🧹 SCRIPT ULTRA-RAPID IGIENIZARE DUPLICATE (BATCH API)", flush=True)
 print("============================================================", flush=True)
 
 socket.setdefaulttimeout(30)
@@ -29,8 +29,9 @@ from drive_config import (
     get_list_params,
 )
 
-BATCH_SIZE = 500      # Câte fișiere trimite la coș per rundă
-PAUZA_SEGUNDE = 15    # Pauză între batch-uri
+BATCH_SIZE = 1000      # Procesăm 1000 de fișiere per runda majoră
+HTTP_BATCH_LIMIT = 80  # Trimitere pachete HTTP batch de câte 80 cereri
+PAUZA_SEGUNDE = 3      # Pauză scurtă între pachete
 
 
 def get_drive_service():
@@ -100,7 +101,7 @@ def scaneaza_si_gaseste_duplicate(service):
                     "_nume_fisier": nume
                 })
 
-                if total_fisiere_scanate % 10000 == 0:
+                if total_fisiere_scanate % 20000 == 0:
                     durata = round(time.time() - timp_start_scan, 1)
                     print(f"   ⏳ [SCAN LIVE] Parcurse {total_fisiere_scanate:,} fișiere fizice ({durata}s)...", flush=True)
 
@@ -167,8 +168,8 @@ def main():
         print("\n✨ FELICITĂRI! Nu a fost găsit niciun duplicat pe Drive! Totul este curat.", flush=True)
         return
 
-    print(f"\n📊 AU FOST IDENTIFICATE {total_initial:,} FIȘIERE DUPLICATE / INVALIDE DE ȘTERS!", flush=True)
-    print(f"⚡ Începem ștergerea în loturi de {BATCH_SIZE} cu pauze de {PAUZA_SEGUNDE}s...\n", flush=True)
+    print(f"\n📊 AU FOST IDENTIFICATE {total_initial:,} FIȘIERE DUPLICATE DE ȘTERS!", flush=True)
+    print("⚡ Începem ștergerea prin HTTP Batching (Pachete paralele)...\n", flush=True)
 
     sters_totale = 0
     timp_start_stergere = time.time()
@@ -177,20 +178,31 @@ def main():
         lot_curent = ids_de_sters[:BATCH_SIZE]
         ids_de_sters = ids_de_sters[BATCH_SIZE:]
 
-        succes_lot = 0
+        # Împărțim lotul de 1000 în sub-pachete HTTP Batch de câte 80 cereri
+        for i in range(0, len(lot_curent), HTTP_BATCH_LIMIT):
+            sub_pachet = lot_curent[i:i + HTTP_BATCH_LIMIT]
+            
+            def batch_callback(request_id, response, exception):
+                nonlocal sters_totale
+                if exception is None:
+                    sters_totale += 1
 
-        for file_id in lot_curent:
-            for incercare in range(3):
-                try:
-                    params = get_file_params(fileId=file_id)
-                    params["body"] = {"trashed": True}
-                    service.files().update(**params).execute()
-                    succes_lot += 1
-                    break
-                except Exception:
-                    time.sleep(0.5)
+            batch = service.new_batch_http_request(callback=batch_callback)
+            
+            for file_id in sub_pachet:
+                params = get_file_params(fileId=file_id)
+                params["body"] = {"trashed": True}
+                batch.add(service.files().update(**params))
 
-        sters_totale += succes_lot
+            try:
+                batch.execute()
+            except Exception as e:
+                print(f"⚠️ Eroare la executare batch HTTP: {e}", flush=True)
+                time.sleep(2)
+                service = get_drive_service()
+
+            time.sleep(0.2)
+
         durata_cumulata = time.time() - timp_start_stergere
         viteză_medie = sters_totale / durata_cumulata if durata_cumulata > 0 else 0
         
@@ -199,8 +211,8 @@ def main():
 
         bara = genereaza_bara_progres(sters_totale, total_initial)
         
-        print(f"🚀 LOT FINALIZAT: +{succes_lot} fișiere trimise la coș", flush=True)
-        print(f"   ├─ Progres: {bara} ({sters_totale:,}/{total_initial:,})", flush=True)
+        print(f"🚀 BATCH EXECUTAT: Total curățate: {sters_totale:,}/{total_initial:,}", flush=True)
+        print(f"   ├─ Progres: {bara}", flush=True)
         print(f"   ├─ Viteză: {viteză_medie:.1f} fișiere/secundă", flush=True)
         print(f"   └─ ETA: {formateaza_timp(eta_secunde)}", flush=True)
         print("------------------------------------------------------------", flush=True)
