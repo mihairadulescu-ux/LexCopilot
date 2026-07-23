@@ -99,7 +99,6 @@ def scaneaza_si_gaseste_duplicate(service):
             if not page_token:
                 break
 
-    # Grupare semantică și identificare deșeuri
     grupuri_semantice = {}
     ids_de_sters = []
 
@@ -116,11 +115,9 @@ def scaneaza_si_gaseste_duplicate(service):
         variante_valide = [v for v in lista_variante if v["size"] >= 10]
         variante_mici = [v for v in lista_variante if v["size"] < 10]
 
-        # Fișierele sub 10 bytes se șterg toate
         for v_mica in variante_mici:
             ids_de_sters.append(v_mica["id"])
 
-        # Păstrăm cea mai nouă variantă brut_XML_ (sau brut_legislatie_) și marcăm restul pentru ștergere
         if len(variante_valide) > 1:
             variante_valide.sort(
                 key=lambda x: (1 if x["_nume_fisier"].startswith("brut_XML_") else 0, x["createdTime"]),
@@ -132,10 +129,26 @@ def scaneaza_si_gaseste_duplicate(service):
     return ids_de_sters
 
 
+def genereaza_bara_progres(curent, total, lungime=30):
+    procent = (curent / total) * 100 if total > 0 else 100
+    plini = int(lungime * curent // total) if total > 0 else lungime
+    bara = "█" * plini + "░" * (lungime - plini)
+    return f"[{bara}] {procent:.1f}%"
+
+
+def formateaza_timp(secunde):
+    m, s = divmod(int(secunde), 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h}h {m}m {s}s"
+    elif m > 0:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
 def main():
     service = get_drive_service()
     
-    # 1. Scanăm o singură dată la început
     ids_de_sters = scaneaza_si_gaseste_duplicate(service)
     total_initial = len(ids_de_sters)
 
@@ -144,17 +157,18 @@ def main():
         return
 
     print(f"\n📊 AU FOST IDENTIFICATE {total_initial:,} FIȘIERE DUPLICATE / INVALIDE DE ȘTERS!", flush=True)
-    print(f"⚡ Începem ștergerea în loturi de {BATCH_SIZE} cu pauze de {PAUZA_SEGUNDE}s...", flush=True)
+    print(f"⚡ Începem ștergerea în loturi de {BATCH_SIZE} cu pauze de {PAUZA_SEGUNDE}s...\n", flush=True)
 
     sters_totale = 0
+    timp_start_stergere = time.time()
 
     while ids_de_sters:
         lot_curent = ids_de_sters[:BATCH_SIZE]
         ids_de_sters = ids_de_sters[BATCH_SIZE:]
 
-        print(f"\n🚀 Trimitere la coș LOT ({sters_totale + 1} - {sters_totale + len(lot_curent)} din {total_initial})...", flush=True)
-        
         succes_lot = 0
+        timp_start_batch = time.time()
+
         for file_id in lot_curent:
             for incercare in range(3):
                 try:
@@ -167,14 +181,21 @@ def main():
                     time.sleep(1)
 
         sters_totale += succes_lot
-        print(f"✅ Executat lot: {succes_lot}/{len(lot_curent)} fișiere mutate la coș. Total șters până acum: {sters_totale:,}/{total_initial:,}", flush=True)
+        durata_cumulata = time.time() - timp_start_stergere
+        viteză_medie = sters_totale / durata_cumulata if durata_cumulata > 0 else 0
+        
+        fisiere_ramase = total_initial - sters_totale
+        eta_secunde = (fisiere_ramase / viteză_medie) if viteză_medie > 0 else 0
+
+        bara = genereaza_bara_progres(sters_totale, total_initial)
+        print(f"🚀 PROGRES: {bara} | Șterse: {sters_totale:,}/{total_initial:,} | Viteză: {viteză_medie:.1f} fișiere/s | ETA: {formateaza_timp(eta_secunde)}", flush=True)
 
         if ids_de_sters:
-            print(f"⏳ Pauză de siguranță {PAUZA_SEGUNDE} secunde înainte de următorul lot...", flush=True)
+            print(f"⏳ Pauză de siguranță {PAUZA_SEGUNDE}s...", flush=True)
             time.sleep(PAUZA_SEGUNDE)
 
     print("\n============================================================", flush=True)
-    print(f"🎉 CURĂȚENIE INTENSIVĂ COMPLETĂ! Total fișiere șterse: {sters_totale:,}", flush=True)
+    print(f"🎉 CURĂȚENIE INTENSIVĂ COMPLETĂ! Total fișiere șterse: {sters_totale:,} în {formateaza_timp(time.time() - timp_start_stergere)}", flush=True)
     print("============================================================", flush=True)
 
 
