@@ -20,11 +20,6 @@ jobs:
       matrix:
         an_grup: ["1990-1999", "2000-2009", "2010-2015", "2016-2020", "2021-2026"]
 
-    # CONDIȚIE DE DEDUPLICARE:
-    # Dacă utilizatorul introduce un an specific, se execută DOAR primul grup din matrice ("1990-1999") pentru acel an specific.
-    # Dacă parametrul este GOL, se execută toate cele 5 grupuri din matrice în paralel.
-    if: ${{ github.event.inputs.an_specific == '' || matrix.an_grup == '1990-1999' }}
-
     steps:
       - name: Checkout Cod
         uses: actions/checkout@v4
@@ -48,6 +43,12 @@ jobs:
           AN_GRUP_MATRIX: ${{ matrix.an_grup }}
           PYTHONUNBUFFERED: "1"
         run: |
+          # Dacă s-a introdus un an specific, executăm DOAR pe primul slot din matrice ("1990-1999") pentru a nu rula de 5 ori
+          if [ -n "$AN_SPECIFIC_INPUT" ] && [ "$AN_GRUP_MATRIX" != "1990-1999" ]; then
+            echo "⏭️ [SKIP] An specific detectat ($AN_SPECIFIC_INPUT). Acest slot din matrice ($AN_GRUP_MATRIX) este omis."
+            exit 0
+          fi
+
           IF_AN="${AN_SPECIFIC_INPUT:-$AN_GRUP_MATRIX}"
           echo "⏬ [Strategie YML] Pornire descărcare fișiere XML pentru intervalul/anul: $IF_AN"
           python -u Scripts_XML/download_XML.py --interval "$IF_AN"
