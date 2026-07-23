@@ -2,21 +2,33 @@ import os
 import sys
 import json
 import gzip
-from googleapiclient.discovery import build
-from google.oauth2.service_account import Credentials
-from drive_config import FOLDERE_XML_IDS
+
+# -------------------------------------------------------------------
+# FIX IMPORT: Adăugăm directorul scriptului în sys.path pentru ca
+# Python să poată importa 'drive_config' indiferent de working directory.
+# -------------------------------------------------------------------
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 
 # Standard logare live instantanee
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
+from googleapiclient.discovery import build
+from google.oauth2.service_account import Credentials
+from drive_config import FOLDERE_XML_IDS
+
 NOME_INDEX_MASTER = "index_xml.json.gz"
 
 
 def get_drive_service():
+    """
+    Autentificare în Google Drive API folosind Service Account din mediu.
+    """
     service_json = os.getenv("GDRIVE_SERVICE_ACCOUNT_JSON")
     if not service_json:
-        print("🛑 [EROARE CRITICĂ] Credențialele Google Drive lipsesc din mediu!", flush=True)
+        print("🛑 [EROARE CRITICĂ] Credențialele Google Drive (GDRIVE_SERVICE_ACCOUNT_JSON) lipsesc din mediu!", flush=True)
         sys.exit(1)
     creds_dict = json.loads(service_json)
     creds = Credentials.from_service_account_info(creds_dict, scopes=["https://www.googleapis.com/auth/drive"])
@@ -47,7 +59,8 @@ def salveaza_index_master_gz(date_index, cale_salvare=NOME_INDEX_MASTER):
     try:
         with gzip.open(cale_salvare, "wb") as f:
             f.write(json.dumps(date_index, ensure_ascii=False, indent=2).encode('utf-8'))
-        print(f"💾 [BUILDER] Master Index salvat comprimat ({os.path.getsize(cale_salvare) / (1024*1024):.2f} MB).", flush=True)
+        dimensiune_mb = os.path.getsize(cale_salvare) / (1024 * 1024)
+        print(f"💾 [BUILDER] Master Index salvat comprimat ({dimensiune_mb:.2f} MB).", flush=True)
         return True
     except Exception as e:
         print(f"🛑 [BUILDER] Eroare la salvarea Master Index: {e}", flush=True)
@@ -56,7 +69,7 @@ def salveaza_index_master_gz(date_index, cale_salvare=NOME_INDEX_MASTER):
 
 def proceseaza_si_curata_microindecsi(service, master_index, batch_size=50):
     """
-    Procesează și ȘTERGE FIZIC micro-indecșii în batch-uri controlate.
+    Procesează TOȚI micro-indecșii în batch-uri controlate și îi ȘTERGE FIZIC de pe Drive.
     """
     print("\n⚡ [MICRO-INDEX] Căutare micro-indecși neprocesați...", flush=True)
     micro_files = []
@@ -156,7 +169,7 @@ def build_index(mode="INCREMENTAL"):
     service = get_drive_service()
 
     print(f"\n==========================================", flush=True)
-    print(f"🚀 [INDEX BUILDER] Pornire în Modul: {mode}", flush=True)
+    print(f"🚀 [INDEX BUILDER] Pornire în Modul: {mode.upper()}", flush=True)
     print(f"==========================================\n", flush=True)
 
     if mode.upper() == "FULL":
@@ -164,7 +177,7 @@ def build_index(mode="INCREMENTAL"):
         fisiere_vazute = {}
         duplicate_sterse = 0
 
-        # 1. Rescanare fizică completă & eliminare DUPLICATE
+        # 1. Rescanare fizică completă pe toate Shared Drive-urile & eliminare DUPLICATE
         for index_drive, drive_id in enumerate(FOLDERE_XML_IDS, start=1):
             print(f"📂 [SCAN FULL] Shared Drive {index_drive}/{len(FOLDERE_XML_IDS)} (ID: {drive_id})...", flush=True)
             page_token = None
@@ -209,7 +222,7 @@ def build_index(mode="INCREMENTAL"):
         # 2. Procesare & Ștergere Micro-Indecși
         master_index = proceseaza_si_curata_microindecsi(service, master_index)
 
-        # 3. Golire Coș de Gunoi (Trash)
+        # 3. Golire Coș de Gunoi (Empty Trash)
         print("\n🧹 [TRASH] Golire Coșuri de Gunoi...", flush=True)
         try:
             service.files().emptyTrash().execute()
@@ -219,18 +232,13 @@ def build_index(mode="INCREMENTAL"):
 
     else:
         # MOD INCREMENTAL
-        # 1. Încarcă Master Index existent
         master_index = incarc_index_master_gz()
-
-        # 2. Aplică și șterge micro-indecșii noilor descărcări
         master_index = proceseaza_si_curata_microindecsi(service, master_index)
-
-        # 3. Descoperă fișiere noi adăugate direct pe discuri (Delta Integration)
         master_index = scanare_delta_discuri(service, master_index)
 
     # Salvare starea finală comprimată GZIP
     salveaza_index_master_gz(master_index)
-    print(f"\n🏁 [INDEX BUILDER] Procesul {mode} s-a încheiat cu succes!", flush=True)
+    print(f"\n🏁 [INDEX BUILDER] Procesul {mode.upper()} s-a încheiat cu succes!", flush=True)
     return master_index
 
 
