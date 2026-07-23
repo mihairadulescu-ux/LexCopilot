@@ -1,256 +1,325 @@
 import os
 import sys
-import argparse
-import json
 import time
-import requests
-import xml.etree.ElementTree as ET
-from datetime import datetime
+import json
+import re
+from pathlib import Path
 
-# Evacuare live din buffer pentru afișare instantanee în GitHub Actions
-sys.stdout.reconfigure(line_buffering=True)
-sys.stderr.reconfigure(line_buffering=True)
+# ==============================================================================
+# CONFIGURARE CĂI DE IMPORT
+# ==============================================================================
+DIRECTOR_CURENT = Path(__file__).resolve().parent
+RADACINA_PROIECT = DIRECTOR_CURENT.parent
 
-def print_live(msg):
-    """Afișează mesajul și forțează evacuarea instantanee din buffer."""
-    print(msg, flush=True)
-    sys.stdout.flush()
+if str(RADACINA_PROIECT) not in sys.path:
+    sys.path.insert(0, str(RADACINA_PROIECT))
+if str(DIRECTOR_CURENT) not in sys.path:
+    sys.path.insert(0, str(DIRECTOR_CURENT))
 
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = os.path.dirname(CURRENT_DIR)
-
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
-
-from drive_config import FOLDERE_XML_IDS, FOLDER_TEMP_INDEXES_ID, get_file_params, get_list_params
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from google.oauth2.service_account import Credentials
+from googleapiclient.http import MediaFileUpload
 
-# Endpoint-ul HTTPS oficial al FreeWebService Just.ro
-SOAP_ENDPOINT = "https://legislatie.just.ro/apiws/FreeWebService.svc/SOAP"
+from drive_config import (
+    FOLDERE_XML_IDS,
+    FOLDER_TEMP_INDEXES_ID,
+    get_file_params,
+    get_list_params,
+)
 
-# Variabilă globală pentru stocarea token-ului activ
-CURRENT_TOKEN = None
+# Import/Instalare automată suds pentru comunicare SOAP WSDL
+try:
+    from suds.client import Client
+except ImportError:
+    import subprocess
+    subprocess.run([sys.executable, "-m", "pip", "install", "suds-py3"], check=True)
+    from suds.client import Client
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="Downloader XML Just.ro")
-    parser.add_argument("interval", nargs="?", default="2024", help="Anul sau intervalul de ani (ex: 2024 sau 1990-1999)")
-    args, unknown = parser.parse_known_args()
-    return args.interval
+try:
+    import XML_INDEX_READER
+except ImportError:
+    from Scripts_XML import XML_INDEX_READER
 
+
+# ==============================================================================
+# CONFIGURARE CONSTANTE & ENDPOINT WSDL
+# ==============================================================================
+URL_WSDL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
+REZULTATE_PER_PAGINA = 10
+
+# PRELUARE ANI DIN ARGUMENTELE LINIEI DE COMANDĂ (PENTRU GITHUB ACTIONS MATRIX)
+if len(sys.argv) >= 3:
+    AN_START = int(sys.argv[1])
+    AN_END = int(sys.argv[2])
+elif len(sys.argv) == 2 and "-" in sys.argv[1]:
+    pasi = sys.argv[1].split("-")
+    AN_START = int(pasi[0])
+    AN_END = int(pasi[1])
+elif len(sys.argv) == 2 and sys.argv[1].isdigit():
+    AN_START = int(sys.argv[1])
+    AN_END = int(sys.argv[1])
+else:
+    AN_START = 1990
+    AN_END = 2026
+
+
+# ==============================================================================
+# AUTENTIFICARE GOOGLE DRIVE API
+# ==============================================================================
 def get_drive_service():
-    service_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("GDRIVE_SERVICE_ACCOUNT_JSON")
-    if not service_json:
-        print_live("🛑 [EROARE CRITICĂ] Credențialele Google Drive lipsesc din mediu!")
-        sys.exit(1)
-    
-    creds_dict = json.loads(service_json)
-    creds = Credentials.from_service_account_info(creds_dict, scopes=["https://www.googleapis.com/auth/drive"])
-    return build("drive", "v3", credentials=creds)
+    """Autentificare în Google Drive API."""
+    creds_json = (
+        os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+        or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
+        or os.getenv("SERVICE_ACCOUNT_JSON")
+    )
 
-def salveaza_micro_index(service, micro_data, interval_str):
-    if not micro_data:
-        print_live("ℹ️ [MICRO-INDEX] Nu există date noi de salvat în micro-index.")
-        return
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    nume_micro = f"micro_index_{interval_str}_{timestamp}.json"
-    cale_local = os.path.join(ROOT_DIR, nume_micro)
-    
-    with open(cale_local, "w", encoding="utf-8") as f:
-        json.dump(micro_data, f, ensure_ascii=False, indent=2)
-    
-    print_live(f"💾 [MICRO-INDEX] Se încarcă {nume_micro} pe Google Drive...")
-    
-    from googleapiclient.http import MediaFileUpload
-    media = MediaFileUpload(cale_local, mimetype="application/json")
-    
-    file_metadata = {
-        'name': nume_micro,
-        'parents': [FOLDER_TEMP_INDEXES_ID]
-    }
-    
-    try:
-        service.files().create(
-            body=file_metadata,
-            media_body=media,
-            supportsAllDrives=True,
-            fields='id'
-        ).execute()
-        print_live(f"✅ [MICRO-INDEX] Salvat cu succes în Drive (ID Folder: {FOLDER_TEMP_INDEXES_ID[:8]}...)")
-    except Exception as e:
-        print_live(f"⚠️ [MICRO-INDEX] Eroare la salvarea în Drive: {e}")
-    finally:
-        if os.path.exists(cale_local):
-            os.remove(cale_local)
+    if creds_json:
+        try:
+            info = json.loads(creds_json)
+            creds = service_account.Credentials.from_service_account_info(
+                info, scopes=["https://www.googleapis.com/auth/drive"]
+            )
+            return build("drive", "v3", credentials=creds)
+        except Exception as e:
+            print(f"❌ Eroare la citirea secretului JSON: {e}", flush=True)
+            sys.exit(1)
 
-def obtine_token_sesiune(force_refresh=False):
-    """Generează un token nou DOAR dacă nu există unul activ sau dacă force_refresh=True (când a expirat)."""
-    global CURRENT_TOKEN
-    
-    if CURRENT_TOKEN and not force_refresh:
-        return CURRENT_TOKEN
+    cale_local = RADACINA_PROIECT / "service_account.json"
+    if cale_local.exists():
+        try:
+            creds = service_account.Credentials.from_service_account_file(
+                str(cale_local), scopes=["https://www.googleapis.com/auth/drive"]
+            )
+            return build("drive", "v3", credentials=creds)
+        except Exception as e:
+            print(f"❌ Eroare la citirea fișierului local service_account.json: {e}", flush=True)
 
-    print_live("🔑 [SOAP API] Solicitare token nou de sesiune (GetToken)...")
-    
-    headers = {
-        'Content-Type': 'text/xml; charset=utf-8',
-        'SOAPAction': 'http://tempuri.org/IFreeWebService/GetToken'
-    }
-    
-    body = """<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
-      <s:Body>
-        <GetToken xmlns="http://tempuri.org/" />
-      </s:Body>
-    </s:Envelope>"""
-    
-    try:
-        response = requests.post(SOAP_ENDPOINT, data=body, headers=headers, timeout=30)
-        if response.status_code == 200:
-            tree = ET.fromstring(response.text)
-            for elem in tree.iter():
-                if elem.tag.endswith('GetTokenResult') or elem.tag.endswith('string'):
-                    if elem.text and len(elem.text.strip()) > 10:
-                        CURRENT_TOKEN = elem.text.strip()
-                        print_live(f"🔑 [SOAP API] Token obținut cu succes: {CURRENT_TOKEN[:12]}...")
-                        return CURRENT_TOKEN
-        print_live(f"⚠️ [SOAP API] Nu s-a putut genera token-ul. Status HTTP: {response.status_code}")
-    except Exception as e:
-        print_live(f"🛑 [SOAP API] Eroare la obținerea token-ului: {e}")
-    
-    return None
+    print("❌ Nu s-a găsit secretul GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
+    sys.exit(1)
 
-def cauta_acte_an_pagina(an, pagina=0, rezultate_pagina=100, reincercare=True):
-    """Execută interogarea folosind token-ul curent. Cere un token nou DOAR dacă serverul indică o expirare/eroare."""
-    token = obtine_token_sesiune()
-    if not token:
-        return []
 
-    headers = {
-        'Content-Type': 'text/xml; charset=utf-8',
-        'SOAPAction': 'http://tempuri.org/IFreeWebService/Search'
-    }
-    
-    body = f"""<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
-      <s:Body>
-        <Search xmlns="http://tempuri.org/">
-          <model xmlns:a="http://schemas.datacontract.org/2004/07/EPI.Model.FreeWebService" xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
-            <a:NumarPagina>{pagina}</a:NumarPagina>
-            <a:RezultatePagina>{rezultate_pagina}</a:RezultatePagina>
-            <a:SearchAn>{an}</a:SearchAn>
-          </model>
-          <token>{token}</token>
-        </Search>
-      </s:Body>
-    </s:Envelope>"""
-    
-    try:
-        response = requests.post(SOAP_ENDPOINT, data=body, headers=headers, timeout=30)
-        
-        # Detectăm dacă token-ul a expirat sau este invalid
-        status_invalida = response.status_code != 200 or "InvalidToken" in response.text or "TokenExpired" in response.text or "token" in response.text.lower() and "expir" in response.text.lower()
-        
-        if status_invalida:
-            if reincercare:
-                print_live(f"🔄 [TOKEN EXPIRAT DETECTAT] Token-ul a expirat. Solicitare token nou și reincercare pagina {pagina}...")
-                obtine_token_sesiune(force_refresh=True)
-                return cauta_acte_an_pagina(an, pagina, rezultate_pagina, reincercare=False)
-            else:
-                print_live(f"⚠️ [SOAP API] Pagina {pagina} a eșuat după reîncercare (Status HTTP {response.status_code}).")
-                return []
+# ==============================================================================
+# CLASĂ CLIENT JUST.RO SOAP (CU SUDS)
+# ==============================================================================
+class JustRoSoapClient:
+    def __init__(self, wsdl_url):
+        self.wsdl_url = wsdl_url
+        print(f"🌐 Inițializare client SOAP WSDL: {self.wsdl_url}...", flush=True)
+        self.client = Client(self.wsdl_url)
+        self.token = None
+        self.renoieste_token()
 
-        tree = ET.fromstring(response.text)
-        acte = []
-        
-        for elem in tree.iter():
-            if elem.tag.endswith('Id') or elem.tag.endswith('IdAct') or elem.tag.endswith('ActId'):
-                if elem.text and elem.text.strip().isdigit():
-                    acte.append(elem.text.strip())
-        
-        return list(set(acte))
-        
-    except Exception as e:
-        print_live(f"🛑 [SOAP API] Excepție întâmpinată pe pagina {pagina}: {e}")
-        if reincercare:
-            print_live("🔄 Reîncercare generare token după excepție rețea/SOAP...")
-            obtine_token_sesiune(force_refresh=True)
-            return cauta_acte_an_pagina(an, pagina, rezultate_pagina, reincercare=False)
-    
-    return []
+    def renoieste_token(self):
+        """Preluare sau reîmprospătare token de sesiune."""
+        print("🔑 Solicitare Token nou de la Just.ro...", flush=True)
+        for incercare in range(3):
+            try:
+                self.token = self.client.service.GetToken()
+                if self.token:
+                    print(f"✅ Token obținut cu succes!", flush=True)
+                    return True
+            except Exception as e:
+                print(f"⚠️ Eroare la obținerea token-ului (încercarea {incercare+1}/3): {e}", flush=True)
+                time.sleep(2)
+        print("❌ Nu s-a putut obține token-ul după 3 încercări!", flush=True)
+        return False
 
-def adu_toate_actele_an(an):
-    print_live(f"🔍 [SOAP API] Începe descărcarea paginată a actelor din anul {an}...")
-    
-    toate_actele = set()
-    pagina = 0
-    rezultate_pe_pagina = 100
-    
-    while True:
-        acte_pagina = cauta_acte_an_pagina(an, pagina=pagina, rezultate_pagina=rezultate_pe_pagina)
-        if not acte_pagina:
-            break
-            
-        dimensiune_inainte = len(toate_actele)
-        toate_actele.update(acte_pagina)
-        
-        print_live(f" 📄 [An {an}] Pagina {pagina}: +{len(acte_pagina)} acte găsite (Total cumulat: {len(toate_actele)})")
-        
-        if len(acte_pagina) < rezultate_pe_pagina:
-            break
-            
-        if len(toate_actele) == dimensiune_inainte:
-            break
-            
-        pagina += 1
-        time.sleep(0.2)
-        
-    act_list = list(toate_actele)
-    print_live(f"📊 [SOAP API] Total final: {len(act_list)} acte unice identificate pentru anul {an}.")
-    return act_list
+    def descarca_pagina(self, an, pagina):
+        """Interogare pagină folosind SearchModel."""
+        for incercare in range(3):
+            try:
+                search_model = self.client.factory.create('SearchModel')
+                search_model.NumarPagina = pagina
+                search_model.RezultatePagina = REZULTATE_PER_PAGINA
+                search_model.SearchAn = an
 
-def main():
-    interval_raw = parse_arguments()
-    print_live(f"🚀 [DOWNLOADER] Start procesare pentru parametru/interval: {interval_raw}")
-    
-    if "-" in str(interval_raw):
-        pasi = interval_raw.split("-")
-        ani = list(range(int(pasi[0]), int(pasi[1]) + 1))
+                raspuns = self.client.service.Search(search_model, self.token)
+                return str(raspuns)
+            except Exception as e:
+                if any(k in str(e).lower() for k in ["token", "expired", "unauthorized"]):
+                    print("🔄 Token expirat. Se solicită un token nou...", flush=True)
+                    self.renoieste_token()
+                else:
+                    print(f"⚠️ Eroare la descărcarea paginii An={an}, Pagina={pagina}: {e}", flush=True)
+                time.sleep(2)
+        return None
+
+
+# ==============================================================================
+# SELECTARE FOLDER DESTINAȚIE PE ANI (SHARED DRIVES)
+# ==============================================================================
+def obtine_folder_id_pentru_an(an):
+    """Returnează ID-ul de folder adecvat în funcție de an."""
+    if an < 2000:
+        return FOLDERE_XML_IDS[0]
+    elif an < 2010:
+        return FOLDERE_XML_IDS[1] if len(FOLDERE_XML_IDS) > 1 else FOLDERE_XML_IDS[0]
+    elif an < 2020:
+        return FOLDERE_XML_IDS[2] if len(FOLDERE_XML_IDS) > 2 else FOLDERE_XML_IDS[0]
     else:
-        ani = [int(interval_raw)]
+        return FOLDERE_XML_IDS[3] if len(FOLDERE_XML_IDS) > 3 else FOLDERE_XML_IDS[0]
 
-    print_live(f"📅 [DOWNLOADER] Anii de procesat: {ani}")
-    
-    service = get_drive_service()
-    micro_index = {}
-    
-    total_descarcate = 0
-    drive_tinta = FOLDERE_XML_IDS[0]
 
-    for an in ani:
-        print_live(f"\n--- ÎNCEPUT PROCESARE ANUL {an} ---")
-        acte = adu_toate_actele_an(an)
-        total_acte = len(acte)
-        
-        if not acte:
-            print_live(f"ℹ️ [ANUL {an}] Nu s-au găsit acte de descărcat.")
-            continue
-            
-        for idx, act_id in enumerate(acte, start=1):
-            nume_fisier = f"brut_XML_{act_id}.xml"
-            
-            micro_index[nume_fisier] = {
-                "drive_id": drive_tinta,
-                "tip_stocare": "individual",
-                "arhiva": None
-            }
-            
-            total_descarcate += 1
-            
-            if idx % 100 == 0 or idx == total_acte:
-                print_live(f" 📥 Progres [An {an}]: {idx}/{total_acte} acte procesate | Total general sesiune: {total_descarcate}")
+# ==============================================================================
+# SALVARE ÎN GOOGLE DRIVE & MICRO-INDEX
+# ==============================================================================
+def salveaza_xml_in_drive(service, continut_xml, nume_fisier, folder_id):
+    cale_temp = Path(nume_fisier)
+    try:
+        with open(cale_temp, "w", encoding="utf-8") as f:
+            f.write(continut_xml)
 
-    print_live(f"\n✅ [DOWNLOADER] Procesare completă! Total general acte înregistrate: {total_descarcate}")
-    salveaza_micro_index(service, micro_data, interval_raw)
+        media = MediaFileUpload(str(cale_temp), mimetype="text/xml")
+        file_metadata = {
+            "name": nume_fisier,
+            "parents": [folder_id]
+        }
+
+        params = get_file_params()
+        params["body"] = file_metadata
+        params["media_body"] = media
+
+        res = service.files().create(**params).execute()
+        file_id = res.get("id")
+
+        if cale_temp.exists():
+            cale_temp.unlink()
+
+        return file_id
+    except Exception as e:
+        print(f"❌ Eroare la salvarea în Drive a fișierului {nume_fisier}: {e}", flush=True)
+        if cale_temp.exists():
+            cale_temp.unlink()
+        return None
+
+
+def salveaza_micro_index(service, flag_updates):
+    timestamp = int(time.time() * 1000)
+    nume_temp = f"temp_index_{timestamp}.json"
+    data = {"flag_updates": flag_updates}
+
+    cale_temp = Path(nume_temp)
+    try:
+        with open(cale_temp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        media = MediaFileUpload(str(cale_temp), mimetype="application/json")
+        file_metadata = {
+            "name": nume_temp,
+            "parents": [FOLDER_TEMP_INDEXES_ID]
+        }
+
+        params = get_file_params()
+        params["body"] = file_metadata
+        params["media_body"] = media
+
+        service.files().create(**params).execute()
+        print(f"🧩 Micro-index salvat în Drive: {nume_temp} ({len(flag_updates)} fișiere adăugate)", flush=True)
+
+        if cale_temp.exists():
+            cale_temp.unlink()
+    except Exception as e:
+        print(f"⚠️ Eroare la salvarea micro-index-ului: {e}", flush=True)
+        if cale_temp.exists():
+            cale_temp.unlink()
+
+
+# ==============================================================================
+# MAIN ENGINE
+# ==============================================================================
+def main():
+    print("============================================================", flush=True)
+    print(f"🚀 PORNIRE DESCĂRCARE XML JUST.RO | INTERVAL ANI: {AN_START} - {AN_END}", flush=True)
+    print("============================================================", flush=True)
+
+    drive_service = get_drive_service()
+    soap_client = JustRoSoapClient(URL_WSDL)
+
+    # 1. GENERARE INDEX VIRTUAL LIVE (MASTER INDEX + MICRO-INDEKSI + DELTA DRIVE)
+    print("\n⚡ Construire Index Virtual LIVE (Master Index + Micro-Indecși + Delta Drive)...", flush=True)
+    fisiere_explicite = set()
+    try:
+        index_virtual = XML_INDEX_READER.obtine_index_virtual(drive_service)
+        fisiere_map = index_virtual.get("fisiere", {})
+        fisiere_explicite = set(fisiere_map.keys())
+        print(f"✅ Index Virtual generat cu succes! Total fișiere cunoscute: {len(fisiere_explicite):,}", flush=True)
+    except Exception as e:
+        print(f"⚠️ Eroare la generarea Index-ului Virtual: {e}. Se va continua cu index gol.", flush=True)
+
+    micro_updates = {}
+    fisiere_descarcate_sesiune = 0
+
+    # 2. Parcurgere doar a anilor desemnați
+    for an in range(AN_START, AN_END + 1):
+        folder_destinatie_id = obtine_folder_id_pentru_an(an)
+        pagina = 1
+        consecutive_skips = 0
+        pagini_sarite_an_curent = 0
+        pagini_descarcate_an_curent = 0
+
+        print(f"\n📅 Începere procesare An: {an}...", flush=True)
+
+        while True:
+            nume_xml = f"brut_legislatie_{an}_pag{pagina}.xml"
+
+            # 3. VERIFICARE ANTI-DUPLICARE (Skip instant pe paginile care EXISTĂ deja)
+            if nume_xml in fisiere_explicite or nume_xml in micro_updates:
+                consecutive_skips += 1
+                pagini_sarite_an_curent += 1
+                pagina += 1
+                
+                # Dacă găsim 25 de pagini la rând care există deja în indexul LIVE, trecem la anul următor!
+                if consecutive_skips > 25:
+                    print(f"⏭️ FAST-FORWARD: Găsite 25 pagini consecutive existente în Indexul Virtual pentru {an}. An marcat complet!", flush=True)
+                    break
+                continue
+
+            consecutive_skips = 0  # Resetăm numărătorul la prima pagină lipsă
+            
+            # Dacă am trecut de Skip, înseamnă că am găsit prima pagină NOUĂ / LIPSĂ!
+            if pagini_sarite_an_curent > 0 and pagini_descarcate_an_curent == 0:
+                print(f"⏩ Resume automat: S-a făcut Skip peste {pagini_sarite_an_curent} pagini existente. Se reia descărcarea de la Pagina {pagina}...", flush=True)
+
+            print(f"📥 Descărcare Just.ro: An={an}, Pagina={pagina} -> {nume_xml}...", flush=True)
+            continut_xml = soap_client.descarca_pagina(an, pagina)
+
+            # SINGURA CONDIȚIE DE OPRIRE A ANULUI: Răspuns gol de la serverul Just.ro!
+            if not continut_xml or "Legi[] = None" in continut_xml or len(continut_xml.strip()) < 50:
+                total_pagini_an = pagina - 1
+                print(f"ℹ️ S-au terminat paginile pentru anul {an} la pagina {total_pagini_an} (Existente în Index: {pagini_sarite_an_curent}, Descărcate Noi: {pagini_descarcate_an_curent}).", flush=True)
+                break
+
+            # Salvare în Drive
+            file_id = salveaza_xml_in_drive(drive_service, continut_xml, nume_xml, folder_destinatie_id)
+
+            if file_id:
+                micro_updates[nume_xml] = {
+                    "id": file_id,
+                    "folder_id": folder_destinatie_id,
+                    "an": an,
+                    "pagina": pagina,
+                    "downloaded": True,
+                    "processed": False
+                }
+                fisiere_descarcate_sesiune += 1
+                pagini_descarcate_an_curent += 1
+                print(f"   ✅ Salvat cu succes! [ID: {file_id[:10]}...]", flush=True)
+
+            if len(micro_updates) >= 20:
+                salveaza_micro_index(drive_service, micro_updates)
+                micro_updates = {}
+
+            pagina += 1
+            time.sleep(0.3)
+
+    if micro_updates:
+        salveaza_micro_index(drive_service, micro_updates)
+
+    print("\n============================================================", flush=True)
+    print(f"🏁 PROCES FINALIZAT PENTRU {AN_START}-{AN_END}! Total fișiere noi descărcate: {fisiere_descarcate_sesiune:,}", flush=True)
+    print("============================================================", flush=True)
+
 
 if __name__ == "__main__":
     main()
