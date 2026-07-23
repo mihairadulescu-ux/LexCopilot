@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project_workspace>
+  <metadata>
+    <project_name>Legislatie_Just_RO</project_name>
+    <version>2.0.0</version>
+    <architecture>Dynamic Environment Variables + TAR.GZ Annual Compression</architecture>
+    <python_version>3.12</python_version>
+  </metadata>
+
+  <file path="docs/ARCHITECTURE.md">
+<![CDATA[
+# 📐 Specificație Tehnică de Arhitectură (Single Source of Truth)
+
+## 1. Viziune Generală & Infrastructură Cloud
+Sistemul este un pipeline distribuit automatizat (GitHub Actions) destinat preluării, indexării și stocării întregului corpus legislativ al României oferit de Portalul Legislativ (`just.ro`).
+
+### Principii Fundamentale de Proiectare:
+1. **ZERO Hardcoding (100% Dynamic Environment):** Toate ID-urile de Shared Drive-uri, foldere tehnice, chei API și credențiale sunt preluate exclusiv din variabilele de mediu ale repozitoriului GitHub (`Settings -> Secrets and variables -> Actions`).
+2. **Arhivare Universală Anuală `.tar.gz` (Anii Închiși și Parțiali):**
+   * **Toate fișierele XML existente pe discuri (indiferent de an, fie 1990, 2010 sau 2026, complet sau incomplet descărcat) sunt consolidate în arhive monolitice de tip `brut_XML_{an}.tar.gz`.**
+   * Această decizie oferă o rată de compresie de peste **90%**, eliberează cota de fișiere pe Google Drive și reduce numărul total de obiecte de la 300.000+ la doar ~35–40 de arhive.
+   * Dacă un an parțial descărcat primește fișiere noi ulterior, acestea sunt descărcate individual și pot fi adăugate dinamic/recomprimate în arhiva anului respectiv la runde periodice de consolidare.
+3. **Master Index Centralizat Comprimat (`index_xml.json.gz`):** Starea completă a tuturor fișierelor este menținută într-un singur punct de adevăr stocat ca JSON comprimat GZIP pe Google Drive. Indexul folosește pointeri transparenți (`archive` vs. `individual`) pentru a ști instant în ce arhivă sau fișier fizic se află fiecare pagină.
+4. **Standard de Logare Live & Runtime Python 3.12+:** Toate scripturile rulează sub Python 3.12+ cu flushing instantaneu al bufferului stdout (`sys.stdout.reconfigure(line_buffering=True)`).
+
+## 2. Configurația Mediului (Repository Variables & Secrets)
+
+| Nume Variabilă | Tip | Descriere / Format |
+| :--- | :--- | :--- |
+| `GDRIVE_SERVICE_ACCOUNT_JSON` | Secret | JSON-ul complet al Service Account-ului Google Drive. |
+| `FOLDERE_XML_RAW` | Variable | ID-urile celor 7 Shared Drive-uri XML, separate strict prin virgulă. |
+| `DRIVE_FOLDER_PDF` | Variable | ID-ul folderului/drive-ului dedicat fișierelor PDF (Monitorul Oficial Partea I). |
+| `SOAP_SEARCH_ENDPOINT` | Variable | Endpoint-ul WSDL Just.ro: `http://legislatie.just.ro/Ajust/SearchModel.svc?wsdl` |
+]]>
+  </file>
+
+  <file path="Scripts_XML/drive_config.py">
+<![CDATA[
+import os
+import sys
+
+# Standard logare live
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
+# Citim variabila FOLDERE_XML_RAW din mediul GitHub Actions (Single Source of Truth)
+FOLDERE_XML_RAW = os.getenv("FOLDERE_XML_RAW", "").strip()
+
+if FOLDERE_XML_RAW:
+    # Curățăm ghilimelele, spațiile și caracterele inutile din fiecare ID
+    FOLDERE_XML_IDS = [
+        fid.strip().strip('"').strip("'") 
+        for fid in FOLDERE_XML_RAW.split(",") 
+        if fid.strip().strip('"').strip("'")
+    ]
+else:
+    print("⚠️ [AVERTISMENT] Variabila FOLDERE_XML_RAW nu a fost găsită în mediu!", flush=True)
+    FOLDERE_XML_IDS = []
+
+if not FOLDERE_XML_IDS:
+    print("🛑 [EROARE CRITICĂ] Nu există niciun ID de folder configurat în FOLDERE_XML_RAW!", flush=True)
+    sys.exit(1)
+
+print(f"📊 [CONFIG DRIVE] Au fost încărcate dinamic {len(FOLDERE_XML_IDS)} Shared Drive-uri XML.", flush=True)
+]]>
+  </file>
+
+  <file path="Scripts_XML/archive_manager.py">
+<![CDATA[
+import os
+import sys
+import tarfile
+
+# Standard logare live
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
+def creeaza_sau_actualizeaza_arhiva_an(an, lista_fisiere_xml_locale, cale_iesire_tar_gz):
+    """
+    Împachetează sau adaugă o listă de fișiere XML locale într-o arhivă .tar.gz dedicată anului respectiv.
+    """
+    print(f"📦 [ARCHIVE MANAGER] Se procesează arhiva pentru anul {an} ({len(lista_fisiere_xml_locale)} fișiere)...", flush=True)
+    
+    with tarfile.open(cale_iesire_tar_gz, "w:gz") as tar:
+        for cale_fisier in lista_fisiere_xml_locale:
+            nume_fisier = os.path.basename(cale_fisier)
+            tar.add(cale_fisier, arcname=nume_fisier)
+            
+    dimensiune_mb = os.path.getsize(cale_iesire_tar_gz) / (1024 * 1024)
+    print(f"✅ [ARCHIVE MANAGER] Arhiva {os.path.basename(cale_iesire_tar_gz)} a fost creată cu succes! Dimensiune: {dimensiune_mb:.2f} MB", flush=True)
+    return cale_iesire_tar_gz
+
+if __name__ == "__main__":
+    print("🔧 Engine Archiver pregătit. Folosiți ca modul în pipeline-ul principal.", flush=True)
+]]>
+  </file>
+</project_workspace>
