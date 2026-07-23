@@ -6,6 +6,10 @@ import time
 import re
 from pathlib import Path
 
+# Force buffer flush pentru log-uri LIVE în GitHub Actions
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
 # ==============================================================================
 # CONFIGURARE CĂI DE IMPORT
 # ==============================================================================
@@ -76,16 +80,16 @@ def Curata_parametri_google(params):
 def scaneaza_shared_drives_complet(service):
     """
     Scanează fizic de la zero toate cele 7 Shared Drive-uri/Foldere XML.
-    Colectează peste 80.000 de fișiere XML și construiește Master Index-ul.
+    Afișează LIVE progresul scanării.
     """
-    print(f"\n🔍 [FULL RE-INDEX] scanare fizică în cele {len(FOLDERE_XML_IDS)} Shared Drive-uri XML...", flush=True)
+    print(f"\n🔍 [FULL RE-INDEX] Pornire scanare fizică în cele {len(FOLDERE_XML_IDS)} Shared Drive-uri XML...", flush=True)
     master_dict = {}
     pattern = re.compile(r"brut_(?:XML|legislatie)_(\d+)_pag(\d+)\.xml", re.IGNORECASE)
 
     total_gasite = 0
 
     for idx, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
-        print(f"  📂 Scanare Folder Drive {idx}/{len(FOLDERE_XML_IDS)} (ID: {folder_id})...", flush=True)
+        print(f"  📂 Scannare Drive {idx}/{len(FOLDERE_XML_IDS)} (ID: {folder_id})...", flush=True)
         page_token = None
         count_folder = 0
 
@@ -109,7 +113,6 @@ def scaneaza_shared_drives_complet(service):
                         an = int(match.group(1))
                         pagina = int(match.group(2))
                         
-                        # Nume standardizat în index
                         nume_standard = f"brut_XML_{an}_pag{pagina}.xml"
                         
                         master_dict[nume_standard] = {
@@ -122,6 +125,10 @@ def scaneaza_shared_drives_complet(service):
                         }
                         count_folder += 1
 
+                # Progres vizual la fiecare 5.000 fișiere
+                if count_folder > 0 and count_folder % 5000 == 0:
+                    print(f"     ⏳ Am găsit {count_folder:,} fișiere în Drive {idx}...", flush=True)
+
                 page_token = response.get('nextPageToken')
                 if not page_token:
                     break
@@ -129,10 +136,10 @@ def scaneaza_shared_drives_complet(service):
                 print(f"⚠️ Eroare la scanarea folderului {folder_id}: {e}", flush=True)
                 break
 
-        print(f"     -> Găsite {count_folder:,} fișiere XML în folderul {idx}.", flush=True)
+        print(f"  ✅ Finalizat Drive {idx}/{len(FOLDERE_XML_IDS)}! Găsite: {count_folder:,} fișiere XML.", flush=True)
         total_gasite += count_folder
 
-    print(f"✅ Full Scan Finalizat! Total fișiere unice indexate din Drive: {len(master_dict):,}\n", flush=True)
+    print(f"\n🎉 FULL SCAN COMPLET! Total fișiere indexate din Drive: {len(master_dict):,}\n", flush=True)
     return master_dict
 
 
@@ -141,7 +148,7 @@ def colecteaza_micro_indecsi(service, master_dict):
     if not FOLDER_TEMP_INDEXES_ID:
         return master_dict, []
 
-    print(f"🔍 Căutare micro-indecși în folderul temp (ID: {FOLDER_TEMP_INDEXES_ID})...", flush=True)
+    print(f"🔍 Verificare micro-indecși în folderul temp (ID: {FOLDER_TEMP_INDEXES_ID})...", flush=True)
     fisiere_temp_de_sters = []
     
     try:
@@ -153,31 +160,33 @@ def colecteaza_micro_indecsi(service, master_dict):
         ).execute()
 
         micro_files = rezultat.get("files", [])
-        print(f"🧩 Găsiți {len(micro_files)} micro-indecși neconsolidați. Integrare...", flush=True)
-
-        for mf in micro_files:
-            try:
-                req = service.files().get_media(
-                    fileId=mf["id"],
-                    supportsAllDrives=True
-                )
-                continut = req.execute()
-                date_micro = json.loads(continut.decode("utf-8"))
-                updates = date_micro.get("flag_updates", {})
-                
-                master_dict.update(updates)
-                fisiere_temp_de_sters.append(mf["id"])
-            except Exception as e:
-                print(f"⚠️ Eroare la procesarea micro-indexului {mf['name']}: {e}", flush=True)
+        if micro_files:
+            print(f"🧩 Găsiți {len(micro_files)} micro-indecși neconsolidați. Integrare...", flush=True)
+            for mf in micro_files:
+                try:
+                    req = service.files().get_media(
+                        fileId=mf["id"],
+                        supportsAllDrives=True
+                    )
+                    continut = req.execute()
+                    date_micro = json.loads(continut.decode("utf-8"))
+                    updates = date_micro.get("flag_updates", {})
+                    
+                    master_dict.update(updates)
+                    fisiere_temp_de_sters.append(mf["id"])
+                except Exception as e:
+                    print(f"⚠️ Eroare citire micro-index {mf['name']}: {e}", flush=True)
+        else:
+            print("ℹ️ Niciun micro-index neconsolidat găsit.", flush=True)
 
     except Exception as e:
-        print(f"⚠️ Eroare la scanarea micro-indecșilor: {e}", flush=True)
+        print(f"⚠️ Eroare scanare micro-indecși: {e}", flush=True)
 
     return master_dict, fisiere_temp_de_sters
 
 
 def curata_micro_indecsi_procesati(service, lista_id_uri):
-    """Șterge sau mută în Trash micro-indecșii integrați."""
+    """Mută în Trash micro-indecșii integrați."""
     if not lista_id_uri:
         return
     print(f"\n🧹 Curățare {len(lista_id_uri)} micro-indecși procesați...", flush=True)
@@ -200,7 +209,7 @@ def curata_micro_indecsi_procesati(service, lista_id_uri):
 
 def salveaza_si_urca_master_index_gz(service, master_dict):
     """Comprimă local în .json.gz și face UPDATE pe Google Drive."""
-    print(f"📦 Comprimare Master Index cu {len(master_dict):,} intrări...", flush=True)
+    print(f"\n📦 Comprimare Master Index cu {len(master_dict):,} intrări...", flush=True)
     
     cale_local = Path(NOME_INDEX_MASTER_LOCAL)
     
