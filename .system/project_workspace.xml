@@ -2,8 +2,8 @@
 <project_workspace>
   <metadata>
     <project_name>Legislatie_Just_RO</project_name>
-    <version>2.1.0</version>
-    <architecture>Dynamic Environment Variables + TAR.GZ Annual Compression + GZIP Master Index</architecture>
+    <version>2.2.0</version>
+    <architecture>Dynamic Environment Variables + TAR.GZ Annual Compression + Complete Micro-Index Purge</architecture>
     <python_version>3.12</python_version>
   </metadata>
 
@@ -16,65 +16,11 @@ Sistemul este un pipeline distribuit automatizat (GitHub Actions) destinat prelu
 
 ### Principii Fundamentale de Proiectare:
 1. **ZERO Hardcoding (100% Dynamic Environment):** Toate ID-urile de Shared Drive-uri, foldere tehnice, chei API și credențiale sunt preluate exclusiv din variabilele de mediu ale repozitoriului GitHub (`Settings -> Secrets and variables -> Actions`).
-2. **Arhivare Universală Anuală `.tar.gz` (Anii Închiși și Parțiali):**
-   * **Toate fișierele XML existente pe discuri (indiferent de an, fie 1990, 2010 sau 2026, complet sau incomplet descărcat) sunt consolidate în arhive monolitice de tip `brut_XML_{an}.tar.gz`.**
-   * Această decizie oferă o rată de compresie de peste **90%**, eliberează cota de fișiere pe Google Drive și reduce numărul total de obiecte de la 300.000+ la doar ~35–40 de arhive.
-   * Dacă un an parțial descărcat primește fișiere noi ulterior, acestea sunt descărcate individual și pot fi adăugate dinamic/recomprimate în arhiva anului respectiv la runde periodice de consolidare.
-3. **Master Index Centralizat Comprimat (`index_xml.json.gz`):** Starea completă a tuturor fișierelor este menținută într-un singur punct de adevăr stocat ca JSON comprimat GZIP pe Google Drive. Indexul folosește pointeri transparenți (`archive` vs. `individual`) pentru a ști instant în ce arhivă sau fișier fizic se află fiecare pagină.
+2. **Arhivare Universală Anuală `.tar.gz`:** Toate fișierele XML existente pe discuri (indiferent de an, complet sau incomplet descărcat) sunt consolidate în arhive monolitice de tip `brut_XML_{an}.tar.gz`.
+3. **Master Index & Micro-Index Full Purge (Batch Processing):** 
+   * `build_index FULL` scanează și procesează **TOȚI micro-indecșii** existenți în tranșe/batch-uri delimitate (ex: 50–100 fișiere per batch).
+   * După fiecare batch procesat cu succes, micro-indecșii respectivi sunt **șterși definitiv** de pe Google Drive pentru a aduce numărul de micro-indecși la **exact 0**.
 4. **Standard de Logare Live & Runtime Python 3.12+:** Toate scripturile rulează sub Python 3.12+ cu flushing instantaneu al bufferului stdout (`sys.stdout.reconfigure(line_buffering=True)`).
-]]>
-  </file>
-
-  <file path="Scripts_XML/drive_config.py">
-<![CDATA[
-import os
-import sys
-
-# Standard logare live
-sys.stdout.reconfigure(line_buffering=True)
-sys.stderr.reconfigure(line_buffering=True)
-
-# Citim variabila FOLDERE_XML_RAW din mediul GitHub Actions
-FOLDERE_XML_RAW = os.getenv("FOLDERE_XML_RAW", "").strip()
-
-if FOLDERE_XML_RAW:
-    FOLDERE_XML_IDS = [
-        fid.strip().strip('"').strip("'") 
-        for fid in FOLDERE_XML_RAW.split(",") 
-        if fid.strip().strip('"').strip("'")
-    ]
-else:
-    print("⚠️ [AVERTISMENT] Variabila FOLDERE_XML_RAW nu a fost găsită în mediu!", flush=True)
-    FOLDERE_XML_IDS = []
-
-if not FOLDERE_XML_IDS:
-    print("🛑 [EROARE CRITICĂ] Nu există niciun ID de folder configurat în FOLDERE_XML_RAW!", flush=True)
-    sys.exit(1)
-
-print(f"📊 [CONFIG DRIVE] Au fost încărcate dinamic {len(FOLDERE_XML_IDS)} Shared Drive-uri XML.", flush=True)
-]]>
-  </file>
-
-  <file path="Scripts_XML/archive_manager.py">
-<![CDATA[
-import os
-import sys
-import tarfile
-
-sys.stdout.reconfigure(line_buffering=True)
-sys.stderr.reconfigure(line_buffering=True)
-
-def creeaza_sau_actualizeaza_arhiva_an(an, lista_fisiere_xml_locale, cale_iesire_tar_gz):
-    print(f"📦 [ARCHIVE MANAGER] Se procesează arhiva pentru anul {an} ({len(lista_fisiere_xml_locale)} fișiere)...", flush=True)
-    
-    with tarfile.open(cale_iesire_tar_gz, "w:gz") as tar:
-        for cale_fisier in lista_fisiere_xml_locale:
-            nume_fisier = os.path.basename(cale_fisier)
-            tar.add(cale_fisier, arcname=nume_fisier)
-            
-    dimensiune_mb = os.path.getsize(cale_iesire_tar_gz) / (1024 * 1024)
-    print(f"✅ [ARCHIVE MANAGER] Arhiva {os.path.basename(cale_iesire_tar_gz)} a fost creată cu succes! Dimensiune: {dimensiune_mb:.2f} MB", flush=True)
-    return cale_iesire_tar_gz
 ]]>
   </file>
 
@@ -84,12 +30,9 @@ import os
 import sys
 import json
 import gzip
-from drive_config import FOLDERE_XML_IDS
 
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
-
-NOME_INDEX_MASTER = "index_xml.json.gz"
 
 def incarc_index_master_gz(cale_local_sau_stream):
     try:
@@ -111,15 +54,37 @@ def salveaza_index_master_gz(date_index, cale_salvare):
         print(f"🛑 [INDEX READER] Eroare la salvarea indexului master: {e}", flush=True)
         return False
 
-def adauga_sau_actualizeaza_pointer_fisier(index_data, nume_fisier, an, pagina, drive_id, tip_stocare="archive", nume_arhiva=None):
-    index_data[nume_fisier] = {
-        "an": int(an),
-        "pagina": int(pagina),
-        "tip_stocare": tip_stocare,
-        "arhiva": nume_arhiva if tip_stocare == "archive" else None,
-        "cale_interna": nume_fisier if tip_stocare == "archive" else None,
-        "drive_id": drive_id
-    }
+def proceseaza_si_curata_microindecsi(service_drive, master_index_data, list_micro_index_files, batch_size=50):
+    total_fisiere = len(list_micro_index_files)
+    if total_fisiere == 0:
+        print("✨ [MICRO-INDEX] Nu există micro-indecși de procesat.", flush=True)
+        return master_index_data
+
+    print(f"⚡ [MICRO-INDEX] Începe procesarea a {total_fisiere} micro-indecși în batch-uri de {batch_size}...", flush=True)
+
+    for i in range(0, total_fisiere, batch_size):
+        batch = list_micro_index_files[i : i + batch_size]
+        fisiere_de_sters_ids = []
+
+        for micro_file in batch:
+            try:
+                micro_data = micro_file.get("content_json", {})
+                for cheie, info in micro_data.items():
+                    master_index_data[cheie] = info
+                fisiere_de_sters_ids.append(micro_file["id"])
+            except Exception as e:
+                print(f"⚠️ [MICRO-INDEX] Eroare citire micro-index {micro_file.get('name')}: {e}", flush=True)
+
+        for file_id in fisiere_de_sters_ids:
+            try:
+                service_drive.files().delete(fileId=file_id, supportsAllDrives=True).execute()
+            except Exception as e:
+                print(f"⚠️ [MICRO-INDEX] Eroare ștergere micro-index {file_id}: {e}", flush=True)
+
+        print(f"✅ [MICRO-INDEX] Batch {i // batch_size + 1} integrat și curățat ({len(fisiere_de_sters_ids)} fișiere șterse).", flush=True)
+
+    print(f"🎉 [MICRO-INDEX] Toți micro-indecșii au fost procesați și șterși!", flush=True)
+    return master_index_data
 ]]>
   </file>
 </project_workspace>
