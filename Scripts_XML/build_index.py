@@ -76,17 +76,20 @@ def descarca_master_index_existent(service):
     """Încearcă să descarce și să decompileze Master Index-ul existent de pe Drive."""
     print(f"📥 Descărcare Master Index existent (ID: {XML_STORAGE_INDEX_ID})...", flush=True)
     try:
-        request = service.files().get_media(fileId=XML_STORAGE_INDEX_ID)
+        request = service.files().get_media(
+            fileId=XML_STORAGE_INDEX_ID,
+            supportsAllDrives=True
+        )
         continut_bytes = request.execute()
         
         # Încercăm să decomprimăm GZIP
         try:
             date_decompresate = gzip.decompress(continut_bytes)
             master_dict = json.loads(date_decompresate.decode("utf-8"))
-            print(f"✅ Master Index existent încărcat ({len(master_dict):,} intrări).", flush=True)
+            print(f"✅ Master Index existent încărcat din GZIP ({len(master_dict):,} intrări).", flush=True)
             return master_dict
         except Exception:
-            # Fallback: poate a fost salvat ca JSON necomprimat
+            # Fallback: JSON necomprimat
             try:
                 master_dict = json.loads(continut_bytes.decode("utf-8"))
                 print(f"⚠️ Master Index era JSON necomprimat. Încărcat ({len(master_dict):,} intrări).", flush=True)
@@ -121,7 +124,10 @@ def colecteaza_micro_indecsi(service, master_dict):
 
         for mf in micro_files:
             try:
-                req = service.files().get_media(fileId=mf["id"])
+                req = service.files().get_media(
+                    fileId=mf["id"],
+                    supportsAllDrives=True
+                )
                 continut = req.execute()
                 date_micro = json.loads(continut.decode("utf-8"))
                 updates = date_micro.get("flag_updates", {})
@@ -141,12 +147,18 @@ def curata_micro_indecsi_procesati(service, lista_id_uri):
     """Șterge din Drive micro-indecșii care au fost integrați cu succes în Master Index."""
     if not lista_id_uri:
         return
-    print(f"🧹 Curățare {len(lista_id_uri)} micro-indecși procesați din Drive...", flush=True)
+    print(f"\n🧹 Curățare {len(lista_id_uri)} micro-indecși procesați din Drive...", flush=True)
+    stersi_cu_succes = 0
     for fid in lista_id_uri:
         try:
-            service.files().delete(fileId=fid, supportsAllDrives=True).execute()
+            service.files().delete(
+                fileId=fid,
+                supportsAllDrives=True
+            ).execute()
+            stersi_cu_succes += 1
         except Exception as e:
             print(f"⚠️ Nu s-a putut șterge temp_index {fid}: {e}", flush=True)
+    print(f"✅ Șterși cu succes {stersi_cu_succes}/{len(lista_id_uri)} micro-indecși.", flush=True)
 
 
 def salveaza_si_urca_master_index_gz(service, master_dict):
@@ -155,7 +167,7 @@ def salveaza_si_urca_master_index_gz(service, master_dict):
     
     cale_local = Path(NOME_INDEX_MASTER_LOCAL)
     
-    # 1. Scriere fizică comprimată cu GZIP
+    # 1. Scriere fizică comprimată GZIP
     with gzip.open(cale_local, "wb") as f:
         json_bytes = json.dumps(master_dict, ensure_ascii=False, indent=2).encode("utf-8")
         f.write(json_bytes)
@@ -163,7 +175,7 @@ def salveaza_si_urca_master_index_gz(service, master_dict):
     dimensiune_kb = cale_local.stat().st_size / 1024
     print(f"💾 Arhivă GZIP creată local: {NOME_INDEX_MASTER_LOCAL} ({dimensiune_kb:.2f} KB)", flush=True)
 
-    # 2. Upload/Update pe Google Drive
+    # 2. Upload/Update pe Google Drive cu suport pentru Shared Drives
     print(f"⬆️ Actualizare Master Index pe Drive (ID: {XML_STORAGE_INDEX_ID})...", flush=True)
     try:
         media = MediaFileUpload(str(cale_local), mimetype="application/gzip", resumable=True)
@@ -172,11 +184,15 @@ def salveaza_si_urca_master_index_gz(service, master_dict):
         params = Curata_parametri_google(params)
         params["fileId"] = XML_STORAGE_INDEX_ID
         params["media_body"] = media
+        params["supportsAllDrives"] = True
+        params["supportsTeamDrives"] = True
 
         updated_file = service.files().update(**params).execute()
         print(f"✅ Master Index GZIP actualizat cu succes pe Drive! [ID: {updated_file.get('id')}]", flush=True)
+        return True
     except Exception as e:
         print(f"❌ EROARE CRITICĂ la actualizarea Master Index pe Drive: {e}", flush=True)
+        return False
     finally:
         if cale_local.exists():
             cale_local.unlink()
@@ -196,13 +212,16 @@ def main():
     master_dict, temp_ids_de_sters = colecteaza_micro_indecsi(service, master_dict)
 
     # 3. Salvare comprimată GZIP și upload
-    salveaza_si_urca_master_index_gz(service, master_dict)
+    succes_upload = salveaza_si_urca_master_index_gz(service, master_dict)
 
-    # 4. Curățare micro-indecși integrați
-    curata_micro_indecsi_procesati(service, temp_ids_de_sters)
+    # 4. Curățare micro-indecși integrați DOAR dacă upload-ul pe Drive a reușit
+    if succes_upload:
+        curata_micro_indecsi_procesati(service, temp_ids_de_sters)
+    else:
+        print("⚠️ Curățarea micro-indecșilor a fost OPRITĂ deoarece salvarea Master Index-ului pe Drive a eșuat.", flush=True)
 
     print("============================================================", flush=True)
-    print("🏁 CONSOLIDARE INDEX FINALIZATĂ CU SUCCES!", flush=True)
+    print("🏁 PROCES FINALIZAT!", flush=True)
     print("============================================================", flush=True)
 
 
