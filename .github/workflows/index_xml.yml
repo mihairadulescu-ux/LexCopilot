@@ -31,7 +31,7 @@ jobs:
 
       - name: Execuție Index Builder
         env:
-          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML || vars.DRIVE_FOLDER_XML }}
         run: |
           VAL_LOWER=$(echo "${{ inputs.full_rebuild }}" | tr '[:upper:]' '[:lower:]')
