@@ -1,0 +1,30 @@
+name: Redenumire Legacy XML (brut_legislatie -> brut_XML)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rename-legacy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout cod din repozitoriu
+        uses: actions/checkout@v4
+
+      - name: Configurare Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalare dependențe
+        run: |
+          pip install google-api-python-client google-auth suds-py3
+
+      - name: Executare Redenumire Legacy
+        env:
+          PYTHONUNBUFFERED: "1"
+          PYTHONIOENCODING: "utf-8"
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          XML_STORAGE_INDEX: ${{ secrets.XML_STORAGE_INDEX }}
+        run: |
+          python -u Scripts_XML/rename_legacy_files.py
