@@ -6,7 +6,6 @@ import socket
 import re
 from pathlib import Path
 
-# Printăm instant un header ca să știm că a pornit
 print("============================================================", flush=True)
 print("🧹 SCRIPT DEDICAT PENTRU IGIENIZARE INTENSIVĂ DUPLICATE", flush=True)
 print("============================================================", flush=True)
@@ -31,7 +30,7 @@ from drive_config import (
 )
 
 BATCH_SIZE = 500      # Câte fișiere trimite la coș per rundă
-PAUZA_SEGUNDE = 15    # Pauză redusă la 15s pentru viteză sporită
+PAUZA_SEGUNDE = 15    # Pauză între batch-uri
 
 
 def get_drive_service():
@@ -61,8 +60,11 @@ def scaneaza_si_gaseste_duplicate(service):
     raw_inventory = {}
     pattern_xml = re.compile(r"^brut_(?:XML|legislatie)_(\d+)_pag(\d+)\.xml$", re.IGNORECASE)
 
+    total_fisiere_scanate = 0
+    timp_start_scan = time.time()
+
     for index_folder, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
-        print(f"   └─ Folder [{index_folder}/{len(FOLDERE_XML_IDS)}] ID: {folder_id}...", flush=True)
+        print(f"\n📂 [{index_folder}/{len(FOLDERE_XML_IDS)}] Scanăm Folder ID: {folder_id}...", flush=True)
         page_token = None
         query = f"'{folder_id}' in parents and trashed = false"
 
@@ -86,6 +88,7 @@ def scaneaza_si_gaseste_duplicate(service):
                 break
 
             for f in files:
+                total_fisiere_scanate += 1
                 nume = f["name"]
                 if nume not in raw_inventory:
                     raw_inventory[nume] = []
@@ -97,9 +100,15 @@ def scaneaza_si_gaseste_duplicate(service):
                     "_nume_fisier": nume
                 })
 
+                if total_fisiere_scanate % 10000 == 0:
+                    durata = round(time.time() - timp_start_scan, 1)
+                    print(f"   ⏳ [SCAN LIVE] Parcurse {total_fisiere_scanate:,} fișiere fizice ({durata}s)...", flush=True)
+
             page_token = response.get("nextPageToken")
             if not page_token:
                 break
+
+    print(f"\n📊 TOTAL FIȘIERE SCANATE: {total_fisiere_scanate:,}. Calculăm duplicatele...", flush=True)
 
     grupuri_semantice = {}
     ids_de_sters = []
@@ -190,11 +199,10 @@ def main():
 
         bara = genereaza_bara_progres(sters_totale, total_initial)
         
-        # Printăm pe rânduri separate ca să forțăm flush-ul din consola GitHub
         print(f"🚀 LOT FINALIZAT: +{succes_lot} fișiere trimise la coș", flush=True)
         print(f"   ├─ Progres: {bara} ({sters_totale:,}/{total_initial:,})", flush=True)
         print(f"   ├─ Viteză: {viteză_medie:.1f} fișiere/secundă", flush=True)
-        print(f"   └─ Timp rămas estimat (ETA): {formateaza_timp(eta_secunde)}", flush=True)
+        print(f"   └─ ETA: {formateaza_timp(eta_secunde)}", flush=True)
         print("------------------------------------------------------------", flush=True)
 
         if ids_de_sters:
