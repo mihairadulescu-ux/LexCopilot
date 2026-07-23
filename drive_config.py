@@ -24,3 +24,10 @@ if not FOLDERE_XML_IDS:
     sys.exit(1)
 
 print(f"📊 [CONFIG DRIVE] Au fost încărcate dinamic {len(FOLDERE_XML_IDS)} Shared Drive-uri XML.", flush=True)
+
+# -------------------------------------------------------------------
+# FOLDER TEMPORAR PENTRU MICRO-INDECSi (Necesar de download_XML.py)
+# -------------------------------------------------------------------
+# Dacă ai o variantă dedicată FOLDER_TEMP_INDEXES_ID în mediu o luăm de acolo,
+# altfel folosim automat primul Shared Drive din listă.
+FOLDER_TEMP_INDEXES_ID = os.getenv("FOLDER_TEMP_INDEXES_ID", FOLDERE_XML_IDS[0] if FOLDERE_XML_IDS else "")
