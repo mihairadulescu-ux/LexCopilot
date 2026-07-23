@@ -253,7 +253,7 @@ def main():
                 fisiere_explicite = set(fisiere_map[cheie_radacina].keys())
             else:
                 fisiere_explicite = set(fisiere_map.keys())
-            print(f"✅ Index Virtual Încărcat! Găsite {len(fisiere_explicite):,} fișiere existente.", flush=True)
+            print(f"✅ Index Virtual Încărcat! Găsite {len(fisiere_explicite):,} fișiere totale în index.", flush=True)
     except Exception as e:
         print(f"⚠️ Eroare la obținerea Indexului Virtual: {e}", flush=True)
 
@@ -265,8 +265,8 @@ def main():
         folder_destinatie_id = obtine_folder_id_pentru_an(an)
         pagini_an_curent = []
         
-        # Căutăm paginile existente (suportă ambele denumiri în caz că există fișiere vechi)
-        pattern = re.compile(rf"(?:brut_XML_|brut_legislatie_){an}_pag(\d+)\.xml")
+        # Filtrare STRICTĂ pe anul curent (suportă ambele tipuri de denumiri vechi/noi)
+        pattern = re.compile(rf"brut_(?:XML|legislatie)_{an}_pag(\d+)\.xml", re.IGNORECASE)
         
         for fisier in fisiere_explicite:
             match = pattern.match(fisier)
@@ -274,11 +274,12 @@ def main():
                 pagini_an_curent.append(int(match.group(1)))
                 
         # Calculare pagină de pornire (Resume inteligent)
-        pagina = max(pagini_an_curent) + 1 if pagini_an_curent else 1
+        pagina_max_existenta = max(pagini_an_curent) if pagini_an_curent else 0
+        pagina = pagina_max_existenta + 1
         
-        print(f"\n📅 Începere procesare An: {an}...", flush=True)
-        if pagini_an_curent:
-            print(f"⏩ Resume inteligent: S-au găsit {len(pagini_an_curent)} pagini existente pentru anul {an}. Se reia de la Pagina {pagina}.", flush=True)
+        print(f"\n📅 Procesare An: {an} | Fișiere găsite în index pt. acest an: {len(pagini_an_curent)} | Ultima pagină: {pagina_max_existenta}", flush=True)
+        if pagina_max_existenta > 0:
+            print(f"⏩ Reluare descărcare direct de la Pagina {pagina}...", flush=True)
 
         consecutive_skips = 0
 
@@ -299,11 +300,13 @@ def main():
             continut_xml = soap_client.descarca_pagina(an, pagina)
 
             if continut_xml is None:
-                print(f"❌ Descărcarea paginii {pagina} a eșuat repetat. Oprire procesare pe anul {an}.", flush=True)
+                print(f"❌ Descărcarea paginii {pagina} a eșuat repetat (eroare rețea/WSDL). Oprire pe anul {an}.", flush=True)
                 break
 
-            if "Legi[] = None" in continut_xml or len(continut_xml.strip()) < 50:
-                print(f"ℹ️ S-au terminat paginile pentru anul {an} la pagina {pagina - 1}.", flush=True)
+            # VERIFICARE RIGUROASĂ A SFÂRȘITULUI DE AN
+            raspuns_text = str(continut_xml)
+            if "Legi = None" in raspuns_text or "Legi[] = None" in raspuns_text or (len(raspuns_text.strip()) < 100 and "SearchResult" not in raspuns_text):
+                print(f"ℹ️ Serverul Just.ro a confirmat finalul anului {an} la pagina {pagina - 1}.", flush=True)
                 break
 
             file_id = salveaza_xml_in_drive(drive_service, continut_xml, nume_xml, folder_destinatie_id)
