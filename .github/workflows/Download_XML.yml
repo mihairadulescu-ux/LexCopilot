@@ -2,7 +2,6 @@ name: Descărcare XML Just.ro
 
 on:
   schedule:
-    # Rulează periodic (ex: în fiecare zi la miezul nopții)
     - cron: '0 0 * * *'
   workflow_dispatch:
     inputs:
@@ -33,7 +32,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
       - name: Instalare dependențe Python
         run: |
@@ -42,7 +40,6 @@ jobs:
 
       - name: Execuție Script Descărcare XML
         env:
-          # Inspecție și pasare directă a Secrets/Variables către mediul Python (os.getenv)
           TEMPORARY_XML_INDEXES: ${{ secrets.TEMPORARY_XML_INDEXES || vars.TEMPORARY_XML_INDEXES }}
           XML_STORAGE_INDEX: ${{ secrets.XML_STORAGE_INDEX || vars.XML_STORAGE_INDEX }}
           DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML || vars.DRIVE_FOLDER_XML }}
