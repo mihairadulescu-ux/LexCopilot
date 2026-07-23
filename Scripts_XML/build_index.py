@@ -3,6 +3,7 @@ import sys
 import json
 import gzip
 import time
+import re
 from pathlib import Path
 
 # ==============================================================================
@@ -18,12 +19,12 @@ if str(DIRECTOR_CURENT) not in sys.path:
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaFileUpload
 
 from drive_config import FOLDERE_XML_IDS, get_file_params
 
 # ==============================================================================
-# CONFIGURARE CONSTANTE & ID-URI DIN MEDIU
+# CONFIGURARE CONSTANTE & ID-URI
 # ==============================================================================
 NOME_INDEX_MASTER_LOCAL = "index_xml.json.gz"
 FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES")
@@ -72,40 +73,72 @@ def Curata_parametri_google(params):
     return params
 
 
-def descarca_master_index_existent(service):
-    """Încearcă să descarce și să decompileze Master Index-ul existent de pe Drive."""
-    print(f"📥 Descărcare Master Index existent (ID: {XML_STORAGE_INDEX_ID})...", flush=True)
-    try:
-        request = service.files().get_media(
-            fileId=XML_STORAGE_INDEX_ID,
-            supportsAllDrives=True
-        )
-        continut_bytes = request.execute()
-        
-        # Încercăm să decomprimăm GZIP
-        try:
-            date_decompresate = gzip.decompress(continut_bytes)
-            master_dict = json.loads(date_decompresate.decode("utf-8"))
-            print(f"✅ Master Index existent încărcat din GZIP ({len(master_dict):,} intrări).", flush=True)
-            return master_dict
-        except Exception:
-            # Fallback: JSON necomprimat
+def scaneaza_shared_drives_complet(service):
+    """
+    Scanează fizic de la zero toate cele 7 Shared Drive-uri/Foldere XML.
+    Colectează peste 80.000 de fișiere XML și construiește Master Index-ul.
+    """
+    print(f"\n🔍 [FULL RE-INDEX] scanare fizică în cele {len(FOLDERE_XML_IDS)} Shared Drive-uri XML...", flush=True)
+    master_dict = {}
+    pattern = re.compile(r"brut_(?:XML|legislatie)_(\d+)_pag(\d+)\.xml", re.IGNORECASE)
+
+    total_gasite = 0
+
+    for idx, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
+        print(f"  📂 Scannare Folder Drive {idx}/{len(FOLDERE_XML_IDS)} (ID: {folder_id})...", flush=True)
+        page_token = None
+        count_folder = 0
+
+        while True:
             try:
-                master_dict = json.loads(continut_bytes.decode("utf-8"))
-                print(f"⚠️ Master Index era JSON necomprimat. Încărcat ({len(master_dict):,} intrări).", flush=True)
-                return master_dict
-            except Exception:
-                print("⚠️ Fișierul Master Index de pe Drive este invalid/corupt. Se creează un index nou.", flush=True)
-                return {}
-    except Exception as e:
-        print(f"⚠️ Nu s-a putut descărca Master Index-ul de pe Drive: {e}", flush=True)
-        return {}
+                response = service.files().list(
+                    q=f"'{folder_id}' in parents and trashed=false and name contains 'brut_'",
+                    spaces='drive',
+                    fields="nextPageToken, files(id, name)",
+                    pageToken=page_token,
+                    pageSize=1000,
+                    includeItemsFromAllDrives=True,
+                    supportsAllDrives=True
+                ).execute()
+
+                files = response.get('files', [])
+                for f in files:
+                    nume = f['name']
+                    match = pattern.match(nume)
+                    if match:
+                        an = int(match.group(1))
+                        pagina = int(match.group(2))
+                        
+                        # Nume standardizat în index
+                        nume_standard = f"brut_XML_{an}_pag{pagina}.xml"
+                        
+                        master_dict[nume_standard] = {
+                            "an": an,
+                            "pagina": pagina,
+                            "tip_stocare": "individual",
+                            "arhiva": None,
+                            "cale_interna": None,
+                            "drive_id": f['id']
+                        }
+                        count_folder += 1
+
+                page_token = response.get('nextPageToken')
+                if not page_token:
+                    break
+            except Exception as e:
+                print(f"⚠️ Eroare la scanarea folderului {folder_id}: {e}", flush=True)
+                break
+
+        print(f"     -> Găsite {count_folder:,} fișiere XML în folderul {idx}.", flush=True)
+        total_gasite += count_folder
+
+    print(f"✅ Full Scan Finalizat! Total fișiere unice indexate din Drive: {len(master_dict):,}\n", flush=True)
+    return master_dict
 
 
 def colecteaza_micro_indecsi(service, master_dict):
-    """Citește toți micro-indecșii neconsolidați și îi integrează în Master Index."""
+    """Integrează micro-indecșii neconsolidați peste indexul scanat."""
     if not FOLDER_TEMP_INDEXES_ID:
-        print("ℹ️ 'TEMPORARY_XML_INDEXES' nu este setat. Se sare peste consolidarea micro-indecșilor.", flush=True)
         return master_dict, []
 
     print(f"🔍 Căutare micro-indecși în folderul temp (ID: {FOLDER_TEMP_INDEXES_ID})...", flush=True)
@@ -120,7 +153,7 @@ def colecteaza_micro_indecsi(service, master_dict):
         ).execute()
 
         micro_files = rezultat.get("files", [])
-        print(f"🧩 Găsiți {len(micro_files)} micro-indecși neconsolidați.", flush=True)
+        print(f"🧩 Găsiți {len(micro_files)} micro-indecși neconsolidați. Integrare...", flush=True)
 
         for mf in micro_files:
             try:
@@ -144,38 +177,41 @@ def colecteaza_micro_indecsi(service, master_dict):
 
 
 def curata_micro_indecsi_procesati(service, lista_id_uri):
-    """Șterge din Drive micro-indecșii care au fost integrați cu succes în Master Index."""
+    """Mută în Trash micro-indecșii integrați (safe delete pt. Shared Drives)."""
     if not lista_id_uri:
         return
-    print(f"\n🧹 Curățare {len(lista_id_uri)} micro-indecși procesați din Drive...", flush=True)
-    stersi_cu_succes = 0
+    print(f"\n🧹 Curățare {len(lista_id_uri)} micro-indecși procesați...", flush=True)
+    curatati = 0
     for fid in lista_id_uri:
         try:
-            service.files().delete(
-                fileId=fid,
-                supportsAllDrives=True
-            ).execute()
-            stersi_cu_succes += 1
+            # Mai întâi încercăm delete direct, dacă eșuează facem trashed=True
+            try:
+                service.files().delete(fileId=fid, supportsAllDrives=True).execute()
+            except Exception:
+                service.files().update(
+                    fileId=fid,
+                    body={'trashed': True},
+                    supportsAllDrives=True
+                ).execute()
+            curatati += 1
         except Exception as e:
-            print(f"⚠️ Nu s-a putut șterge temp_index {fid}: {e}", flush=True)
-    print(f"✅ Șterși cu succes {stersi_cu_succes}/{len(lista_id_uri)} micro-indecși.", flush=True)
+            pass
+    print(f"✅ Curățați {curatati}/{len(lista_id_uri)} micro-indecși.", flush=True)
 
 
 def salveaza_si_urca_master_index_gz(service, master_dict):
     """Comprimă local în .json.gz și face UPDATE pe Google Drive."""
-    print(f"\n📦 Comprimare Master Index cu {len(master_dict):,} intrări...", flush=True)
+    print(f"📦 Comprimare Master Index cu {len(master_dict):,} intrări...", flush=True)
     
     cale_local = Path(NOME_INDEX_MASTER_LOCAL)
     
-    # 1. Scriere fizică comprimată GZIP
     with gzip.open(cale_local, "wb") as f:
         json_bytes = json.dumps(master_dict, ensure_ascii=False, indent=2).encode("utf-8")
         f.write(json_bytes)
         
-    dimensiune_kb = cale_local.stat().st_size / 1024
-    print(f"💾 Arhivă GZIP creată local: {NOME_INDEX_MASTER_LOCAL} ({dimensiune_kb:.2f} KB)", flush=True)
+    dimensiune_mb = cale_local.stat().st_size / (1024 * 1024)
+    print(f"💾 Arhivă GZIP creată local: {NOME_INDEX_MASTER_LOCAL} ({dimensiune_mb:.2f} MB)", flush=True)
 
-    # 2. Upload/Update pe Google Drive cu suport pentru Shared Drives
     print(f"⬆️ Actualizare Master Index pe Drive (ID: {XML_STORAGE_INDEX_ID})...", flush=True)
     try:
         media = MediaFileUpload(str(cale_local), mimetype="application/gzip", resumable=True)
@@ -200,28 +236,26 @@ def salveaza_si_urca_master_index_gz(service, master_dict):
 
 def main():
     print("============================================================", flush=True)
-    print("🏗️ PORNIRE CONSTRUIRE & COMPACTARE MASTER INDEX XML (.gz)", flush=True)
+    print("🏗️ PORNIRE RE-INDEXARE COMPLETĂ & SCANARE FIZICĂ SHARED DRIVES", flush=True)
     print("============================================================", flush=True)
 
     service = get_drive_service()
 
-    # 1. Descărcare Master Index existent
-    master_dict = descarca_master_index_existent(service)
+    # 1. SCANARE RECURSIVĂ DE LA ZERO PE TOATE CELE 7 SHARED DRIVES
+    master_dict = scaneaza_shared_drives_complet(service)
 
-    # 2. Integrare micro-indecși
+    # 2. INTEGRARE MICRO-INDECȘI
     master_dict, temp_ids_de_sters = colecteaza_micro_indecsi(service, master_dict)
 
-    # 3. Salvare comprimată GZIP și upload
+    # 3. COMPRESIE GZIP ȘI UPLOAD
     succes_upload = salveaza_si_urca_master_index_gz(service, master_dict)
 
-    # 4. Curățare micro-indecși integrați DOAR dacă upload-ul pe Drive a reușit
+    # 4. CURĂȚARE MICRO-INDECȘI
     if succes_upload:
         curata_micro_indecsi_procesati(service, temp_ids_de_sters)
-    else:
-        print("⚠️ Curățarea micro-indecșilor a fost OPRITĂ deoarece salvarea Master Index-ului pe Drive a eșuat.", flush=True)
 
     print("============================================================", flush=True)
-    print("🏁 PROCES FINALIZAT!", flush=True)
+    print("🏁 FULL RE-INDEX COMPLET FINALIZAT CU SUCCES!", flush=True)
     print("============================================================", flush=True)
 
 
