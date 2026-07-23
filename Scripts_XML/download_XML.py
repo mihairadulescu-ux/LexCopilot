@@ -2,7 +2,6 @@ import os
 import sys
 import time
 import json
-import re
 import socket
 from pathlib import Path
 
@@ -21,11 +20,11 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-# Importăm și XML_STORAGE_INDEX, variabila care ține ID-ul indexului master
+# Importăm DOAR funcțiile și folderele sigure. 
+# NU importăm XML_STORAGE_INDEX de aici pentru a evita erorile fatale de import.
 from drive_config import (
     FOLDERE_XML_IDS,
     FOLDER_TEMP_INDEXES_ID,
-    XML_STORAGE_INDEX,
     get_file_params,
     get_list_params,
 )
@@ -198,8 +197,7 @@ def salveaza_xml_in_drive(service, continut_xml, nume_fisier, folder_id):
         }
 
         params = get_file_params(nume_fisier)
-        # ELIMINĂM drive_id care cauzează eroarea la Google API
-        params.pop("drive_id", None) 
+        params.pop("drive_id", None)  # Eliminăm parametrul care cauzează eroarea la Google API
         params["body"] = file_metadata
         params["media_body"] = media
 
@@ -234,8 +232,7 @@ def salveaza_micro_index(service, flag_updates):
         }
 
         params = get_file_params(nume_temp)
-        # ELIMINĂM drive_id
-        params.pop("drive_id", None)
+        params.pop("drive_id", None)  # Eliminăm parametrul care cauzează eroarea la Google API
         params["body"] = file_metadata
         params["media_body"] = media
 
@@ -263,15 +260,31 @@ def main():
     drive_service = get_drive_service()
     soap_client = JustRoSoapClient(URL_WSDL)
 
-    # 1. DESCĂRCARE DIRECTĂ A INDEXULUI MASTER (Folosind ID-ul XML_STORAGE_INDEX)
+    # 1. DESCĂRCARE DIRECTĂ A INDEXULUI MASTER (Filosofie zero hardcoding via API / Env)
     print("\n⚡ Construire Index Virtual LIVE...", flush=True)
     fisiere_explicite = set()
     nume_index_local = "index_xml.json.gz"
     
+    # Preluăm variabila publică direct din mediul de rulare, dacă există
+    id_index_drive = os.getenv("XML_STORAGE_INDEX")
+    
     try:
-        if XML_STORAGE_INDEX:
-            print(f"📥 Descărcare Master Index (ID: {XML_STORAGE_INDEX})...", flush=True)
-            request = drive_service.files().get_media(fileId=XML_STORAGE_INDEX)
+        # Dacă nu o avem în variabile de mediu, o găsim dinamic după nume
+        if not id_index_drive:
+            print(f"🔍 Se caută '{nume_index_local}' pe Google Drive...", flush=True)
+            rezultat_cautare = drive_service.files().list(
+                q=f"name='{nume_index_local}' and trashed=false",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+                fields="files(id, name)"
+            ).execute()
+            fisiere_gasite = rezultat_cautare.get('files', [])
+            if fisiere_gasite:
+                id_index_drive = fisiere_gasite[0]['id']
+
+        if id_index_drive:
+            print(f"📥 Descărcare Master Index (ID: {id_index_drive})...", flush=True)
+            request = drive_service.files().get_media(fileId=id_index_drive)
             
             with open(nume_index_local, "wb") as f:
                 f.write(request.execute())
@@ -281,7 +294,7 @@ def main():
                 fisiere_explicite = set(fisiere_map.keys())
             print(f"✅ Index Virtual generat cu succes! Total fișiere cunoscute: {len(fisiere_explicite):,}", flush=True)
         else:
-            print(f"⚠️ ID-ul XML_STORAGE_INDEX lipsește. Se începe cu un index gol.", flush=True)
+            print(f"⚠️ Nu s-a găsit indexul pe Drive. Se începe cu un index gol.", flush=True)
 
     except Exception as e:
         print(f"⚠️ Eroare la descărcarea/citirea Index-ului Master: {e}. Se va continua cu index gol.", flush=True)
