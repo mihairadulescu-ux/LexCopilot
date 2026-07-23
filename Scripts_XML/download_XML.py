@@ -3,6 +3,7 @@ import sys
 import time
 import json
 import re
+import socket
 from pathlib import Path
 
 # ==============================================================================
@@ -44,7 +45,8 @@ except ImportError:
 # ==============================================================================
 # CONFIGURARE CONSTANTE & ENDPOINT WSDL
 # ==============================================================================
-URL_WSDL = "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
+URL_HOST = "legislatie.just.ro"
+URL_WSDL = f"http://{URL_HOST}/apiws/FreeWebService.svc?wsdl"
 REZULTATE_PER_PAGINA = 10
 
 # PRELUARE ANI DIN ARGUMENTELE LINIEI DE COMANDĂ (PENTRU GITHUB ACTIONS MATRIX)
@@ -62,6 +64,17 @@ else:
     AN_START = 1990
     AN_END = 2026
 
+
+# ==============================================================================
+# VERIFICARE DNS (DEBUG PENTRU GITHUB ACTIONS)
+# ==============================================================================
+def verifica_dns(host):
+    print(f"🔍 Verificare DNS pentru {host}...", flush=True)
+    try:
+        ip = socket.gethostbyname(host)
+        print(f"✅ DNS OK: {host} rezolvat la {ip}", flush=True)
+    except Exception as e:
+        print(f"❌ Eroare DNS pentru {host}: {e}", flush=True)
 
 # ==============================================================================
 # AUTENTIFICARE GOOGLE DRIVE API
@@ -106,9 +119,24 @@ class JustRoSoapClient:
     def __init__(self, wsdl_url):
         self.wsdl_url = wsdl_url
         print(f"🌐 Inițializare client SOAP WSDL: {self.wsdl_url}...", flush=True)
-        self.client = Client(self.wsdl_url)
-        self.token = None
-        self.renoieste_token()
+
+        # Mecanism robust de retry pentru inițializarea WSDL (protejează contra picajelor temporare)
+        for incercare in range(5):
+            try:
+                self.client = Client(self.wsdl_url)
+                print("✅ WSDL încărcat cu succes!", flush=True)
+                self.token = None
+                self.renoieste_token()
+                return
+
+            except Exception as e:
+                print(
+                    f"⚠️ Eroare încărcare WSDL ({incercare+1}/5): {e}",
+                    flush=True
+                )
+                time.sleep(10)
+
+        raise RuntimeError("Nu s-a putut încărca WSDL după 5 încercări")
 
     def renoieste_token(self):
         """Preluare sau reîmprospătare token de sesiune."""
@@ -232,6 +260,9 @@ def main():
     print("============================================================", flush=True)
     print(f"🚀 PORNIRE DESCĂRCARE XML JUST.RO | INTERVAL ANI: {AN_START} - {AN_END}", flush=True)
     print("============================================================", flush=True)
+
+    # 0. Testare proactivă a rezoluției DNS înainte de a ne arunca în WSDL
+    verifica_dns(URL_HOST)
 
     drive_service = get_drive_service()
     soap_client = JustRoSoapClient(URL_WSDL)
