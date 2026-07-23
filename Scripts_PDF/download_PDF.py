@@ -5,12 +5,24 @@ import time
 import socket
 import json
 import urllib.request
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+
+# ======================================================================
+# CONFIGURARE CRITICĂ PENTRU AFIȘARE LOGURI LIVE (NO-BUFFERING)
+# ======================================================================
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
+def log(mesaj=""):
+    """Afiseaza mesajul si forteaza trimiterea instantanee catre consola GitHub Actions."""
+    print(mesaj, flush=True)
+    sys.stdout.flush()
 
 # Setăm timeout global la nivel de rețea
 socket.setdefaulttimeout(45.0)
+
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
 # ======================================================================
 # CONFIGURARE ȘI AUTENTIFICARE CLOUD
@@ -20,11 +32,10 @@ CALE_JURNAL = "jurnal_descarcari_pdf.csv"
 def obtine_serviciu_drive():
     """Inițializează conexiunea securizată cu Google Drive API via Service Account."""
     info_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    # CORECȚIE: Citim DRIVE_FOLDER_PDF, exact așa cum este trimisă din noul YML
     id_folder_master = os.getenv("DRIVE_FOLDER_PDF")
     
     if not info_json or not id_folder_master:
-        print("🛑 Eroare critică: Variabilele de mediu (Secretele) lipsesc!")
+        log("🛑 Eroare critică: Variabilele de mediu (Secretele) lipsesc!")
         sys.exit(1)
         
     try:
@@ -32,9 +43,9 @@ def obtine_serviciu_drive():
             json.loads(info_json),
             scopes=["https://www.googleapis.com/auth/drive"]
         )
-        return build("drive", "v3", credentials=credențiale), id_folder_master
+        return build("drive", "v3", credentials=credențiale, cache_discovery=False), id_folder_master
     except Exception as e:
-        print(f"🛑 Eroare la autentificarea în Google Drive: {e}")
+        log(f"🛑 Eroare la autentificarea în Google Drive: {e}")
         sys.exit(1)
 
 # ======================================================================
@@ -57,9 +68,9 @@ def incarca_fisiere_inexistente_din_jurnal(cale_csv=CALE_JURNAL):
                 status = rand.get('Status', '').strip()
                 if status == 'Neexistent' and nume_fisier:
                     fisiere_moarte.add(nume_fisier)
-        print(f"🧠 [Cache Inteligent] Am încărcat {len(fisiere_moarte)} sufixe moarte din trecut pentru skip instant.")
+        log(f"🧠 [Cache Inteligent] Am încărcat {len(fisiere_moarte)} sufixe moarte din trecut pentru skip instant.")
     except Exception as e:
-        print(f"⚠️ Nu s-a putut citi istoricul din CSV pentru skip: {e}")
+        log(f"⚠️ Nu s-a putut citi istoricul din CSV pentru skip: {e}")
     return fisiere_moarte
 
 def scrie_in_jurnal(fisier, an, numar, sufix, status, cale_csv=CALE_JURNAL):
@@ -79,7 +90,7 @@ def scrie_in_jurnal(fisier, an, numar, sufix, status, cale_csv=CALE_JURNAL):
                 'Status': status
             })
     except Exception as e:
-        print(f"⚠️ Eroare la scrierea în jurnalul CSV: {e}")
+        log(f"⚠️ Eroare la scrierea în jurnalul CSV: {e}")
 
 # ======================================================================
 # LOGICĂ DE DETECȚIE DRIVE
@@ -89,8 +100,10 @@ def scaneaza_pdf_existente_in_drive(serviciu, id_folder_master, an_tinta):
     fisiere_existente = set()
     interogare = f"'{id_folder_master}' in parents and name contains 'MO_PI_{an_tinta}' and mimeType = 'application/pdf' and trashed = false"
     
+    log(f"🔍 [Drive API] Scanăm folderele pentru anul {an_tinta}...")
     try:
         pag_token = None
+        
         while True:
             rezultat = serviciu.files().list(
                 q=interogare,
@@ -100,15 +113,17 @@ def scaneaza_pdf_existente_in_drive(serviciu, id_folder_master, an_tinta):
                 pageToken=pag_token
             ).execute()
             
-            for f in rezultat.get('files', []):
+            fisiere_lot = rezultat.get('files', [])
+            for f in fisiere_lot:
                 fisiere_existente.add(f['name'])
                 
-            # CORECȚIE TYPO: Schimbat 'resultado' în 'rezultat'
             pag_token = rezultat.get('nextPageToken')
+            log(f"   ├─ Pachet scanat: +{len(fisiere_lot)} PDF-uri găsite (Total acum: {len(fisiere_existente)})")
+            
             if not pag_token:
                 break
     except Exception as e:
-        print(f"⚠️ Eroare la scanarea Drive pentru anul {an_tinta}: {e}")
+        log(f"⚠️ Eroare la scanarea Drive pentru anul {an_tinta}: {e}")
         
     return fisiere_existente
 
@@ -116,8 +131,12 @@ def scaneaza_pdf_existente_in_drive(serviciu, id_folder_master, an_tinta):
 # FUNCȚIA PRINCIPALĂ DE RULARE (PROCESUL INDUSTRIAL)
 # ======================================================================
 def ruleaza_pipeline_pdf():
+    log("======================================================================")
+    log("🚀 PORNIRE PIPELINE DESCARCARE PDF MO_PI")
+    log("======================================================================")
+
     if len(sys.argv) < 2:
-        print("🛑 Eroare: Lipsesc anii ca parametru în execuție! (Ex: python script.py 2002 2003)")
+        log("🛑 Eroare: Lipsesc anii ca parametru în execuție! (Ex: python script.py 2002 2003)")
         sys.exit(1)
         
     ani_argument = sys.argv[1:]
@@ -126,18 +145,18 @@ def ruleaza_pipeline_pdf():
     else:
         ani_procesare = ani_argument
 
-    print(f"🎯 [Matrice PDF] Interceptat interval ani: {ani_procesare}")
+    log(f"🎯 [Matrice PDF] Interceptat interval ani: {ani_procesare}")
     
     serviciu_drive, id_folder_master = obtine_serviciu_drive()
     fisiere_de_sarit = incarca_fisiere_inexistente_din_jurnal()
 
     for an in ani_procesare:
-        print(f"\n======================================================================")
-        print(f"📅 PORNIRE PROCESARE AN PDF: {an}")
-        print(f"======================================================================")
+        log("\n======================================================================")
+        log(f"📅 PORNIRE PROCESARE AN PDF: {an}")
+        log("======================================================================")
         
         fisiere_in_drive = scaneaza_pdf_existente_in_drive(serviciu_drive, id_folder_master, an)
-        print(f"📦 Identificate {len(fisiere_in_drive)} PDF-uri fizice în Drive pentru anul {an}.")
+        log(f"📦 Identificate {len(fisiere_in_drive)} PDF-uri fizice în Drive pentru anul {an}.")
 
         limita_numere = 1500 
         numar_curent = 1
@@ -155,7 +174,7 @@ def ruleaza_pipeline_pdf():
                 url_sursa = f"http://legislatie.just.ro/Public/AfisareActPdf?id={an}_{numar_curent}{sufix}"
                 cale_temporara_locala = f"/tmp/{nume_pdf}"
                 
-                print(f"⏳ Solicitare server: {nume_pdf}...")
+                log(f"⏳ Solicitare server: {nume_pdf}...")
                 
                 try:
                     urllib.request.urlretrieve(url_sursa, cale_temporara_locala)
@@ -165,7 +184,7 @@ def ruleaza_pipeline_pdf():
                             antet = f_test.read(4)
                             
                         if antet == b'%PDF':
-                            print(f"    🚀 Succes! Se încarcă în Google Drive...")
+                            log(f"    🚀 Succes! Se încarcă în Google Drive...")
                             metadata_fisier = {'name': nume_pdf, 'parents': [id_folder_master]}
                             media = MediaFileUpload(cale_temporara_locala, mimetype='application/pdf')
                             
@@ -175,20 +194,20 @@ def ruleaza_pipeline_pdf():
                             if os.path.exists(cale_temporara_locala):
                                 os.remove(cale_temporara_locala)
                         else:
-                            print(f"    ❌ [HTML View] Neexistent pe server.")
+                            log(f"    ❌ [HTML View] Neexistent pe server.")
                             scrie_in_jurnal(nume_pdf, an, numar_curent, sufix, "Neexistent")
                             if os.path.exists(cale_temporara_locala):
                                 os.remove(cale_temporara_locala)
                                 
-                    time.sleep(0.5)
+                    time.sleep(0.3)
                     
                 except Exception as e:
-                    print(f"    🚨 Eroare rețea/server pentru {nume_pdf}: {e}")
-                    time.sleep(2)
+                    log(f"    🚨 Eroare rețea/server pentru {nume_pdf}: {e}")
+                    time.sleep(1.5)
                     
             numar_curent += 1
 
-    print("\n🎉 Rulare completă! Toate lacunele nerezolvate au fost analizate și curățate.")
+    log("\n🎉 Rulare completă! Toate lacunele nerezolvate au fost analizate și curățate.")
 
 if __name__ == "__main__":
     ruleaza_pipeline_pdf()
