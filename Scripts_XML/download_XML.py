@@ -21,9 +21,11 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+# Importăm și XML_STORAGE_INDEX, variabila care ține ID-ul indexului master
 from drive_config import (
     FOLDERE_XML_IDS,
     FOLDER_TEMP_INDEXES_ID,
+    XML_STORAGE_INDEX,
     get_file_params,
     get_list_params,
 )
@@ -49,7 +51,7 @@ URL_HOST = "legislatie.just.ro"
 URL_WSDL = f"http://{URL_HOST}/apiws/FreeWebService.svc?wsdl"
 REZULTATE_PER_PAGINA = 10
 
-# PRELUARE ANI DIN ARGUMENTELE LINIEI DE COMANDĂ (PENTRU GITHUB ACTIONS MATRIX)
+# PRELUARE ANI DIN ARGUMENTELE LINIEI DE COMANDĂ
 if len(sys.argv) >= 3:
     AN_START = int(sys.argv[1])
     AN_END = int(sys.argv[2])
@@ -66,7 +68,7 @@ else:
 
 
 # ==============================================================================
-# VERIFICARE DNS (DEBUG PENTRU GITHUB ACTIONS)
+# VERIFICARE DNS (DEBUG)
 # ==============================================================================
 def verifica_dns(host):
     print(f"🔍 Verificare DNS pentru {host}...", flush=True)
@@ -80,7 +82,6 @@ def verifica_dns(host):
 # AUTENTIFICARE GOOGLE DRIVE API
 # ==============================================================================
 def get_drive_service():
-    """Autentificare în Google Drive API."""
     creds_json = (
         os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
         or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
@@ -120,7 +121,6 @@ class JustRoSoapClient:
         self.wsdl_url = wsdl_url
         print(f"🌐 Inițializare client SOAP WSDL: {self.wsdl_url}...", flush=True)
 
-        # Mecanism robust de retry pentru inițializarea WSDL (protejează contra picajelor temporare)
         for incercare in range(5):
             try:
                 self.client = Client(self.wsdl_url)
@@ -128,18 +128,13 @@ class JustRoSoapClient:
                 self.token = None
                 self.renoieste_token()
                 return
-
             except Exception as e:
-                print(
-                    f"⚠️ Eroare încărcare WSDL ({incercare+1}/5): {e}",
-                    flush=True
-                )
+                print(f"⚠️ Eroare încărcare WSDL ({incercare+1}/5): {e}", flush=True)
                 time.sleep(10)
 
         raise RuntimeError("Nu s-a putut încărca WSDL după 5 încercări")
 
     def renoieste_token(self):
-        """Preluare sau reîmprospătare token de sesiune."""
         print("🔑 Solicitare Token nou de la Just.ro...", flush=True)
         for incercare in range(3):
             try:
@@ -148,13 +143,12 @@ class JustRoSoapClient:
                     print(f"✅ Token obținut cu succes!", flush=True)
                     return True
             except Exception as e:
-                print(f"⚠️ Eroare la obținerea token-ului (încercarea {incercare+1}/3): {e}", flush=True)
+                print(f"⚠️ Eroare obținere token ({incercare+1}/3): {e}", flush=True)
                 time.sleep(2)
         print("❌ Nu s-a putut obține token-ul după 3 încercări!", flush=True)
         return False
 
     def descarca_pagina(self, an, pagina):
-        """Interogare pagină folosind SearchModel."""
         for incercare in range(3):
             try:
                 search_model = self.client.factory.create('SearchModel')
@@ -175,10 +169,9 @@ class JustRoSoapClient:
 
 
 # ==============================================================================
-# SELECTARE FOLDER DESTINAȚIE PE ANI (SHARED DRIVES)
+# SELECTARE FOLDER DESTINAȚIE PE ANI
 # ==============================================================================
 def obtine_folder_id_pentru_an(an):
-    """Returnează ID-ul de folder adecvat în funcție de an."""
     if an < 2000:
         return FOLDERE_XML_IDS[0]
     elif an < 2010:
@@ -204,8 +197,9 @@ def salveaza_xml_in_drive(service, continut_xml, nume_fisier, folder_id):
             "parents": [folder_id]
         }
 
-        # MODIFICARE: Adăugat argumentul obligatoriu nume_fisier
         params = get_file_params(nume_fisier)
+        # ELIMINĂM drive_id care cauzează eroarea la Google API
+        params.pop("drive_id", None) 
         params["body"] = file_metadata
         params["media_body"] = media
 
@@ -239,8 +233,9 @@ def salveaza_micro_index(service, flag_updates):
             "parents": [FOLDER_TEMP_INDEXES_ID]
         }
 
-        # MODIFICARE: Adăugat argumentul obligatoriu nume_temp
         params = get_file_params(nume_temp)
+        # ELIMINĂM drive_id
+        params.pop("drive_id", None)
         params["body"] = file_metadata
         params["media_body"] = media
 
@@ -263,28 +258,38 @@ def main():
     print(f"🚀 PORNIRE DESCĂRCARE XML JUST.RO | INTERVAL ANI: {AN_START} - {AN_END}", flush=True)
     print("============================================================", flush=True)
 
-    # 0. Testare proactivă a rezoluției DNS înainte de a ne arunca în WSDL
     verifica_dns(URL_HOST)
 
     drive_service = get_drive_service()
     soap_client = JustRoSoapClient(URL_WSDL)
 
-    # 1. GENERARE INDEX VIRTUAL LIVE (MASTER INDEX + MICRO-INDEKSI + DELTA DRIVE)
-    print("\n⚡ Construire Index Virtual LIVE (Master Index + Micro-Indecși + Delta Drive)...", flush=True)
+    # 1. DESCĂRCARE DIRECTĂ A INDEXULUI MASTER (Folosind ID-ul XML_STORAGE_INDEX)
+    print("\n⚡ Construire Index Virtual LIVE...", flush=True)
     fisiere_explicite = set()
+    nume_index_local = "index_xml.json.gz"
+    
     try:
-        # MODIFICARE: Apelarea funcției corecte din XML_INDEX_READER
-        fisiere_map = XML_INDEX_READER.incarc_index_master_gz("index_xml.json.gz")
-        if fisiere_map:
-            fisiere_explicite = set(fisiere_map.keys())
-        print(f"✅ Index Virtual generat cu succes! Total fișiere cunoscute: {len(fisiere_explicite):,}", flush=True)
+        if XML_STORAGE_INDEX:
+            print(f"📥 Descărcare Master Index (ID: {XML_STORAGE_INDEX})...", flush=True)
+            request = drive_service.files().get_media(fileId=XML_STORAGE_INDEX)
+            
+            with open(nume_index_local, "wb") as f:
+                f.write(request.execute())
+                
+            fisiere_map = XML_INDEX_READER.incarc_index_master_gz(nume_index_local)
+            if fisiere_map:
+                fisiere_explicite = set(fisiere_map.keys())
+            print(f"✅ Index Virtual generat cu succes! Total fișiere cunoscute: {len(fisiere_explicite):,}", flush=True)
+        else:
+            print(f"⚠️ ID-ul XML_STORAGE_INDEX lipsește. Se începe cu un index gol.", flush=True)
+
     except Exception as e:
-        print(f"⚠️ Eroare la generarea Index-ului Virtual: {e}. Se va continua cu index gol.", flush=True)
+        print(f"⚠️ Eroare la descărcarea/citirea Index-ului Master: {e}. Se va continua cu index gol.", flush=True)
 
     micro_updates = {}
     fisiere_descarcate_sesiune = 0
 
-    # 2. Parcurgere doar a anilor desemnați
+    # 2. PARCURGERE ANI
     for an in range(AN_START, AN_END + 1):
         folder_destinatie_id = obtine_folder_id_pentru_an(an)
         pagina = 1
@@ -297,34 +302,29 @@ def main():
         while True:
             nume_xml = f"brut_legislatie_{an}_pag{pagina}.xml"
 
-            # 3. VERIFICARE ANTI-DUPLICARE (Skip instant pe paginile care EXISTĂ deja)
             if nume_xml in fisiere_explicite or nume_xml in micro_updates:
                 consecutive_skips += 1
                 pagini_sarite_an_curent += 1
                 pagina += 1
                 
-                # Dacă găsim 25 de pagini la rând care există deja în indexul LIVE, trecem la anul următor!
                 if consecutive_skips > 25:
-                    print(f"⏭️ FAST-FORWARD: Găsite 25 pagini consecutive existente în Indexul Virtual pentru {an}. An marcat complet!", flush=True)
+                    print(f"⏭️ FAST-FORWARD: Găsite 25 pagini consecutive existente în Index. An marcat complet!", flush=True)
                     break
                 continue
 
-            consecutive_skips = 0  # Resetăm numărătorul la prima pagină lipsă
+            consecutive_skips = 0 
             
-            # Dacă am trecut de Skip, înseamnă că am găsit prima pagină NOUĂ / LIPSĂ!
             if pagini_sarite_an_curent > 0 and pagini_descarcate_an_curent == 0:
                 print(f"⏩ Resume automat: S-a făcut Skip peste {pagini_sarite_an_curent} pagini existente. Se reia descărcarea de la Pagina {pagina}...", flush=True)
 
             print(f"📥 Descărcare Just.ro: An={an}, Pagina={pagina} -> {nume_xml}...", flush=True)
             continut_xml = soap_client.descarca_pagina(an, pagina)
 
-            # SINGURA CONDIȚIE DE OPRIRE A ANULUI: Răspuns gol de la serverul Just.ro!
             if not continut_xml or "Legi[] = None" in continut_xml or len(continut_xml.strip()) < 50:
                 total_pagini_an = pagina - 1
-                print(f"ℹ️ S-au terminat paginile pentru anul {an} la pagina {total_pagini_an} (Existente în Index: {pagini_sarite_an_curent}, Descărcate Noi: {pagini_descarcate_an_curent}).", flush=True)
+                print(f"ℹ️ S-au terminat paginile pentru anul {an} la pagina {total_pagini_an} (Existente: {pagini_sarite_an_curent}, Descărcate Noi: {pagini_descarcate_an_curent}).", flush=True)
                 break
 
-            # Salvare în Drive
             file_id = salveaza_xml_in_drive(drive_service, continut_xml, nume_xml, folder_destinatie_id)
 
             if file_id:
