@@ -5,10 +5,19 @@ import json
 import socket
 import re
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-print("============================================================", flush=True)
-print("🏷️ SCRIPT DEDICAT PENTRU REDENUMIREA FIȘIERELOR LEGACY (brut_legislatie_ -> brut_XML_)", flush=True)
-print("============================================================", flush=True)
+# Standardul pentru loguri vizibile live în GitHub Actions
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
+def print_log(msg):
+    print(msg, flush=True)
+    sys.stdout.flush()
+
+print_log("============================================================")
+print_log("🏷️ REDENUMIRE RAPIDĂ DIN INDEX MASTER (brut_legislatie -> brut_XML)")
+print_log("============================================================")
 
 socket.setdefaulttimeout(30)
 
@@ -23,14 +32,11 @@ if str(DIRECTOR_CURENT) not in sys.path:
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
-from drive_config import (
-    FOLDERE_XML_IDS,
-    get_file_params,
-    get_list_params,
-)
+from drive_config import get_file_params
+from XML_INDEX_READER import creeaza_cititor_index
 
-BATCH_SIZE = 500      # Număr de redenumiri per lot
-PAUZA_SEGUNDE = 5     # Redenumirea e foarte ușoară pentru Drive, ajung 5 secunde pauză
+BATCH_SIZE = 2000       # Raportăm progresul la fiecare 2.000 de redenumiri
+MAX_WORKERS = 15        # 15 conexiuni paralele simultane către Drive API
 
 
 def get_drive_service():
@@ -41,7 +47,7 @@ def get_drive_service():
     )
 
     if not creds_json:
-        print("❌ NU S-A GĂSIT SECRETUL GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
+        print_log("❌ NU S-A GĂSIT SECRETUL GOOGLE_SERVICE_ACCOUNT_JSON!")
         sys.exit(1)
 
     try:
@@ -51,56 +57,22 @@ def get_drive_service():
         )
         return build("drive", "v3", credentials=creds, cache_discovery=False)
     except Exception as e:
-        print(f"❌ Eroare la autentificare: {e}", flush=True)
+        print_log(f"❌ Eroare la autentificare: {e}")
         sys.exit(1)
 
 
-def scaneaza_fisiere_legacy(service):
-    print("🔍 Identificare fișiere cu denumire veche (brut_legislatie_)...", flush=True)
-    fisiere_de_redenumit = []
-    pattern_vechi = re.compile(r"^brut_legislatie_(\d+)_pag(\d+)\.xml$", re.IGNORECASE)
-
-    for index_folder, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
-        print(f"   └─ Scanăm Folder [{index_folder}/{len(FOLDERE_XML_IDS)}] ID: {folder_id}...", flush=True)
-        page_token = None
-        # Căutăm direct fișierele care încep cu brut_legislatie
-        query = f"'{folder_id}' in parents and name contains 'brut_legislatie_' and trashed = false"
-
-        while True:
-            try:
-                list_params = get_list_params(
-                    q=query,
-                    fields="nextPageToken, files(id, name)",
-                    pageToken=page_token,
-                    pageSize=1000,
-                )
-                response = service.files().list(**list_params).execute()
-            except Exception as e:
-                print(f"⚠️ Eroare la scanare Drive ({e}). Reîncercăm...", flush=True)
-                time.sleep(2)
-                service = get_drive_service()
-                continue
-
-            files = response.get("files", [])
-            if not files:
-                break
-
-            for f in files:
-                nume_vechi = f["name"]
-                match = pattern_vechi.match(nume_vechi)
-                if match:
-                    nume_nou = f"brut_XML_{match.group(1)}_pag{match.group(2)}.xml"
-                    fisiere_de_redenumit.append({
-                        "id": f["id"],
-                        "nume_vechi": nume_vechi,
-                        "nume_nou": nume_nou
-                    })
-
-            page_token = response.get("nextPageToken")
-            if not page_token:
-                break
-
-    return fisiere_de_redenumit
+def redenumeste_fisier_individual(item):
+    """Efectuează redenumirea unui singur fișier pe Drive."""
+    service = get_drive_service()
+    for incercare in range(3):
+        try:
+            params = get_file_params(fileId=item["id"])
+            params["body"] = {"name": item["nume_nou"]}
+            service.files().update(**params).execute()
+            return True
+        except Exception:
+            time.sleep(0.5)
+    return False
 
 
 def genereaza_bara_progres(curent, total, lungime=25):
@@ -121,39 +93,53 @@ def formateaza_timp(secunde):
 
 
 def main():
-    service = get_drive_service()
-    
-    fisiere = scaneaza_fisiere_legacy(service)
-    total_initial = len(fisiere)
+    print_log("📥 Încărcăm indexul principal din cloud...")
+    reader = creeaza_cititor_index()
+    index_data = reader.incarca_index()
 
-    if not fisiere:
-        print("\n✨ FELICITĂRI! Toate fișierele de pe Drive au deja denumirea standard brut_XML_!", flush=True)
+    fisiere_de_redenumit = []
+    pattern_vechi = re.compile(r"^brut_legislatie_(\d+)_pag(\d+)\.xml$", re.IGNORECASE)
+
+    # Interogăm direct indexul aflat în memorie (fără scanat pe Drive!)
+    print_log("⚙️ Analizăm fișierele din indexul master...")
+    for cheie, fisier in index_data.items():
+        nume_actual = fisier.get("name", "")
+        file_id = fisier.get("id")
+
+        match = pattern_vechi.match(nume_actual)
+        if match and file_id:
+            nume_nou = f"brut_XML_{match.group(1)}_pag{match.group(2)}.xml"
+            fisiere_de_redenumit.append({
+                "id": file_id,
+                "nume_vechi": nume_actual,
+                "nume_nou": nume_nou
+            })
+
+    total_initial = len(fisiere_de_redenumit)
+
+    if not total_initial:
+        print_log("\n✨ FELICITĂRI! Toate fișierele din index au deja denumirea standard brut_XML_!")
         return
 
-    print(f"\n📊 AU FOST IDENTIFICATE {total_initial:,} FIȘIERE LEGACY PENTRU REDENUMIRE!", flush=True)
-    print(f"⚡ Începem redenumirea în loturi de {BATCH_SIZE}...\n", flush=True)
+    print_log(f"\n📊 AU FOST IDENTIFICATE {total_initial:,} FIȘIERE LEGACY PENTRU REDENUMIRE!")
+    print_log(f"⚡ Începem redenumirea PARALELĂ pe {MAX_WORKERS} conexiuni...\n")
 
     redenumite_totale = 0
     timp_start = time.time()
 
-    while fisiere:
-        lot_curent = fisiere[:BATCH_SIZE]
-        fisiere = fisiere[BATCH_SIZE:]
+    while fisiere_de_redenumit:
+        lot_curent = fisiere_de_redenumit[:BATCH_SIZE]
+        fisiere_de_redenumit = fisiere_de_redenumit[BATCH_SIZE:]
 
-        succes_lot = 0
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = [
+                executor.submit(redenumeste_fisier_individual, item)
+                for item in lot_curent
+            ]
+            for future in as_completed(futures):
+                if future.result():
+                    redenumite_totale += 1
 
-        for item in lot_curent:
-            for incercare in range(3):
-                try:
-                    params = get_file_params(fileId=item["id"])
-                    params["body"] = {"name": item["nume_nou"]}
-                    service.files().update(**params).execute()
-                    succes_lot += 1
-                    break
-                except Exception:
-                    time.sleep(0.5)
-
-        redenumite_totale += succes_lot
         durata_cumulata = time.time() - timp_start
         viteză_medie = redenumite_totale / durata_cumulata if durata_cumulata > 0 else 0
         
@@ -162,18 +148,15 @@ def main():
 
         bara = genereaza_bara_progres(redenumite_totale, total_initial)
         
-        print(f"🏷️ LOT FINALIZAT: +{succes_lot} fișiere redenumite în 'brut_XML_...'", flush=True)
-        print(f"   ├─ Progres: {bara} ({redenumite_totale:,}/{total_initial:,})", flush=True)
-        print(f"   ├─ Viteză: {viteză_medie:.1f} redenumiri/secundă", flush=True)
-        print(f"   └─ Timp rămas estimat (ETA): {formateaza_timp(eta_secunde)}", flush=True)
-        print("------------------------------------------------------------", flush=True)
+        print_log(f"🏷️ BATCH PARALEL EXECUTAT: {redenumite_totale:,}/{total_initial:,}")
+        print_log(f"   ├─ Progres: {bara}")
+        print_log(f"   ├─ Viteză: {viteză_medie:.1f} redenumiri/secundă")
+        print_log(f"   └─ ETA: {formateaza_timp(eta_secunde)}")
+        print_log("------------------------------------------------------------")
 
-        if fisiere:
-            time.sleep(PAUZA_SEGUNDE)
-
-    print("\n============================================================", flush=True)
-    print(f"🎉 UNIFORMIZARE STRUCTURĂ COMPLETĂ! Total fișiere redenumite: {redenumite_totale:,} în {formateaza_timp(time.time() - timp_start)}", flush=True)
-    print("============================================================", flush=True)
+    print_log("\n============================================================")
+    print_log(f"🎉 UNIFORMIZARE STRUCTURĂ COMPLETĂ! Total redenumite: {redenumite_totale:,} în {formateaza_timp(time.time() - timp_start)}")
+    print_log("============================================================")
 
 
 if __name__ == "__main__":
