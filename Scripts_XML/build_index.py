@@ -4,12 +4,17 @@ import json
 import gzip
 
 # -------------------------------------------------------------------
-# FIX IMPORT: Adăugăm directorul scriptului în sys.path pentru ca
-# Python să poată importa 'drive_config' indiferent de working directory.
+# FIX PATH: Adăugăm folderul Root al proiectului în sys.path
+# pentru ca Python să poată importa 'drive_config.py' din RĂDĂCINĂ!
 # -------------------------------------------------------------------
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, SCRIPT_DIR)
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))  # Scripts_XML/
+ROOT_DIR = os.path.dirname(CURRENT_DIR)                  # Rădăcina proiectului
+
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+# Import din root
+from drive_config import FOLDERE_XML_IDS
 
 # Standard logare live instantanee
 sys.stdout.reconfigure(line_buffering=True)
@@ -17,7 +22,6 @@ sys.stderr.reconfigure(line_buffering=True)
 
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
-from drive_config import FOLDERE_XML_IDS
 
 NOME_INDEX_MASTER = "index_xml.json.gz"
 
