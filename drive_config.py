@@ -85,7 +85,7 @@ FOLDERE_XML_IDS = [
     "1NWe4JKhhaQ4HxFGs7FfhxnlemE0ZM2E2",
     "1JTf2oO_pBBYqWJv-FNoM8xy55uYCB7cX",
     "1_9c6ikq6SMGOBv6UNHN2zfl_WWcuid7v",
-
+    "1kLmRsgMwM00TOQXzvJuK4YwJ6FJeLRxB"
 ]
 
 # Liste de Shared Drives PDF (Pregătite pentru extinderea pe PDF-uri)
