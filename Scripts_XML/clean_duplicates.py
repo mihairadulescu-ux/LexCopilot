@@ -6,9 +6,16 @@ import socket
 import re
 from pathlib import Path
 
-print("============================================================", flush=True)
-print("🧹 SCRIPT ULTRA-RAPID IGIENIZARE DUPLICATE (BATCH API)", flush=True)
-print("============================================================", flush=True)
+# Forțăm stdout să fie ne-bufferat direct din cod
+sys.stdout.reconfigure(line_buffering=True)
+
+def print_log(msg):
+    print(msg, flush=True)
+    sys.stdout.flush()
+
+print_log("============================================================")
+print_log("🧹 SCRIPT ULTRA-RAPID IGIENIZARE DUPLICATE (BATCH API)")
+print_log("============================================================")
 
 socket.setdefaulttimeout(30)
 
@@ -42,7 +49,7 @@ def get_drive_service():
     )
 
     if not creds_json:
-        print("❌ NU S-A GĂSIT SECRETUL GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
+        print_log("❌ NU S-A GĂSIT SECRETUL GOOGLE_SERVICE_ACCOUNT_JSON!")
         sys.exit(1)
 
     try:
@@ -52,12 +59,12 @@ def get_drive_service():
         )
         return build("drive", "v3", credentials=creds, cache_discovery=False)
     except Exception as e:
-        print(f"❌ Eroare la autentificare: {e}", flush=True)
+        print_log(f"❌ Eroare la autentificare: {e}")
         sys.exit(1)
 
 
 def scaneaza_si_gaseste_duplicate(service):
-    print("🔍 [PASUL 1/2] Scanăm folderele Drive pentru identificare duplicate...", flush=True)
+    print_log("🔍 [PASUL 1/2] Scanăm folderele Drive pentru identificare duplicate...")
     raw_inventory = {}
     pattern_xml = re.compile(r"^brut_(?:XML|legislatie)_(\d+)_pag(\d+)\.xml$", re.IGNORECASE)
 
@@ -65,7 +72,7 @@ def scaneaza_si_gaseste_duplicate(service):
     timp_start_scan = time.time()
 
     for index_folder, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
-        print(f"\n📂 [{index_folder}/{len(FOLDERE_XML_IDS)}] Scanăm Folder ID: {folder_id}...", flush=True)
+        print_log(f"\n📂 [{index_folder}/{len(FOLDERE_XML_IDS)}] Scanăm Folder ID: {folder_id}...")
         page_token = None
         query = f"'{folder_id}' in parents and trashed = false"
 
@@ -79,7 +86,7 @@ def scaneaza_si_gaseste_duplicate(service):
                 )
                 response = service.files().list(**list_params).execute()
             except Exception as e:
-                print(f"⚠️ Eroare citire Drive ({e}). Reîncercăm...", flush=True)
+                print_log(f"⚠️ Eroare citire Drive ({e}). Reîncercăm...")
                 time.sleep(2)
                 service = get_drive_service()
                 continue
@@ -101,17 +108,16 @@ def scaneaza_si_gaseste_duplicate(service):
                     "_nume_fisier": nume
                 })
 
-                # Log-uri vizibile des la fiecare 2.000 fișiere
-                if total_fisiere_scanate == 1 or total_fisiere_scanate % 2000 == 0:
+                if total_fisiere_scanate == 1 or total_fisiere_scanate % 1000 == 0:
                     durata = round(time.time() - timp_start_scan, 1)
-                    print(f"   ⏳ [SCAN LIVE] Parcurse {total_fisiere_scanate:,} fișiere fizice ({durata}s)...", flush=True)
+                    print_log(f"   ⏳ [SCAN LIVE] Parcurse {total_fisiere_scanate:,} fișiere fizice ({durata}s)...")
 
             page_token = response.get("nextPageToken")
             if not page_token:
                 break
 
-    print(f"\n📊 SCANARE FINALIZATĂ: Total fișiere parcurse = {total_fisiere_scanate:,}", flush=True)
-    print("⚙️ Calculăm matricea de duplicate...", flush=True)
+    print_log(f"\n📊 SCANARE FINALIZATĂ: Total fișiere parcurse = {total_fisiere_scanate:,}")
+    print_log("⚙️ Calculăm matricea de duplicate...")
 
     grupuri_semantice = {}
     ids_de_sters = []
@@ -167,11 +173,11 @@ def main():
     total_initial = len(ids_de_sters)
 
     if not ids_de_sters:
-        print("\n✨ FELICITĂRI! Nu a fost găsit niciun duplicat pe Drive! Totul este curat.", flush=True)
+        print_log("\n✨ FELICITĂRI! Nu a fost găsit niciun duplicat pe Drive! Totul este curat.")
         return
 
-    print(f"\n📊 AU FOST IDENTIFICATE {total_initial:,} FIȘIERE DUPLICATE DE ȘTERS!", flush=True)
-    print("⚡ [PASUL 2/2] Începem ștergerea prin HTTP Batching (Pachete paralele)...\n", flush=True)
+    print_log(f"\n📊 AU FOST IDENTIFICATE {total_initial:,} FIȘIERE DUPLICATE DE ȘTERS!")
+    print_log("⚡ [PASUL 2/2] Începem ștergerea prin HTTP Batching (Pachete paralele)...\n")
 
     sters_totale = 0
     timp_start_stergere = time.time()
@@ -198,7 +204,7 @@ def main():
             try:
                 batch.execute()
             except Exception as e:
-                print(f"⚠️ Eroare la executare batch HTTP: {e}", flush=True)
+                print_log(f"⚠️ Eroare la executare batch HTTP: {e}")
                 time.sleep(2)
                 service = get_drive_service()
 
@@ -212,18 +218,18 @@ def main():
 
         bara = genereaza_bara_progres(sters_totale, total_initial)
         
-        print(f"🚀 BATCH EXECUTAT: Total curățate: {sters_totale:,}/{total_initial:,}", flush=True)
-        print(f"   ├─ Progres: {bara}", flush=True)
-        print(f"   ├─ Viteză: {viteză_medie:.1f} fișiere/secundă", flush=True)
-        print(f"   └─ ETA: {formateaza_timp(eta_secunde)}", flush=True)
-        print("------------------------------------------------------------", flush=True)
+        print_log(f"🚀 BATCH EXECUTAT: Total curățate: {sters_totale:,}/{total_initial:,}")
+        print_log(f"   ├─ Progres: {bara}")
+        print_log(f"   ├─ Viteză: {viteză_medie:.1f} fișiere/secundă")
+        print_log(f"   └─ ETA: {formateaza_timp(eta_secunde)}")
+        print_log("------------------------------------------------------------")
 
         if ids_de_sters:
             time.sleep(PAUZA_SEGUNDE)
 
-    print("\n============================================================", flush=True)
-    print(f"🎉 CURĂȚENIE INTENSIVĂ COMPLETĂ! Total fișiere șterse: {sters_totale:,} în {formateaza_timp(time.time() - timp_start_stergere)}", flush=True)
-    print("============================================================", flush=True)
+    print_log("\n============================================================")
+    print_log(f"🎉 CURĂȚENIE INTENSIVĂ COMPLETĂ! Total fișiere șterse: {sters_totale:,} în {formateaza_timp(time.time() - timp_start_stergere)}")
+    print_log("============================================================")
 
 
 if __name__ == "__main__":
