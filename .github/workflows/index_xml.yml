@@ -9,7 +9,7 @@ on:
         description: 'Bifează pentru FULL RE-INDEX complet (Stergere duplicate + Curățenie micro-indecși + Trash)'
 
   schedule:
-    - cron: '0 2 * * *'  # Rulează automat zilnic la ora 02:00 UTC (Incremental)
+    - cron: '0 2 * * *'
 
 jobs:
   build-index:
@@ -31,14 +31,15 @@ jobs:
 
       - name: Execuție Index Builder
         env:
-          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML || vars.DRIVE_FOLDER_XML }}
+          PYTHONUNBUFFERED: "1"   # Extra siguranță pentru output instant
         run: |
           VAL_LOWER=$(echo "${{ inputs.full_rebuild }}" | tr '[:upper:]' '[:lower:]')
           if [ "$VAL_LOWER" = "true" ]; then
             echo "🚀 [Strategie YML] Se execută FULL RE-INDEX COMPLET (build_index.py)..."
-            python Scripts_XML/build_index.py FULL
+            python -u Scripts_XML/build_index.py FULL
           else
             echo "⚡ [Strategie YML] Se execută RE-INDEX INCREMENTAL (build_index.py)..."
-            python Scripts_XML/build_index.py INCREMENTAL
+            python -u Scripts_XML/build_index.py INCREMENTAL
           fi
