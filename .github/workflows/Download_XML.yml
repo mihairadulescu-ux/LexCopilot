@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       an_specific:
-        description: 'Anul specific de descărcat (Lăsați gol pentru a rula pe TOATĂ matricea)'
+        description: 'Anul specific de descărcat (ex: 2024). Lăsați GOL pentru a rula pe TOATĂ matricea!'
         required: false
         default: ''
 
@@ -19,6 +19,11 @@ jobs:
       max-parallel: 2
       matrix:
         an_grup: ["1990-1999", "2000-2009", "2010-2015", "2016-2020", "2021-2026"]
+
+    # CONDIȚIE DE DEDUPLICARE:
+    # Dacă utilizatorul introduce un an specific, se execută DOAR primul grup din matrice ("1990-1999") pentru acel an specific.
+    # Dacă parametrul este GOL, se execută toate cele 5 grupuri din matrice în paralel.
+    if: ${{ github.event.inputs.an_specific == '' || matrix.an_grup == '1990-1999' }}
 
     steps:
       - name: Checkout Cod
