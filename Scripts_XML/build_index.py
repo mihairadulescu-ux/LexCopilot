@@ -85,7 +85,7 @@ def scaneaza_shared_drives_complet(service):
     total_gasite = 0
 
     for idx, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
-        print(f"  📂 Scannare Folder Drive {idx}/{len(FOLDERE_XML_IDS)} (ID: {folder_id})...", flush=True)
+        print(f"  📂 Scanare Folder Drive {idx}/{len(FOLDERE_XML_IDS)} (ID: {folder_id})...", flush=True)
         page_token = None
         count_folder = 0
 
@@ -177,14 +177,13 @@ def colecteaza_micro_indecsi(service, master_dict):
 
 
 def curata_micro_indecsi_procesati(service, lista_id_uri):
-    """Mută în Trash micro-indecșii integrați (safe delete pt. Shared Drives)."""
+    """Șterge sau mută în Trash micro-indecșii integrați."""
     if not lista_id_uri:
         return
     print(f"\n🧹 Curățare {len(lista_id_uri)} micro-indecși procesați...", flush=True)
     curatati = 0
     for fid in lista_id_uri:
         try:
-            # Mai întâi încercăm delete direct, dacă eșuează facem trashed=True
             try:
                 service.files().delete(fileId=fid, supportsAllDrives=True).execute()
             except Exception:
@@ -194,7 +193,7 @@ def curata_micro_indecsi_procesati(service, lista_id_uri):
                     supportsAllDrives=True
                 ).execute()
             curatati += 1
-        except Exception as e:
+        except Exception:
             pass
     print(f"✅ Curățați {curatati}/{len(lista_id_uri)} micro-indecși.", flush=True)
 
