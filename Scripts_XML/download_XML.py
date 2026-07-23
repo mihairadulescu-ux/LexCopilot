@@ -204,7 +204,8 @@ def salveaza_xml_in_drive(service, continut_xml, nume_fisier, folder_id):
             "parents": [folder_id]
         }
 
-        params = get_file_params()
+        # MODIFICARE: Adăugat argumentul obligatoriu nume_fisier
+        params = get_file_params(nume_fisier)
         params["body"] = file_metadata
         params["media_body"] = media
 
@@ -238,7 +239,8 @@ def salveaza_micro_index(service, flag_updates):
             "parents": [FOLDER_TEMP_INDEXES_ID]
         }
 
-        params = get_file_params()
+        # MODIFICARE: Adăugat argumentul obligatoriu nume_temp
+        params = get_file_params(nume_temp)
         params["body"] = file_metadata
         params["media_body"] = media
 
@@ -271,9 +273,10 @@ def main():
     print("\n⚡ Construire Index Virtual LIVE (Master Index + Micro-Indecși + Delta Drive)...", flush=True)
     fisiere_explicite = set()
     try:
-        index_virtual = XML_INDEX_READER.obtine_index_virtual(drive_service)
-        fisiere_map = index_virtual.get("fisiere", {})
-        fisiere_explicite = set(fisiere_map.keys())
+        # MODIFICARE: Apelarea funcției corecte din XML_INDEX_READER
+        fisiere_map = XML_INDEX_READER.incarc_index_master_gz("index_xml.json.gz")
+        if fisiere_map:
+            fisiere_explicite = set(fisiere_map.keys())
         print(f"✅ Index Virtual generat cu succes! Total fișiere cunoscute: {len(fisiere_explicite):,}", flush=True)
     except Exception as e:
         print(f"⚠️ Eroare la generarea Index-ului Virtual: {e}. Se va continua cu index gol.", flush=True)
