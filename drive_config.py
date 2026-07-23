@@ -82,7 +82,7 @@ FOLDERE_XML_IDS = [
     "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m",
     "1G7CkaoivnTR0O8mZceB0143Q6956C1-1",
     "1T2N_v81889Y7tyHUbrTSLR073YC7mGk5",
-    "1NWe4JKhhaQ4HxFGs7FfhxnlemE0ZM2E2
+    "1NWe4JKhhaQ4HxFGs7FfhxnlemE0ZM2E2",
     "1JTf2oO_pBBYqWJv-FNoM8xy55uYCB7cX"
 ]
 
