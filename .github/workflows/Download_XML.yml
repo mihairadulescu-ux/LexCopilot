@@ -9,16 +9,15 @@ on:
         default: ''
 
   schedule:
-    - cron: '0 */6 * * *'  # Rulează la fiecare 6 ore pe matricea automată
+    - cron: '0 */6 * * *'
 
 jobs:
   download-xml-matrix:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 2  # Rulează maxim 2 joburi în paralel pentru a evita rate-limiting pe Just.ro/Drive
+      max-parallel: 2
       matrix:
-        # Puteți grupa anii în intervale sau îi puteți enumera individual
         an_grup: ["1990-1999", "2000-2009", "2010-2015", "2016-2020", "2021-2026"]
 
     steps:
@@ -37,13 +36,13 @@ jobs:
 
       - name: Execuție Script Descărcare XML
         env:
-          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML || vars.DRIVE_FOLDER_XML }}
           SOAP_SEARCH_ENDPOINT: ${{ secrets.SOAP_SEARCH_ENDPOINT || vars.SOAP_SEARCH_ENDPOINT }}
           AN_SPECIFIC_INPUT: ${{ inputs.an_specific }}
           AN_GRUP_MATRIX: ${{ matrix.an_grup }}
+          PYTHONUNBUFFERED: "1"
         run: |
-          # Dacă utilizatorul a introdus un an manual, folosim acel an, altfel folosim grupul din matrice
           IF_AN="${AN_SPECIFIC_INPUT:-$AN_GRUP_MATRIX}"
           echo "⏬ [Strategie YML] Pornire descărcare fișiere XML pentru intervalul/anul: $IF_AN"
-          python Scripts_XML/download_xml.py --interval "$IF_AN"
+          python -u Scripts_XML/download_XML.py --interval "$IF_AN"
