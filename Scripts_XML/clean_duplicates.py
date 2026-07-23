@@ -31,7 +31,7 @@ from drive_config import (
 
 BATCH_SIZE = 1000      # Procesăm 1000 de fișiere per runda majoră
 HTTP_BATCH_LIMIT = 80  # Trimitere pachete HTTP batch de câte 80 cereri
-PAUZA_SEGUNDE = 3      # Pauză scurtă între pachete
+PAUZA_SEGUNDE = 2      # Pauză scurtă între pachete
 
 
 def get_drive_service():
@@ -57,7 +57,7 @@ def get_drive_service():
 
 
 def scaneaza_si_gaseste_duplicate(service):
-    print("🔍 Scanăm folderele Drive pentru identificare duplicate...", flush=True)
+    print("🔍 [PASUL 1/2] Scanăm folderele Drive pentru identificare duplicate...", flush=True)
     raw_inventory = {}
     pattern_xml = re.compile(r"^brut_(?:XML|legislatie)_(\d+)_pag(\d+)\.xml$", re.IGNORECASE)
 
@@ -101,7 +101,8 @@ def scaneaza_si_gaseste_duplicate(service):
                     "_nume_fisier": nume
                 })
 
-                if total_fisiere_scanate % 20000 == 0:
+                # Log-uri vizibile des la fiecare 2.000 fișiere
+                if total_fisiere_scanate == 1 or total_fisiere_scanate % 2000 == 0:
                     durata = round(time.time() - timp_start_scan, 1)
                     print(f"   ⏳ [SCAN LIVE] Parcurse {total_fisiere_scanate:,} fișiere fizice ({durata}s)...", flush=True)
 
@@ -109,7 +110,8 @@ def scaneaza_si_gaseste_duplicate(service):
             if not page_token:
                 break
 
-    print(f"\n📊 TOTAL FIȘIERE SCANATE: {total_fisiere_scanate:,}. Calculăm duplicatele...", flush=True)
+    print(f"\n📊 SCANARE FINALIZATĂ: Total fișiere parcurse = {total_fisiere_scanate:,}", flush=True)
+    print("⚙️ Calculăm matricea de duplicate...", flush=True)
 
     grupuri_semantice = {}
     ids_de_sters = []
@@ -169,7 +171,7 @@ def main():
         return
 
     print(f"\n📊 AU FOST IDENTIFICATE {total_initial:,} FIȘIERE DUPLICATE DE ȘTERS!", flush=True)
-    print("⚡ Începem ștergerea prin HTTP Batching (Pachete paralele)...\n", flush=True)
+    print("⚡ [PASUL 2/2] Începem ștergerea prin HTTP Batching (Pachete paralele)...\n", flush=True)
 
     sters_totale = 0
     timp_start_stergere = time.time()
@@ -178,7 +180,6 @@ def main():
         lot_curent = ids_de_sters[:BATCH_SIZE]
         ids_de_sters = ids_de_sters[BATCH_SIZE:]
 
-        # Împărțim lotul de 1000 în sub-pachete HTTP Batch de câte 80 cereri
         for i in range(0, len(lot_curent), HTTP_BATCH_LIMIT):
             sub_pachet = lot_curent[i:i + HTTP_BATCH_LIMIT]
             
@@ -201,7 +202,7 @@ def main():
                 time.sleep(2)
                 service = get_drive_service()
 
-            time.sleep(0.2)
+            time.sleep(0.1)
 
         durata_cumulata = time.time() - timp_start_stergere
         viteză_medie = sters_totale / durata_cumulata if durata_cumulata > 0 else 0
