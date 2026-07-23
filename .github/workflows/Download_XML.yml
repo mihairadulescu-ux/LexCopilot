@@ -2,12 +2,24 @@ name: Descărcare XML Just.ro
 
 on:
   workflow_dispatch:
+    inputs:
+      an_specific:
+        description: 'Anul specific de descărcat (Lăsați gol pentru a rula pe TOATĂ matricea)'
+        required: false
+        default: ''
+
   schedule:
-    - cron: '0 */6 * * *'  # Rulează la fiecare 6 ore
+    - cron: '0 */6 * * *'  # Rulează la fiecare 6 ore pe matricea automată
 
 jobs:
-  download-xml:
+  download-xml-matrix:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 2  # Rulează maxim 2 joburi în paralel pentru a evita rate-limiting pe Just.ro/Drive
+      matrix:
+        # Puteți grupa anii în intervale sau îi puteți enumera individual
+        an_grup: ["1990-1999", "2000-2009", "2010-2015", "2016-2020", "2021-2026"]
 
     steps:
       - name: Checkout Cod
@@ -25,9 +37,13 @@ jobs:
 
       - name: Execuție Script Descărcare XML
         env:
-          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML || vars.DRIVE_FOLDER_XML }}
           SOAP_SEARCH_ENDPOINT: ${{ secrets.SOAP_SEARCH_ENDPOINT || vars.SOAP_SEARCH_ENDPOINT }}
+          AN_SPECIFIC_INPUT: ${{ inputs.an_specific }}
+          AN_GRUP_MATRIX: ${{ matrix.an_grup }}
         run: |
-          echo "⏬ [Strategie YML] Pornire descărcare fișiere XML..."
-          python Scripts_XML/download_xml.py
+          # Dacă utilizatorul a introdus un an manual, folosim acel an, altfel folosim grupul din matrice
+          IF_AN="${AN_SPECIFIC_INPUT:-$AN_GRUP_MATRIX}"
+          echo "⏬ [Strategie YML] Pornire descărcare fișiere XML pentru intervalul/anul: $IF_AN"
+          python Scripts_XML/download_xml.py --interval "$IF_AN"
