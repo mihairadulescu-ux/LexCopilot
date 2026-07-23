@@ -5,16 +5,17 @@ import json
 import socket
 import re
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Forțăm stdout să fie ne-bufferat direct din cod
 sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
 
 def print_log(msg):
     print(msg, flush=True)
     sys.stdout.flush()
 
 print_log("============================================================")
-print_log("🧹 SCRIPT ULTRA-RAPID IGIENIZARE DUPLICATE (BATCH API)")
+print_log("🚀 SCRIPT ULTRA-RAPID DUPLICATE (MULTITHREADED BATCH API)")
 print_log("============================================================")
 
 socket.setdefaulttimeout(30)
@@ -36,9 +37,9 @@ from drive_config import (
     get_list_params,
 )
 
-BATCH_SIZE = 1000      # Procesăm 1000 de fișiere per runda majoră
-HTTP_BATCH_LIMIT = 80  # Trimitere pachete HTTP batch de câte 80 cereri
-PAUZA_SEGUNDE = 2      # Pauză scurtă între pachete
+BATCH_SIZE = 2000       # Raportăm progresul la fiecare 2.000 fișiere
+HTTP_BATCH_LIMIT = 100  # Dimensiune pachet HTTP Google Drive API
+MAX_WORKERS = 10        # 10 conexiuni paralele simultane către Drive API
 
 
 def get_drive_service():
@@ -108,7 +109,7 @@ def scaneaza_si_gaseste_duplicate(service):
                     "_nume_fisier": nume
                 })
 
-                if total_fisiere_scanate == 1 or total_fisiere_scanate % 1000 == 0:
+                if total_fisiere_scanate == 1 or total_fisiere_scanate % 10000 == 0:
                     durata = round(time.time() - timp_start_scan, 1)
                     print_log(f"   ⏳ [SCAN LIVE] Parcurse {total_fisiere_scanate:,} fișiere fizice ({durata}s)...")
 
@@ -149,6 +150,31 @@ def scaneaza_si_gaseste_duplicate(service):
     return ids_de_sters
 
 
+def executa_pachet_batch(sub_pachet):
+    """Execută un pachet de până la 100 de ștergeri pe o conexiune dedicată."""
+    service = get_drive_service()
+    succese = 0
+
+    def batch_callback(request_id, response, exception):
+        nonlocal succese
+        if exception is None:
+            succese += 1
+
+    batch = service.new_batch_http_request(callback=batch_callback)
+    
+    for file_id in sub_pachet:
+        params = get_file_params(fileId=file_id)
+        params["body"] = {"trashed": True}
+        batch.add(service.files().update(**params))
+
+    try:
+        batch.execute()
+    except Exception as e:
+        time.sleep(1)
+
+    return succese
+
+
 def genereaza_bara_progres(curent, total, lungime=25):
     procent = (curent / total) * 100 if total > 0 else 100
     plini = int(lungime * curent // total) if total > 0 else lungime
@@ -177,7 +203,7 @@ def main():
         return
 
     print_log(f"\n📊 AU FOST IDENTIFICATE {total_initial:,} FIȘIERE DUPLICATE DE ȘTERS!")
-    print_log("⚡ [PASUL 2/2] Începem ștergerea prin HTTP Batching (Pachete paralele)...\n")
+    print_log(f"⚡ [PASUL 2/2] Începem ștergerea PARALELĂ cu {MAX_WORKERS} conexiuni simultane...\n")
 
     sters_totale = 0
     timp_start_stergere = time.time()
@@ -186,29 +212,20 @@ def main():
         lot_curent = ids_de_sters[:BATCH_SIZE]
         ids_de_sters = ids_de_sters[BATCH_SIZE:]
 
-        for i in range(0, len(lot_curent), HTTP_BATCH_LIMIT):
-            sub_pachet = lot_curent[i:i + HTTP_BATCH_LIMIT]
-            
-            def batch_callback(request_id, response, exception):
-                nonlocal sters_totale
-                if exception is None:
-                    sters_totale += 1
+        # Spargem lotul în sub-pachete de 100 de fișiere
+        sub_pachete = [
+            lot_curent[i:i + HTTP_BATCH_LIMIT]
+            for i in range(0, len(lot_curent), HTTP_BATCH_LIMIT)
+        ]
 
-            batch = service.new_batch_http_request(callback=batch_callback)
-            
-            for file_id in sub_pachet:
-                params = get_file_params(fileId=file_id)
-                params["body"] = {"trashed": True}
-                batch.add(service.files().update(**params))
-
-            try:
-                batch.execute()
-            except Exception as e:
-                print_log(f"⚠️ Eroare la executare batch HTTP: {e}")
-                time.sleep(2)
-                service = get_drive_service()
-
-            time.sleep(0.1)
+        # Rulăm sub-pachetele în paralel pe 10 conexiuni simultane
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = [
+                executor.submit(executa_pachet_batch, sp)
+                for sp in sub_pachete
+            ]
+            for future in as_completed(futures):
+                sters_totale += future.result()
 
         durata_cumulata = time.time() - timp_start_stergere
         viteză_medie = sters_totale / durata_cumulata if durata_cumulata > 0 else 0
@@ -218,14 +235,11 @@ def main():
 
         bara = genereaza_bara_progres(sters_totale, total_initial)
         
-        print_log(f"🚀 BATCH EXECUTAT: Total curățate: {sters_totale:,}/{total_initial:,}")
+        print_log(f"🚀 BATCH PARALEL EXECUTAT: {sters_totale:,}/{total_initial:,}")
         print_log(f"   ├─ Progres: {bara}")
         print_log(f"   ├─ Viteză: {viteză_medie:.1f} fișiere/secundă")
         print_log(f"   └─ ETA: {formateaza_timp(eta_secunde)}")
         print_log("------------------------------------------------------------")
-
-        if ids_de_sters:
-            time.sleep(PAUZA_SEGUNDE)
 
     print_log("\n============================================================")
     print_log(f"🎉 CURĂȚENIE INTENSIVĂ COMPLETĂ! Total fișiere șterse: {sters_totale:,} în {formateaza_timp(time.time() - timp_start_stergere)}")
@@ -233,4 +247,3 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
