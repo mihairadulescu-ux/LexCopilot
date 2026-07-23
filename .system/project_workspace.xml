@@ -2,8 +2,8 @@
 <project_workspace>
   <metadata>
     <project_name>Legislatie_Just_RO</project_name>
-    <version>2.0.0</version>
-    <architecture>Dynamic Environment Variables + TAR.GZ Annual Compression</architecture>
+    <version>2.1.0</version>
+    <architecture>Dynamic Environment Variables + TAR.GZ Annual Compression + GZIP Master Index</architecture>
     <python_version>3.12</python_version>
   </metadata>
 
@@ -22,15 +22,6 @@ Sistemul este un pipeline distribuit automatizat (GitHub Actions) destinat prelu
    * Dacă un an parțial descărcat primește fișiere noi ulterior, acestea sunt descărcate individual și pot fi adăugate dinamic/recomprimate în arhiva anului respectiv la runde periodice de consolidare.
 3. **Master Index Centralizat Comprimat (`index_xml.json.gz`):** Starea completă a tuturor fișierelor este menținută într-un singur punct de adevăr stocat ca JSON comprimat GZIP pe Google Drive. Indexul folosește pointeri transparenți (`archive` vs. `individual`) pentru a ști instant în ce arhivă sau fișier fizic se află fiecare pagină.
 4. **Standard de Logare Live & Runtime Python 3.12+:** Toate scripturile rulează sub Python 3.12+ cu flushing instantaneu al bufferului stdout (`sys.stdout.reconfigure(line_buffering=True)`).
-
-## 2. Configurația Mediului (Repository Variables & Secrets)
-
-| Nume Variabilă | Tip | Descriere / Format |
-| :--- | :--- | :--- |
-| `GDRIVE_SERVICE_ACCOUNT_JSON` | Secret | JSON-ul complet al Service Account-ului Google Drive. |
-| `FOLDERE_XML_RAW` | Variable | ID-urile celor 7 Shared Drive-uri XML, separate strict prin virgulă. |
-| `DRIVE_FOLDER_PDF` | Variable | ID-ul folderului/drive-ului dedicat fișierelor PDF (Monitorul Oficial Partea I). |
-| `SOAP_SEARCH_ENDPOINT` | Variable | Endpoint-ul WSDL Just.ro: `http://legislatie.just.ro/Ajust/SearchModel.svc?wsdl` |
 ]]>
   </file>
 
@@ -43,11 +34,10 @@ import sys
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
-# Citim variabila FOLDERE_XML_RAW din mediul GitHub Actions (Single Source of Truth)
+# Citim variabila FOLDERE_XML_RAW din mediul GitHub Actions
 FOLDERE_XML_RAW = os.getenv("FOLDERE_XML_RAW", "").strip()
 
 if FOLDERE_XML_RAW:
-    # Curățăm ghilimelele, spațiile și caracterele inutile din fiecare ID
     FOLDERE_XML_IDS = [
         fid.strip().strip('"').strip("'") 
         for fid in FOLDERE_XML_RAW.split(",") 
@@ -71,14 +61,10 @@ import os
 import sys
 import tarfile
 
-# Standard logare live
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
 def creeaza_sau_actualizeaza_arhiva_an(an, lista_fisiere_xml_locale, cale_iesire_tar_gz):
-    """
-    Împachetează sau adaugă o listă de fișiere XML locale într-o arhivă .tar.gz dedicată anului respectiv.
-    """
     print(f"📦 [ARCHIVE MANAGER] Se procesează arhiva pentru anul {an} ({len(lista_fisiere_xml_locale)} fișiere)...", flush=True)
     
     with tarfile.open(cale_iesire_tar_gz, "w:gz") as tar:
@@ -89,9 +75,51 @@ def creeaza_sau_actualizeaza_arhiva_an(an, lista_fisiere_xml_locale, cale_iesire
     dimensiune_mb = os.path.getsize(cale_iesire_tar_gz) / (1024 * 1024)
     print(f"✅ [ARCHIVE MANAGER] Arhiva {os.path.basename(cale_iesire_tar_gz)} a fost creată cu succes! Dimensiune: {dimensiune_mb:.2f} MB", flush=True)
     return cale_iesire_tar_gz
+]]>
+  </file>
 
-if __name__ == "__main__":
-    print("🔧 Engine Archiver pregătit. Folosiți ca modul în pipeline-ul principal.", flush=True)
+  <file path="Scripts_XML/XML_INDEX_READER.py">
+<![CDATA[
+import os
+import sys
+import json
+import gzip
+from drive_config import FOLDERE_XML_IDS
+
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
+NOME_INDEX_MASTER = "index_xml.json.gz"
+
+def incarc_index_master_gz(cale_local_sau_stream):
+    try:
+        with gzip.open(cale_local_sau_stream, "rb") as f:
+            date = json.loads(f.read().decode('utf-8'))
+            print(f"✅ [INDEX READER] Master Index încărcat cu succes ({len(date)} intrări).", flush=True)
+            return date
+    except Exception as e:
+        print(f"⚠️ [INDEX READER] Nu s-a putut citi indexul comprimat (.gz): {e}", flush=True)
+        return {}
+
+def salveaza_index_master_gz(date_index, cale_salvare):
+    try:
+        with gzip.open(cale_salvare, "wb") as f:
+            f.write(json.dumps(date_index, ensure_ascii=False, indent=2).encode('utf-8'))
+        print(f"💾 [INDEX READER] Master Index salvat comprimat la: {cale_salvare}", flush=True)
+        return True
+    except Exception as e:
+        print(f"🛑 [INDEX READER] Eroare la salvarea indexului master: {e}", flush=True)
+        return False
+
+def adauga_sau_actualizeaza_pointer_fisier(index_data, nume_fisier, an, pagina, drive_id, tip_stocare="archive", nume_arhiva=None):
+    index_data[nume_fisier] = {
+        "an": int(an),
+        "pagina": int(pagina),
+        "tip_stocare": tip_stocare,
+        "arhiva": nume_arhiva if tip_stocare == "archive" else None,
+        "cale_interna": nume_fisier if tip_stocare == "archive" else None,
+        "drive_id": drive_id
+    }
 ]]>
   </file>
 </project_workspace>
