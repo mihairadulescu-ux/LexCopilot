@@ -2,7 +2,6 @@ import os
 import sys
 import time
 import json
-import socket
 import re
 import traceback
 from pathlib import Path
@@ -27,7 +26,7 @@ from drive_config import (
     get_file_params,
 )
 
-# Revenire strictă la SUDS (Motorul SOAP oficial)
+# Motor SOAP SUDS
 try:
     from suds.client import Client
 except ImportError:
@@ -35,34 +34,38 @@ except ImportError:
     subprocess.run([sys.executable, "-m", "pip", "install", "suds-py3"], check=True)
     from suds.client import Client
 
-# Preluarea creierului care gestionează indexul
+# Import modul citire index
 try:
     import XML_INDEX_READER
 except ImportError:
     from Scripts_XML import XML_INDEX_READER
 
 # ==============================================================================
-# CONFIGURARE CONSTANTE
+# CONFIGURARE CONSTANTE & PRELUARE STRICTĂ DIN MEDIU (FĂRĂ FALLBACK-URI)
 # ==============================================================================
 URL_HOST = "legislatie.just.ro"
 URL_WSDL = f"http://{URL_HOST}/apiws/FreeWebService.svc?wsdl"
 REZULTATE_PER_PAGINA = 10
+
+# Preluare STRICTĂ din mediul de execuție
 FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES")
+XML_STORAGE_INDEX_ID = os.getenv("XML_STORAGE_INDEX")
+
+# Verificare de siguranță la pornire
+if not FOLDER_TEMP_INDEXES_ID or not XML_STORAGE_INDEX_ID:
+    print("🛑 EROARE CRITICĂ: Variabilele 'TEMPORARY_XML_INDEXES' sau 'XML_STORAGE_INDEX' nu sunt definite în mediu!", flush=True)
+    sys.exit(1)
 
 # PRELUARE ANI DIN ARGUMENTELE LINIEI DE COMANDĂ
 if len(sys.argv) >= 3:
-    AN_START = int(sys.argv[1])
-    AN_END = int(sys.argv[2])
+    AN_START, AN_END = int(sys.argv[1]), int(sys.argv[2])
 elif len(sys.argv) == 2 and "-" in sys.argv[1]:
     pasi = sys.argv[1].split("-")
-    AN_START = int(pasi[0])
-    AN_END = int(pasi[1])
+    AN_START, AN_END = int(pasi[0]), int(pasi[1])
 elif len(sys.argv) == 2 and sys.argv[1].isdigit():
-    AN_START = int(sys.argv[1])
-    AN_END = int(sys.argv[1])
+    AN_START = AN_END = int(sys.argv[1])
 else:
-    AN_START = 1990
-    AN_END = 2026
+    AN_START, AN_END = 1990, 2026
 
 
 # ==============================================================================
@@ -81,20 +84,31 @@ def get_drive_service():
                 info, scopes=["https://www.googleapis.com/auth/drive"]
             )
             return build("drive", "v3", credentials=creds)
-        except Exception:
+        except Exception as e:
+            print(f"❌ Eroare la parsarea JSON-ului Service Account: {e}", flush=True)
             sys.exit(1)
+            
+    cale_local = RADACINA_PROIECT / "service_account.json"
+    if cale_local.exists():
+        try:
+            creds = service_account.Credentials.from_service_account_file(
+                str(cale_local), scopes=["https://www.googleapis.com/auth/drive"]
+            )
+            return build("drive", "v3", credentials=creds)
+        except Exception as e:
+            print(f"❌ Eroare la citirea service_account.json local: {e}", flush=True)
+
     print("❌ Nu s-a găsit secretul GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
     sys.exit(1)
 
 
 # ==============================================================================
-# CLIENT SOAP WSDL (Arhitectura originală suds-py3 + Traceback Excepții)
+# CLIENT SOAP WSDL (SUDS)
 # ==============================================================================
 class JustRoSoapClient:
     def __init__(self, wsdl_url):
         self.wsdl_url = wsdl_url
         print(f"🌐 Inițializare client SOAP WSDL: {self.wsdl_url}...", flush=True)
-        
         for incercare in range(5):
             try:
                 self.client = Client(self.wsdl_url)
@@ -105,7 +119,6 @@ class JustRoSoapClient:
             except Exception as e:
                 print(f"⚠️ Eroare încărcare WSDL ({incercare+1}/5): {e}", flush=True)
                 time.sleep(10)
-                
         raise RuntimeError("Nu s-a putut încărca WSDL după 5 încercări")
 
     def renoieste_token(self):
@@ -124,24 +137,20 @@ class JustRoSoapClient:
     def descarca_pagina(self, an, pagina):
         for incercare in range(3):
             try:
-                # Creare model exact prin metoda WSDL
                 search_model = self.client.factory.create('SearchModel')
                 search_model.NumarPagina = pagina
                 search_model.RezultatePagina = REZULTATE_PER_PAGINA
                 search_model.SearchAn = an
-
                 raspuns = self.client.service.Search(search_model, self.token)
                 return str(raspuns)
             except Exception as e:
                 eroare_text = str(e).lower()
-                # Gestionare expirare token
                 if any(k in eroare_text for k in ["token", "expired", "unauthorized"]):
                     print("🔄 Token expirat. Se solicită un token nou...", flush=True)
                     self.renoieste_token()
                 else:
                     print(f"\n================ EXCEPȚIE SOAP (Încercarea {incercare+1}/3) ================", flush=True)
                     print(f"⚠️ Eroare la descărcarea paginii An={an}, Pagina={pagina}:", flush=True)
-                    # PRINTĂM EXACT TRACEBACK-UL BRUT DE LA SUDS
                     traceback.print_exc()
                     print("==================================================================\n", flush=True)
                 time.sleep(2)
@@ -149,13 +158,21 @@ class JustRoSoapClient:
 
 
 # ==============================================================================
-# HELPERS PENTRU GOOGLE DRIVE
+# HELPERS DRIVE & STOCARE
 # ==============================================================================
 def obtine_folder_id_pentru_an(an):
     if an < 2000: return FOLDERE_XML_IDS[0]
     elif an < 2010: return FOLDERE_XML_IDS[1] if len(FOLDERE_XML_IDS) > 1 else FOLDERE_XML_IDS[0]
     elif an < 2020: return FOLDERE_XML_IDS[2] if len(FOLDERE_XML_IDS) > 2 else FOLDERE_XML_IDS[0]
     else: return FOLDERE_XML_IDS[3] if len(FOLDERE_XML_IDS) > 3 else FOLDERE_XML_IDS[0]
+
+
+def Curata_parametri_google(params):
+    """Elimină toți parametrii interni/custom care nu sunt acceptați de API-ul Google Drive."""
+    chei_custom = ["drive_id", "tip_stocare", "arhiva", "cale_interna", "an", "pagina"]
+    for k in chei_custom:
+        params.pop(k, None)
+    return params
 
 
 def salveaza_xml_in_drive(service, continut_xml, nume_fisier, folder_id):
@@ -168,26 +185,25 @@ def salveaza_xml_in_drive(service, continut_xml, nume_fisier, folder_id):
         file_metadata = {"name": nume_fisier, "parents": [folder_id]}
 
         params = get_file_params(nume_fisier)
-        params.pop("drive_id", None)
+        params = Curata_parametri_google(params)
         params["body"] = file_metadata
         params["media_body"] = media
 
         res = service.files().create(**params).execute()
         file_id = res.get("id")
         
-        if cale_temp.exists(): cale_temp.unlink()
+        if cale_temp.exists(): 
+            cale_temp.unlink()
         return file_id
     except Exception as e:
         print(f"❌ Eroare salvare {nume_fisier}: {e}", flush=True)
-        if cale_temp.exists(): cale_temp.unlink()
+        if cale_temp.exists(): 
+            cale_temp.unlink()
         return None
 
 
 def salveaza_micro_index(service, flag_updates):
-    if not FOLDER_TEMP_INDEXES_ID:
-        print("⚠️ Nu se salvează jurnalul: lipsește TEMPORARY_XML_INDEXES din mediu!", flush=True)
-        return
-
+    """Salvează micro-indexul respectând schema completă Master Index."""
     timestamp = int(time.time() * 1000)
     nume_temp = f"temp_index_{timestamp}.json"
     data = {"flag_updates": flag_updates}
@@ -201,16 +217,18 @@ def salveaza_micro_index(service, flag_updates):
         file_metadata = {"name": nume_temp, "parents": [FOLDER_TEMP_INDEXES_ID]}
 
         params = get_file_params(nume_temp)
-        params.pop("drive_id", None)
+        params = Curata_parametri_google(params)
         params["body"] = file_metadata
         params["media_body"] = media
 
         service.files().create(**params).execute()
         print(f"🧩 Temp Index salvat: {nume_temp} ({len(flag_updates)} fișiere noi)", flush=True)
-        if cale_temp.exists(): cale_temp.unlink()
+        if cale_temp.exists(): 
+            cale_temp.unlink()
     except Exception as e:
         print(f"⚠️ Eroare la salvarea temp_index: {e}", flush=True)
-        if cale_temp.exists(): cale_temp.unlink()
+        if cale_temp.exists(): 
+            cale_temp.unlink()
 
 
 # ==============================================================================
@@ -224,70 +242,66 @@ def main():
     drive_service = get_drive_service()
     soap_client = JustRoSoapClient(URL_WSDL)
 
-    # 1. OBȚINERE MEMORIE: Master Index + temp_index-uri -> XML_INDEX_READER
+    # 1. ÎNCĂRCARE INDEX VIRTUAL LIVE
     fisiere_explicite = set()
+    fisiere_map = {}
     try:
         fisiere_map = XML_INDEX_READER.obtine_index_virtual(drive_service)
         if fisiere_map:
-            # Protecție contra indexului imbricat (extrage doar numele fișierelor)
             if len(fisiere_map) == 1 and isinstance(list(fisiere_map.values())[0], dict):
                 cheie_radacina = list(fisiere_map.keys())[0]
                 fisiere_explicite = set(fisiere_map[cheie_radacina].keys())
             else:
                 fisiere_explicite = set(fisiere_map.keys())
-            
-            print(f"✅ Găsite {len(fisiere_explicite)} fișiere descărcate anterior în indexul virtual.", flush=True)
+            print(f"✅ Index Virtual Încărcat! Găsite {len(fisiere_explicite):,} fișiere existente.", flush=True)
     except Exception as e:
         print(f"⚠️ Eroare la obținerea Indexului Virtual: {e}", flush=True)
 
     micro_updates = {}
     fisiere_descarcate_sesiune = 0
 
-    # 2. PARCURGERE ANI (Salt inteligent + Descărcare)
+    # 2. PARCURGERE ANI
     for an in range(AN_START, AN_END + 1):
         folder_destinatie_id = obtine_folder_id_pentru_an(an)
-        
-        # Extragem paginile deja descărcate PENTRU ANUL CURENT
         pagini_an_curent = []
-        pattern = re.compile(rf"brut_legislatie_{an}_pag(\d+)\.xml")
+        
+        # Căutăm paginile existente (suportă ambele denumiri în caz că există fișiere vechi)
+        pattern = re.compile(rf"(?:brut_XML_|brut_legislatie_){an}_pag(\d+)\.xml")
         
         for fisier in fisiere_explicite:
             match = pattern.match(fisier)
             if match:
                 pagini_an_curent.append(int(match.group(1)))
                 
-        # Calculăm cu ce pagină să începem (ultima găsită + 1)
+        # Calculare pagină de pornire (Resume inteligent)
         pagina = max(pagini_an_curent) + 1 if pagini_an_curent else 1
         
         print(f"\n📅 Începere procesare An: {an}...", flush=True)
         if pagini_an_curent:
-            print(f"⏩ Resume inteligent: S-au găsit {len(pagini_an_curent)} pagini existente. Se reia direct de la Pagina {pagina}.", flush=True)
+            print(f"⏩ Resume inteligent: S-au găsit {len(pagini_an_curent)} pagini existente pentru anul {an}. Se reia de la Pagina {pagina}.", flush=True)
 
         consecutive_skips = 0
 
         while True:
-            nume_xml = f"brut_legislatie_{an}_pag{pagina}.xml"
+            # DENUMIREA OFICIALĂ A FIȘIERULUI
+            nume_xml = f"brut_XML_{an}_pag{pagina}.xml"
 
-            # 3. VERIFICARE ANTI-DUPLICARE (În caz că au mai rămas goluri/suprapuneri)
             if nume_xml in fisiere_explicite or nume_xml in micro_updates:
                 consecutive_skips += 1
                 pagina += 1
                 if consecutive_skips > 25:
-                    print(f"⏭️ FAST-FORWARD: 25 pagini existente. Anul {an} marcat complet!", flush=True)
+                    print(f"⏭️ FAST-FORWARD: 25 pagini existente consecutive. Anul {an} marcat complet!", flush=True)
                     break
                 continue
 
             consecutive_skips = 0 
-            
             print(f"📥 Descărcare Just.ro: An={an}, Pagina={pagina} -> {nume_xml}...", flush=True)
             continut_xml = soap_client.descarca_pagina(an, pagina)
 
-            # Dacă eșuează din cauza WSDL (traceback printat mai sus)
             if continut_xml is None:
-                print(f"❌ Descărcarea paginii {pagina} a eșuat repetat. Ne oprim aici pentru anul {an}.", flush=True)
+                print(f"❌ Descărcarea paginii {pagina} a eșuat repetat. Oprire procesare pe anul {an}.", flush=True)
                 break
 
-            # Dacă pur și simplu nu mai sunt rezultate de la just.ro pentru acest an
             if "Legi[] = None" in continut_xml or len(continut_xml.strip()) < 50:
                 print(f"ℹ️ S-au terminat paginile pentru anul {an} la pagina {pagina - 1}.", flush=True)
                 break
@@ -295,16 +309,17 @@ def main():
             file_id = salveaza_xml_in_drive(drive_service, continut_xml, nume_xml, folder_destinatie_id)
 
             if file_id:
+                # Schema hibridă compatibilă cu Master Index
                 micro_updates[nume_xml] = {
-                    "id": file_id,
-                    "folder_id": folder_destinatie_id,
-                    "an": an,
-                    "pagina": pagina,
-                    "downloaded": True,
-                    "processed": False
+                    "an": int(an),
+                    "pagina": int(pagina),
+                    "tip_stocare": "individual",
+                    "arhiva": None,
+                    "cale_interna": None,
+                    "drive_id": file_id
                 }
                 fisiere_descarcate_sesiune += 1
-                print(f"   ✅ Salvat cu succes! [ID: {file_id[:10]}...]", flush=True)
+                print(f"   ✅ Salvat pe Drive! [ID: {file_id[:10]}...]", flush=True)
 
             if len(micro_updates) >= 20:
                 salveaza_micro_index(drive_service, micro_updates)
@@ -317,7 +332,7 @@ def main():
         salveaza_micro_index(drive_service, micro_updates)
 
     print("\n============================================================", flush=True)
-    print(f"🏁 PROCES FINALIZAT PENTRU {AN_START}-{AN_END}! Descărcate: {fisiere_descarcate_sesiune}", flush=True)
+    print(f"🏁 PROCES FINALIZAT PENTRU {AN_START}-{AN_END}! Total descărcate: {fisiere_descarcate_sesiune}", flush=True)
     print("============================================================", flush=True)
 
 if __name__ == "__main__":
