@@ -1,54 +1,59 @@
 name: Descărcare XML Just.ro
 
 on:
+  schedule:
+    # Rulează periodic (ex: în fiecare zi la miezul nopții)
+    - cron: '0 0 * * *'
   workflow_dispatch:
     inputs:
       an_specific:
-        description: 'Anul specific de descărcat (ex: 2024). Lăsați GOL pentru a rula pe TOATĂ matricea!'
+        description: 'Anul sau intervalul specific pentru descărcare (ex: 2010 sau 2010-2015)'
         required: false
         default: ''
 
-  schedule:
-    - cron: '0 */6 * * *'
-
 jobs:
   download-xml-matrix:
+    name: download-xml-matrix (${{ matrix.interval }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 2
       matrix:
-        an_grup: ["1990-1999", "2000-2009", "2010-2015", "2016-2020", "2021-2026"]
+        interval:
+          - "1990-1999"
+          - "2000-2009"
+          - "2010-2015"
+          - "2016-2020"
+          - "2021-2026"
 
     steps:
-      - name: Checkout Cod
+      - name: Checkout cod din repozitoriu
         uses: actions/checkout@v4
 
-      - name: Configurare Python 3.12
+      - name: Configurare mediu Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.11'
+          cache: 'pip'
 
-      - name: Instalare Dependențe
+      - name: Instalare dependențe Python
         run: |
           python -m pip install --upgrade pip
-          pip install google-api-python-client google-auth zeep requests suds-py3
+          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib suds-py3
 
       - name: Execuție Script Descărcare XML
         env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          # Inspecție și pasare directă a Secrets/Variables către mediul Python (os.getenv)
+          TEMPORARY_XML_INDEXES: ${{ secrets.TEMPORARY_XML_INDEXES || vars.TEMPORARY_XML_INDEXES }}
+          XML_STORAGE_INDEX: ${{ secrets.XML_STORAGE_INDEX || vars.XML_STORAGE_INDEX }}
           DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML || vars.DRIVE_FOLDER_XML }}
-          SOAP_SEARCH_ENDPOINT: ${{ secrets.SOAP_SEARCH_ENDPOINT || vars.SOAP_SEARCH_ENDPOINT }}
-          AN_SPECIFIC_INPUT: ${{ inputs.an_specific }}
-          AN_GRUP_MATRIX: ${{ matrix.an_grup }}
-          PYTHONUNBUFFERED: "1"
+          DRIVE_FOLDER_PDF: ${{ secrets.DRIVE_FOLDER_PDF || vars.DRIVE_FOLDER_PDF }}
+          METADATA_FOLDER_ID: ${{ secrets.METADATA_FOLDER_ID || vars.METADATA_FOLDER_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: |
-          if [ -n "$AN_SPECIFIC_INPUT" ] && [ "$AN_GRUP_MATRIX" != "1990-1999" ]; then
-            echo "⏭️ [SKIP] An specific detectat ($AN_SPECIFIC_INPUT). Acest slot din matrice ($AN_GRUP_MATRIX) este omis."
-            exit 0
+          AN_PARAM="${{ github.event.inputs.an_specific }}"
+          if [ -z "$AN_PARAM" ]; then
+            AN_PARAM="${{ matrix.interval }}"
           fi
-
-          IF_AN="${AN_SPECIFIC_INPUT:-$AN_GRUP_MATRIX}"
-          echo "⏬ [Strategie YML] Pornire descărcare fișiere XML pentru intervalul/anul: $IF_AN"
           
-          python -u Scripts_XML/download_XML.py "$IF_AN"
+          echo "🚀 Pornire descărcare pentru parametrul: $AN_PARAM"
+          python Scripts_XML/download_XML.py $AN_PARAM
