@@ -20,11 +20,9 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-# Importăm DOAR funcțiile și folderele sigure. 
-# NU importăm XML_STORAGE_INDEX de aici pentru a evita erorile fatale de import.
+# Importăm DOAR funcțiile și folderele sigure din drive_config
 from drive_config import (
     FOLDERE_XML_IDS,
-    FOLDER_TEMP_INDEXES_ID,
     get_file_params,
     get_list_params,
 )
@@ -37,6 +35,7 @@ except ImportError:
     subprocess.run([sys.executable, "-m", "pip", "install", "suds-py3"], check=True)
     from suds.client import Client
 
+# Importăm creierul care ține memoria sistemului
 try:
     import XML_INDEX_READER
 except ImportError:
@@ -49,6 +48,9 @@ except ImportError:
 URL_HOST = "legislatie.just.ro"
 URL_WSDL = f"http://{URL_HOST}/apiws/FreeWebService.svc?wsdl"
 REZULTATE_PER_PAGINA = 10
+
+# Preluare Folder pentru Micro-indecși direct din mediu (fără hardcoding)
+FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES")
 
 # PRELUARE ANI DIN ARGUMENTELE LINIEI DE COMANDĂ
 if len(sys.argv) >= 3:
@@ -67,7 +69,7 @@ else:
 
 
 # ==============================================================================
-# VERIFICARE DNS (DEBUG)
+# VERIFICARE DNS (DEBUG PENTRU GITHUB ACTIONS)
 # ==============================================================================
 def verifica_dns(host):
     print(f"🔍 Verificare DNS pentru {host}...", flush=True)
@@ -76,6 +78,7 @@ def verifica_dns(host):
         print(f"✅ DNS OK: {host} rezolvat la {ip}", flush=True)
     except Exception as e:
         print(f"❌ Eroare DNS pentru {host}: {e}", flush=True)
+
 
 # ==============================================================================
 # AUTENTIFICARE GOOGLE DRIVE API
@@ -182,7 +185,7 @@ def obtine_folder_id_pentru_an(an):
 
 
 # ==============================================================================
-# SALVARE ÎN GOOGLE DRIVE & MICRO-INDEX
+# SALVARE ÎN GOOGLE DRIVE & MICRO-INDEX (JURNAL TRANZACȚII)
 # ==============================================================================
 def salveaza_xml_in_drive(service, continut_xml, nume_fisier, folder_id):
     cale_temp = Path(nume_fisier)
@@ -216,8 +219,15 @@ def salveaza_xml_in_drive(service, continut_xml, nume_fisier, folder_id):
 
 
 def salveaza_micro_index(service, flag_updates):
+    """Salvează un set nou de acte descărcate în jurnalul de tranzacții."""
+    if not FOLDER_TEMP_INDEXES_ID:
+        print("⚠️ Nu s-a salvat micro-indexul: Lipsă variabilă de mediu TEMPORARY_XML_INDEXES!", flush=True)
+        return
+
     timestamp = int(time.time() * 1000)
     nume_temp = f"temp_index_{timestamp}.json"
+    
+    # Respectăm contractul de persistență: cheia "flag_updates"
     data = {"flag_updates": flag_updates}
 
     cale_temp = Path(nume_temp)
@@ -232,12 +242,12 @@ def salveaza_micro_index(service, flag_updates):
         }
 
         params = get_file_params(nume_temp)
-        params.pop("drive_id", None)  # Eliminăm parametrul care cauzează eroarea la Google API
+        params.pop("drive_id", None)
         params["body"] = file_metadata
         params["media_body"] = media
 
         service.files().create(**params).execute()
-        print(f"🧩 Micro-index salvat în Drive: {nume_temp} ({len(flag_updates)} fișiere adăugate)", flush=True)
+        print(f"🧩 Jurnal tranzacții salvat: {nume_temp} ({len(flag_updates)} fișiere noi)", flush=True)
 
         if cale_temp.exists():
             cale_temp.unlink()
@@ -260,44 +270,15 @@ def main():
     drive_service = get_drive_service()
     soap_client = JustRoSoapClient(URL_WSDL)
 
-    # 1. DESCĂRCARE DIRECTĂ A INDEXULUI MASTER (Filosofie zero hardcoding via API / Env)
-    print("\n⚡ Construire Index Virtual LIVE...", flush=True)
+    # 1. OBȚINERE MEMORIE COMPLETĂ (Deleagă logica către XML_INDEX_READER)
     fisiere_explicite = set()
-    nume_index_local = "index_xml.json.gz"
-    
-    # Preluăm variabila publică direct din mediul de rulare, dacă există
-    id_index_drive = os.getenv("XML_STORAGE_INDEX")
-    
     try:
-        # Dacă nu o avem în variabile de mediu, o găsim dinamic după nume
-        if not id_index_drive:
-            print(f"🔍 Se caută '{nume_index_local}' pe Google Drive...", flush=True)
-            rezultat_cautare = drive_service.files().list(
-                q=f"name='{nume_index_local}' and trashed=false",
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True,
-                fields="files(id, name)"
-            ).execute()
-            fisiere_gasite = rezultat_cautare.get('files', [])
-            if fisiere_gasite:
-                id_index_drive = fisiere_gasite[0]['id']
-
-        if id_index_drive:
-            print(f"📥 Descărcare Master Index (ID: {id_index_drive})...", flush=True)
-            request = drive_service.files().get_media(fileId=id_index_drive)
-            
-            with open(nume_index_local, "wb") as f:
-                f.write(request.execute())
-                
-            fisiere_map = XML_INDEX_READER.incarc_index_master_gz(nume_index_local)
-            if fisiere_map:
-                fisiere_explicite = set(fisiere_map.keys())
-            print(f"✅ Index Virtual generat cu succes! Total fișiere cunoscute: {len(fisiere_explicite):,}", flush=True)
-        else:
-            print(f"⚠️ Nu s-a găsit indexul pe Drive. Se începe cu un index gol.", flush=True)
-
+        # AICI preluăm Master + Toate tranzacțiile neconsolidate (temp_index_...)
+        fisiere_map = XML_INDEX_READER.obtine_index_virtual(drive_service)
+        if fisiere_map:
+            fisiere_explicite = set(fisiere_map.keys())
     except Exception as e:
-        print(f"⚠️ Eroare la descărcarea/citirea Index-ului Master: {e}. Se va continua cu index gol.", flush=True)
+        print(f"⚠️ Eroare critică la generarea Index-ului Virtual: {e}. Se continuă orbește.", flush=True)
 
     micro_updates = {}
     fisiere_descarcate_sesiune = 0
@@ -315,13 +296,15 @@ def main():
         while True:
             nume_xml = f"brut_legislatie_{an}_pag{pagina}.xml"
 
+            # 3. VERIFICARE ANTI-DUPLICARE
             if nume_xml in fisiere_explicite or nume_xml in micro_updates:
                 consecutive_skips += 1
                 pagini_sarite_an_curent += 1
                 pagina += 1
                 
+                # Fast-Forward: Trecem la anul următor doar dacă găsim 25 pagini la rând existente
                 if consecutive_skips > 25:
-                    print(f"⏭️ FAST-FORWARD: Găsite 25 pagini consecutive existente în Index. An marcat complet!", flush=True)
+                    print(f"⏭️ FAST-FORWARD: Găsite 25 pagini consecutive existente. An marcat complet!", flush=True)
                     break
                 continue
 
@@ -333,6 +316,7 @@ def main():
             print(f"📥 Descărcare Just.ro: An={an}, Pagina={pagina} -> {nume_xml}...", flush=True)
             continut_xml = soap_client.descarca_pagina(an, pagina)
 
+            # SINGURA CONDIȚIE DE OPRIRE: Serverul ne răspunde gol la pagina curentă
             if not continut_xml or "Legi[] = None" in continut_xml or len(continut_xml.strip()) < 50:
                 total_pagini_an = pagina - 1
                 print(f"ℹ️ S-au terminat paginile pentru anul {an} la pagina {total_pagini_an} (Existente: {pagini_sarite_an_curent}, Descărcate Noi: {pagini_descarcate_an_curent}).", flush=True)
@@ -341,6 +325,7 @@ def main():
             file_id = salveaza_xml_in_drive(drive_service, continut_xml, nume_xml, folder_destinatie_id)
 
             if file_id:
+                # Adăugăm în jurnalul de tranzacții curent
                 micro_updates[nume_xml] = {
                     "id": file_id,
                     "folder_id": folder_destinatie_id,
@@ -353,6 +338,7 @@ def main():
                 pagini_descarcate_an_curent += 1
                 print(f"   ✅ Salvat cu succes! [ID: {file_id[:10]}...]", flush=True)
 
+            # Salvăm jurnalul pe Drive o dată la 20 de fișiere descărcate
             if len(micro_updates) >= 20:
                 salveaza_micro_index(drive_service, micro_updates)
                 micro_updates = {}
@@ -360,6 +346,7 @@ def main():
             pagina += 1
             time.sleep(0.3)
 
+    # Salvăm orice fișier rămas în jurnal la final
     if micro_updates:
         salveaza_micro_index(drive_service, micro_updates)
 
