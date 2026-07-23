@@ -169,7 +169,7 @@ def executa_pachet_batch(sub_pachet):
 
     try:
         batch.execute()
-    except Exception as e:
+    except Exception:
         time.sleep(1)
 
     return succese
@@ -212,13 +212,11 @@ def main():
         lot_curent = ids_de_sters[:BATCH_SIZE]
         ids_de_sters = ids_de_sters[BATCH_SIZE:]
 
-        # Spargem lotul în sub-pachete de 100 de fișiere
         sub_pachete = [
             lot_curent[i:i + HTTP_BATCH_LIMIT]
             for i in range(0, len(lot_curent), HTTP_BATCH_LIMIT)
         ]
 
-        # Rulăm sub-pachetele în paralel pe 10 conexiuni simultane
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = [
                 executor.submit(executa_pachet_batch, sp)
@@ -247,3 +245,4 @@ def main():
 
 
 if __name__ == "__main__":
+    main()
