@@ -6,6 +6,7 @@ import socket
 import re
 from pathlib import Path
 
+# Printăm instant un header ca să știm că a pornit
 print("============================================================", flush=True)
 print("🧹 SCRIPT DEDICAT PENTRU IGIENIZARE INTENSIVĂ DUPLICATE", flush=True)
 print("============================================================", flush=True)
@@ -30,7 +31,7 @@ from drive_config import (
 )
 
 BATCH_SIZE = 500      # Câte fișiere trimite la coș per rundă
-PAUZA_SEGUNDE = 30    # Pauză între batch-uri pentru a respecta Rate Limits
+PAUZA_SEGUNDE = 15    # Pauză redusă la 15s pentru viteză sporită
 
 
 def get_drive_service():
@@ -56,11 +57,12 @@ def get_drive_service():
 
 
 def scaneaza_si_gaseste_duplicate(service):
-    print("\n🔍 Scanăm folderele Drive pentru identificare duplicate...", flush=True)
+    print("🔍 Scanăm folderele Drive pentru identificare duplicate...", flush=True)
     raw_inventory = {}
     pattern_xml = re.compile(r"^brut_(?:XML|legislatie)_(\d+)_pag(\d+)\.xml$", re.IGNORECASE)
 
     for index_folder, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
+        print(f"   └─ Folder [{index_folder}/{len(FOLDERE_XML_IDS)}] ID: {folder_id}...", flush=True)
         page_token = None
         query = f"'{folder_id}' in parents and trashed = false"
 
@@ -129,7 +131,7 @@ def scaneaza_si_gaseste_duplicate(service):
     return ids_de_sters
 
 
-def genereaza_bara_progres(curent, total, lungime=30):
+def genereaza_bara_progres(curent, total, lungime=25):
     procent = (curent / total) * 100 if total > 0 else 100
     plini = int(lungime * curent // total) if total > 0 else lungime
     bara = "█" * plini + "░" * (lungime - plini)
@@ -167,7 +169,6 @@ def main():
         ids_de_sters = ids_de_sters[BATCH_SIZE:]
 
         succes_lot = 0
-        timp_start_batch = time.time()
 
         for file_id in lot_curent:
             for incercare in range(3):
@@ -178,7 +179,7 @@ def main():
                     succes_lot += 1
                     break
                 except Exception:
-                    time.sleep(1)
+                    time.sleep(0.5)
 
         sters_totale += succes_lot
         durata_cumulata = time.time() - timp_start_stergere
@@ -188,10 +189,15 @@ def main():
         eta_secunde = (fisiere_ramase / viteză_medie) if viteză_medie > 0 else 0
 
         bara = genereaza_bara_progres(sters_totale, total_initial)
-        print(f"🚀 PROGRES: {bara} | Șterse: {sters_totale:,}/{total_initial:,} | Viteză: {viteză_medie:.1f} fișiere/s | ETA: {formateaza_timp(eta_secunde)}", flush=True)
+        
+        # Printăm pe rânduri separate ca să forțăm flush-ul din consola GitHub
+        print(f"🚀 LOT FINALIZAT: +{succes_lot} fișiere trimise la coș", flush=True)
+        print(f"   ├─ Progres: {bara} ({sters_totale:,}/{total_initial:,})", flush=True)
+        print(f"   ├─ Viteză: {viteză_medie:.1f} fișiere/secundă", flush=True)
+        print(f"   └─ Timp rămas estimat (ETA): {formateaza_timp(eta_secunde)}", flush=True)
+        print("------------------------------------------------------------", flush=True)
 
         if ids_de_sters:
-            print(f"⏳ Pauză de siguranță {PAUZA_SEGUNDE}s...", flush=True)
             time.sleep(PAUZA_SEGUNDE)
 
     print("\n============================================================", flush=True)
