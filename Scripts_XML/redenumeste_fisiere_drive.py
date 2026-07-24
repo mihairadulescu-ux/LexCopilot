@@ -2,9 +2,10 @@ import os
 import sys
 import json
 import time
+from pathlibPath import Path if 'Path' in globals() else None
 from pathlib import Path
 
-# Stream direct ne-bufferat (Live pe GitHub Actions Live Stream)
+# Stream direct ne-bufferat (Live pe GitHub Actions)
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
@@ -20,7 +21,6 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from drive_config import FOLDERE_XML_IDS
 
-# Citire strictă index transmis din CLI (ex: python redenumeste_fisiere_drive.py 1)
 INDEX_DRIVE_TARGET = None
 if len(sys.argv) >= 2 and sys.argv[1].isdigit():
     INDEX_DRIVE_TARGET = int(sys.argv[1])
@@ -61,13 +61,12 @@ def curata_masiv_batch():
     service = get_drive_service()
     total_discuri = len(FOLDERE_XML_IDS)
 
-    # SELECȚIE STRICTĂ DISCU
     if INDEX_DRIVE_TARGET is not None:
         idx_zero = INDEX_DRIVE_TARGET - 1
         if 0 <= idx_zero < total_discuri:
             discuri = [(INDEX_DRIVE_TARGET, FOLDERE_XML_IDS[idx_zero])]
             print("============================================================", flush=True)
-            print(f"⚡ [BATCH DELETE] FIXAT STRICT PE DRIVE #{INDEX_DRIVE_TARGET} din {total_discuri}", flush=True)
+            print(f"⚡ [BATCH TRASH] FIXAT STRICT PE DRIVE #{INDEX_DRIVE_TARGET} din {total_discuri}", flush=True)
             print("============================================================", flush=True)
         else:
             print(f"❌ Disc {INDEX_DRIVE_TARGET} invalid!", flush=True)
@@ -75,7 +74,7 @@ def curata_masiv_batch():
     else:
         discuri = list(enumerate(FOLDERE_XML_IDS, start=1))
         print("============================================================", flush=True)
-        print(f"⚡ [BATCH DELETE] PROCESARE TOATE CELE {total_discuri} DISCURI", flush=True)
+        print(f"⚡ [BATCH TRASH] PROCESARE TOATE CELE {total_discuri} DISCURI", flush=True)
         print("============================================================", flush=True)
 
     total_sterse = 0
@@ -87,7 +86,6 @@ def curata_masiv_batch():
 
         while True:
             try:
-                # Citim fișierele neșterse din folder
                 response = service.files().list(
                     q=f"'{folder_id}' in parents and trashed=false",
                     spaces='drive',
@@ -103,7 +101,6 @@ def curata_masiv_batch():
                     print(f"✨ Drive #{idx} este 100% gol!", flush=True)
                     break
 
-                # Pachet HTTP Batch (grupăm 100 de comenzi delete într-o singură cerere)
                 batch = service.new_batch_http_request()
 
                 def callback(request_id, response, exception):
@@ -111,11 +108,15 @@ def curata_masiv_batch():
                     if exception is None:
                         sterse_pe_disc += 1
                         total_sterse += 1
+                    else:
+                        print(f"   ⚠️ Eroare Trash: {exception}", flush=True)
 
                 for f in files:
+                    # Folosim UPDATE cu trashed: True (permisiunea implicită)
                     batch.add(
-                        service.files().delete(
+                        service.files().update(
                             fileId=f['id'],
+                            body={'trashed': True},
                             supportsAllDrives=True,
                             supportsTeamDrives=True
                         ),
@@ -123,16 +124,16 @@ def curata_masiv_batch():
                     )
 
                 batch.execute()
-                print(f"   🔥 [Drive #{idx}] Eliminat lot de {len(files)} fișiere... Total șterse pe disc: {sterse_pe_disc:,}", flush=True)
+                print(f"   🗑️ [Drive #{idx}] Aruncate la gunoi {len(files)} fișiere... Total eliminate pe disc: {sterse_pe_disc:,}", flush=True)
 
-                time.sleep(0.2)
+                time.sleep(0.1)
 
             except Exception as e:
                 print(f"⚠️ Eroare la lotul curent pe Drive #{idx}: {e}", flush=True)
                 time.sleep(1)
                 break
 
-        print(f"✅ Drive #{idx} curățat complet! Total șterse: {sterse_pe_disc:,}", flush=True)
+        print(f"✅ Drive #{idx} curățat complet! Total eliminate: {sterse_pe_disc:,}", flush=True)
 
     print("\n============================================================", flush=True)
     print(f"🏁 CURĂȚENIE FINALIZATĂ! Total fișiere eliminate: {total_sterse:,}", flush=True)
