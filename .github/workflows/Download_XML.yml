@@ -1,4 +1,4 @@
-name: Descărcare XML Just.ro
+name: Descărcare XML de pe legislatie.just.ro
 
 on:
   schedule:
