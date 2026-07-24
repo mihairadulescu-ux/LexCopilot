@@ -1,61 +1,18 @@
-name: Utilitar Matriceal - Redenumire Curată pe Ani
-run-name: ✏️ Redenumire XML (${{ github.event.inputs.matrice_ani }})
+name: Utilitar Matriceal - Curățare pe Discuri Shared Drive
+run-name: ✏️ Igienizare XML pe Discul ${{ matrix.drive_idx }}
 
 on:
   workflow_dispatch:
-    inputs:
-      matrice_ani:
-        description: 'Ani sau intervale (ex: 1990-1995, 2000, 2010-2015)'
-        required: true
-        default: '1990-2026'
 
 jobs:
-  generate-matrix:
-    name: Generare Matrice Ani Individuali
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    steps:
-      - name: Expandare Interval în Ani Unici
-        id: set-matrix
-        run: |
-          INPUT_VAL="${{ github.event.inputs.matrice_ani }}"
-          
-          python3 -c "
-          import json, re
-
-          raw_input = '''$INPUT_VAL'''
-          ani_unici = []
-
-          for bucata in raw_input.split(','):
-              bucata = bucata.strip()
-              if '-' in bucata:
-                  parts = bucata.split('-')
-                  start_str = re.sub(r'\D', '', parts[0])
-                  end_str = re.sub(r'\D', '', parts[1])
-                  
-                  if start_str and end_str:
-                      start, end = int(start_str), int(end_str)
-                      if start > end:
-                          start, end = end, start
-                      ani_unici.extend(list(range(start, end + 1)))
-              else:
-                  clean_num = re.sub(r'\D', '', bucata)
-                  if clean_num:
-                      ani_unici.append(int(clean_num))
-
-          ani_finali = sorted(list(set(ani_unici)))
-          print('matrix=' + json.dumps({'an': [str(a) for a in ani_finali]}))
-          " >> $GITHUB_OUTPUT
-
-  redenumire-xml:
-    name: Curățare Anul ${{ matrix.an }}
-    needs: generate-matrix
+  redenumire-discuri:
+    name: Curățare Shared Drive #${{ matrix.drive_idx }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 27
-      matrix: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
+      max-parallel: 7  # Toate cele 7 discuri lucrează simultan!
+      matrix:
+        drive_idx: [1, 2, 3, 4, 5, 6, 7]
 
     env:
       DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML || vars.DRIVE_FOLDER_XML }}
@@ -65,16 +22,16 @@ jobs:
       - name: Checkout cod
         uses: actions/checkout@v4
 
-      - name: Configurare Python 3.12
+      - name: Configurare Python 3.13
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.13'
 
       - name: Instalare dependențe
         run: |
           python -m pip install --upgrade pip
           pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
-      - name: Execuție Redenumire pe Anul Curent
+      - name: Execuție Curățare pe Discul ${{ matrix.drive_idx }}
         run: |
-          python Scripts_XML/redenumeste_fisiere_drive.py ${{ matrix.an }}
+          python Scripts_XML/redenumeste_fisiere_drive.py ${{ matrix.drive_idx }}
