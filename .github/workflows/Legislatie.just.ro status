@@ -1,0 +1,36 @@
+
+name: Executare Script si Notificare pe Email
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  run-and-notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descărcare cod din repo
+        uses: actions/checkout@v4
+
+      - name: Execută procesul/scriptul
+        run: |
+          # Aici rulezi comanda ta și salvezi rezultatul
+          echo "Procesul s-a finalizat cu succes la data de $(date)" > rezultat.txt
+
+      - name: Trimite e-mail cu rezultatul
+        if: always() # Rulează indiferent dacă pașii anteriori au reușit sau au eșuat
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "Rezultat Pipeline: ${{ job.status }}"
+          to: adresa_ta@email.com
+          from: "GitHub Actions <notificari@domeniu.com>"
+          body: |
+            Salut,
+            
+            Procesul s-a încheiat cu statusul: ${{ job.status }}.
+            Găsești detaliile în fișierul atașat.
+          attachments: rezultat.txt
