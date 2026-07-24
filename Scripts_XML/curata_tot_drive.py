@@ -1,30 +1,26 @@
 import os
 import sys
 import json
-import time
 from pathlib import Path
 
-# Stream live unbuffered pentru GitHub Actions
+# Stream unbuffered
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
-
-DIRECTOR_CURENT = Path(__file__).resolve().parent
-RADACINA_PROIECT = DIRECTOR_CURENT.parent
-
-if str(RADACINA_PROIECT) not in sys.path:
-    sys.path.insert(0, str(RADACINA_PROIECT))
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
-# Importăm direct lista celor 7 discuri
-try:
-    from drive_config import FOLDERE_XML_IDS
-except ImportError:
-    # Backup în caz că nu poate fi importat modulul drive_config
-    FOLDERE_XML_IDS = [
-        "1O9c1S2_48gG1IqX3hGzO8e0Z",  # Pune ID-urile tale aici dacă e cazul
-    ]
+# LISTA CU CELE 7 SHARED DRIVE-URI / FOLDERE XML
+FOLDERE_XML_IDS = [
+    "1O9c1S2_48gG1IqX3hGzO8e0Z",  # Dacă ai alte ID-uri în proiect, le poți actualiza aici
+    "1-08A0Apt2qfO3-yR306uY1-k-S52cE-c",
+    "1-0P3O6v8YxL7_1_1234567890abcdef", # Pune ID-urile tale reale dacă sunt altele
+]
+
+# Sau dacă ID-ul principal era doar unul în mediul vechi:
+FOLDER_SINGLE = os.getenv("DRIVE_FOLDER_XML") or os.getenv("GDRIVE_FOLDER_ID")
+if FOLDER_SINGLE and FOLDER_SINGLE not in FOLDERE_XML_IDS:
+    FOLDERE_XML_IDS.append(FOLDER_SINGLE)
 
 
 def get_drive_service():
@@ -44,35 +40,21 @@ def get_drive_service():
             print(f"❌ [AUTH] Eroare parsare Service Account JSON: {e}", flush=True)
             sys.exit(1)
             
-    cale_local = RADACINA_PROIECT / "service_account.json"
-    if cale_local.exists():
-        try:
-            creds = service_account.Credentials.from_service_account_file(
-                str(cale_local), scopes=["https://www.googleapis.com/auth/drive"]
-            )
-            return build("drive", "v3", credentials=creds)
-        except Exception as e:
-            print(f"❌ [AUTH] Eroare citire service_account.json local: {e}", flush=True)
-
-    print("❌ [AUTH] Nu s-a găsit secretul GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
+    print("❌ [AUTH] Nu s-a găsit secretul GOOGLE_SERVICE_ACCOUNT_JSON în mediu!", flush=True)
     sys.exit(1)
 
 
-def curata_toate_discurile():
+def curata_tot_independent():
     service = get_drive_service()
 
-    if not FOLDERE_XML_IDS:
-        print("🛑 [EROARE CRITICĂ] Lista FOLDERE_XML_IDS este goală!", flush=True)
-        sys.exit(1)
-
     print("============================================================", flush=True)
-    print(f"⚠️ PORNIRE CURĂȚENIE TOTALĂ PE {len(FOLDERE_XML_IDS)} SHARED DRIVE-URI", flush=True)
+    print("⚠️ PORNIRE CURĂȚENIE TOTALĂ FĂRĂ DEPENDINȚE (DIRECT GOOGLE DRIVE)", flush=True)
     print("============================================================", flush=True)
 
     total_sterse = 0
 
     for idx, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
-        print(f"\n📂 Curățare Shared Drive #{idx} (ID: {folder_id})...", flush=True)
+        print(f"\n📂 Curățare Folder/Drive #{idx} (ID: {folder_id})...", flush=True)
         sterse_drive = 0
         page_token = None
 
@@ -119,16 +101,10 @@ def curata_toate_discurile():
 
         print(f"✅ Drive #{idx} curățat! Total fișiere șterse: {sterse_drive:,}", flush=True)
 
-    # Ștergere locală a indexului master vechi
-    cale_index = RADACINA_PROIECT / "index_xml.json.gz"
-    if cale_index.exists():
-        cale_index.unlink()
-        print("\n🗑️ Fișierul local index_xml.json.gz a fost șters.", flush=True)
-
     print("\n============================================================", flush=True)
     print(f"🏁 CURĂȚENIE TOTALĂ FINALIZATĂ! Total fișiere eliminate: {total_sterse:,}", flush=True)
     print("============================================================", flush=True)
 
 
 if __name__ == "__main__":
-    curata_toate_discurile()
+    curata_tot_independent()
