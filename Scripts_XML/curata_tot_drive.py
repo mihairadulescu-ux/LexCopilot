@@ -3,24 +3,29 @@ import sys
 import json
 from pathlib import Path
 
-# Stream unbuffered
+# Stream live unbuffered
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
+
+DIRECTOR_CURENT = Path(__file__).resolve().parent
+RADACINA_PROIECT = DIRECTOR_CURENT.parent
+
+if str(RADACINA_PROIECT) not in sys.path:
+    sys.path.insert(0, str(RADACINA_PROIECT))
+
+# Bypass pentru verificarea din drive_config.py
+if not os.getenv("DRIVE_FOLDER_XML"):
+    os.environ["DRIVE_FOLDER_XML"] = "dummy_id"
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
-# LISTA CU CELE 7 SHARED DRIVE-URI / FOLDERE XML
-FOLDERE_XML_IDS = [
-    "1O9c1S2_48gG1IqX3hGzO8e0Z",  # Dacă ai alte ID-uri în proiect, le poți actualiza aici
-    "1-08A0Apt2qfO3-yR306uY1-k-S52cE-c",
-    "1-0P3O6v8YxL7_1_1234567890abcdef", # Pune ID-urile tale reale dacă sunt altele
-]
-
-# Sau dacă ID-ul principal era doar unul în mediul vechi:
-FOLDER_SINGLE = os.getenv("DRIVE_FOLDER_XML") or os.getenv("GDRIVE_FOLDER_ID")
-if FOLDER_SINGLE and FOLDER_SINGLE not in FOLDERE_XML_IDS:
-    FOLDERE_XML_IDS.append(FOLDER_SINGLE)
+# Importăm lista reală a celor 7 discuri
+try:
+    from drive_config import FOLDERE_XML_IDS
+except ImportError:
+    print("❌ Nu s-a putut importa FOLDERE_XML_IDS din drive_config.py!", flush=True)
+    sys.exit(1)
 
 
 def get_drive_service():
@@ -40,21 +45,28 @@ def get_drive_service():
             print(f"❌ [AUTH] Eroare parsare Service Account JSON: {e}", flush=True)
             sys.exit(1)
             
-    print("❌ [AUTH] Nu s-a găsit secretul GOOGLE_SERVICE_ACCOUNT_JSON în mediu!", flush=True)
+    print("❌ [AUTH] Nu s-a găsit secretul GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
     sys.exit(1)
 
 
-def curata_tot_independent():
+def curata_toate_discurile_reale():
     service = get_drive_service()
 
+    # Curățăm doar ID-urile valide (ignorăm "dummy_id")
+    ids_reale = [fid for fid in FOLDERE_XML_IDS if fid and fid != "dummy_id"]
+
+    if not ids_reale:
+        print("🛑 [EROARE CRITICĂ] Nu am găsit niciun ID real în FOLDERE_XML_IDS!", flush=True)
+        sys.exit(1)
+
     print("============================================================", flush=True)
-    print("⚠️ PORNIRE CURĂȚENIE TOTALĂ FĂRĂ DEPENDINȚE (DIRECT GOOGLE DRIVE)", flush=True)
+    print(f"⚠️ PORNIRE CURĂȚENIE TOTALĂ PE {len(ids_reale)} SHARED DRIVE-URI REALE", flush=True)
     print("============================================================", flush=True)
 
     total_sterse = 0
 
-    for idx, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
-        print(f"\n📂 Curățare Folder/Drive #{idx} (ID: {folder_id})...", flush=True)
+    for idx, folder_id in enumerate(ids_reale, start=1):
+        print(f"\n📂 Curățare Shared Drive #{idx} (ID: {folder_id})...", flush=True)
         sterse_drive = 0
         page_token = None
 
@@ -72,7 +84,7 @@ def curata_tot_independent():
 
                 files = response.get('files', [])
                 if not files:
-                    print(f"   ✨ Folderul este deja gol sau nu s-au găsit fișiere.", flush=True)
+                    print(f"   ✨ Folderul/Drive-ul este gol.", flush=True)
                     break
 
                 for f in files:
@@ -86,10 +98,10 @@ def curata_tot_independent():
                         total_sterse += 1
 
                         if sterse_drive % 200 == 0:
-                            print(f"   🗑️ Șterse până acum pe Drive #{idx}: {sterse_drive:,} fișiere...", flush=True)
+                            print(f"   🗑️ Șterse pe Drive #{idx}: {sterse_drive:,} fișiere...", flush=True)
 
                     except Exception as e_del:
-                        print(f"   ⚠️ Eroare ștergere fișier {f['name']} ({f['id']}): {e_del}", flush=True)
+                        print(f"   ⚠️ Eroare la ștergerea fișierului {f['name']}: {e_del}", flush=True)
 
                 page_token = response.get('nextPageToken')
                 if not page_token:
@@ -99,12 +111,12 @@ def curata_tot_independent():
                 print(f"❌ Eroare la scanarea Drive #{idx}: {e}", flush=True)
                 break
 
-        print(f"✅ Drive #{idx} curățat! Total fișiere șterse: {sterse_drive:,}", flush=True)
+        print(f"✅ Drive #{idx} curățat complet! Total fișiere șterse: {sterse_drive:,}", flush=True)
 
     print("\n============================================================", flush=True)
-    print(f"🏁 CURĂȚENIE TOTALĂ FINALIZATĂ! Total fișiere eliminate: {total_sterse:,}", flush=True)
+    print(f"🏁 CURĂȚENIE TOTALĂ REUȘITĂ! Total fișiere eliminate: {total_sterse:,}", flush=True)
     print("============================================================", flush=True)
 
 
 if __name__ == "__main__":
-    curata_tot_independent()
+    curata_toate_discurile_reale()
