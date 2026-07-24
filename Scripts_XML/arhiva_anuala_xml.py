@@ -5,7 +5,7 @@ import time
 import re
 from pathlib import Path
 
-# Unbuffered logging pentru GitHub Actions
+# Unbuffered logging pentru GitHub Actions Live Stream
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
@@ -21,10 +21,10 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from drive_config import FOLDERE_XML_IDS
 
-DIMENSIUNE_BATCH = 300
-PAUZA_SECUENTE_SEC = 4
+DIMENSIUNE_BATCH = 100
+PAUZA_SECUENTE_SEC = 2.5
 
-# Citire Index Drive din Argumente (ex: python redenumeste_fisiere_drive.py 1)
+# Citire strictă index transmis din CLI
 INDEX_DRIVE_TARGET = None
 if len(sys.argv) >= 2 and sys.argv[1].isdigit():
     INDEX_DRIVE_TARGET = int(sys.argv[1])
@@ -86,25 +86,25 @@ def redenumeste_fisiere_pe_drive():
     service = get_drive_service()
     pattern_pag = re.compile(r"_pag(\d+)\.xml", re.IGNORECASE)
 
-    # Verificăm discurile disponibile din config
-    total_discuri_config = len(FOLDERE_XML_IDS)
+    total_discuri = len(FOLDERE_XML_IDS)
 
+    # FORȚARE EXPLICITĂ PE DRIVE-UL DIN PARAMETRU
     if INDEX_DRIVE_TARGET is not None:
         idx_zero = INDEX_DRIVE_TARGET - 1
-        if idx_zero < total_discuri_config:
+        if 0 <= idx_zero < total_discuri:
             folder_id_target = FOLDERE_XML_IDS[idx_zero]
             discuri_de_procesat = [(INDEX_DRIVE_TARGET, folder_id_target)]
             print("============================================================", flush=True)
-            print(f"📂 AUDIT & REDENUMIRE PE SHARED DRIVE #{INDEX_DRIVE_TARGET} din {total_discuri_config}", flush=True)
-            print(f"   Target Folder ID: {folder_id_target}", flush=True)
+            print(f"🎯 [SCRIPT NOU] TARGET EXACT: SHARED DRIVE #{INDEX_DRIVE_TARGET} din {total_discuri}", flush=True)
+            print(f"📂 Folder ID: {folder_id_target}", flush=True)
             print("============================================================", flush=True)
         else:
-            print(f"⚠️ Indexul transmis ({INDEX_DRIVE_TARGET}) depășește numărul de discuri găsite ({total_discuri_config}). Abandon.", flush=True)
+            print(f"❌ Indexul {INDEX_DRIVE_TARGET} este invalid! Există doar {total_discuri} discuri.", flush=True)
             return
     else:
         discuri_de_procesat = list(enumerate(FOLDERE_XML_IDS, start=1))
         print("============================================================", flush=True)
-        print(f"📂 AUDIT & REDENUMIRE PE TOATE CELE {total_discuri_config} SHARED DRIVE-URI", flush=True)
+        print(f"🌐 [SCRIPT NOU] PROCESARE TOATE CELE {total_discuri} DISCURI", flush=True)
         print("============================================================", flush=True)
 
     total_evaluate = 0
@@ -139,7 +139,7 @@ def redenumeste_fisiere_pe_drive():
                         continue
                     pagina = m_pag.group(1)
 
-                    # Citim primii bytes din XML
+                    # Citim primii 4KB din XML
                     try:
                         req = service.files().get_media(fileId=f['id'], supportsAllDrives=True)
                         req.headers['Range'] = 'bytes=0-4096'
@@ -154,10 +154,9 @@ def redenumeste_fisiere_pe_drive():
 
                     nume_nou_standard = f"brut_XML_{an_real}_pag{pagina}.xml"
 
-                    # Daca este deja corect, sarim peste
                     if nume_vechi == nume_nou_standard:
                         total_deja_perfecte += 1
-                        if total_evaluate % 500 == 0:
+                        if total_evaluate % 1000 == 0:
                             print(f"   ⏳ Verificate {total_evaluate:,} fișiere pe Drive #{idx} | Corectate: {total_redenumite:,}", flush=True)
                         continue
 
@@ -176,7 +175,6 @@ def redenumeste_fisiere_pe_drive():
 
                         print(f"   ✏️ [{total_redenumite:,}] Corectat pe Drive #{idx}: '{nume_vechi}' ➡️ '{nume_nou_standard}' (An real: {an_real})", flush=True)
 
-                        # BATCH PAUSE (100 acțiuni)
                         if actiuni_in_batch >= DIMENSIUNE_BATCH:
                             print(f"\n☕ [BATCH {numar_batch} COMPLET] Pauză {PAUZA_SECUENTE_SEC}s...\n", flush=True)
                             time.sleep(PAUZA_SECUENTE_SEC)
@@ -193,10 +191,10 @@ def redenumeste_fisiere_pe_drive():
                 print(f"⚠️ Eroare la scanare Drive #{idx} ({folder_id}): {e}", flush=True)
                 break
 
-        print(f"✅ Drive #{idx} finalizat! Corectate în acest folder: {count_drive_red:,}", flush=True)
+        print(f"✅ Shared Drive #{idx} finalizat! Corectate: {count_drive_red:,}", flush=True)
 
     print("\n============================================================", flush=True)
-    print(f"🏁 CURĂȚARE FINALIZATĂ PENTRU DRIVE-UL CURENT!", flush=True)
+    print(f"🏁 FINALIZAT PENTRU DRIVE #{INDEX_DRIVE_TARGET if INDEX_DRIVE_TARGET else 'TOATE'}!", flush=True)
     print(f"📊 Evaluat: {total_evaluate:,} | Deja corecte: {total_deja_perfecte:,} | Corectate: {total_redenumite:,}", flush=True)
     print("============================================================", flush=True)
 
