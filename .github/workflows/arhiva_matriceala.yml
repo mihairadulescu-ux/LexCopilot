@@ -1,10 +1,11 @@
 name: Utilitar Matriceal - Arhivare Anuală TAR.GZ
+run-name: 📦 Arhivare XML (${{ github.event.inputs.matrice_ani }})
 
 on:
   workflow_dispatch:
     inputs:
       matrice_ani:
-        description: 'Introduceți anii și intervalele separate prin virgulă'
+        description: 'Ani sau intervale (ex: 1990, 1995-1999, 2000-2005)'
         required: true
         default: '1990, 1993, 1995-1999, 2004, 2010-2015, 2026'
 
@@ -20,7 +21,6 @@ jobs:
         run: |
           INPUT_VAL="${{ github.event.inputs.matrice_ani }}"
           
-          # Separă după virgulă și curăță spațiile
           IFS=',' read -ra ADDR <<< "$INPUT_VAL"
           JSON_ARR="["
           FIRST=true
