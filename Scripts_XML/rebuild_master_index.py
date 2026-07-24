@@ -6,11 +6,13 @@ import os
 import sys
 import json
 import time
-import gzip
+import tarfile
+import tempfile
 import io
+import re
 from pathlib import Path
 
-# Stream direct live fără buffer pentru GitHub Actions
+# Line buffering live pentru GitHub Actions
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
@@ -22,12 +24,17 @@ if str(RADACINA_PROIECT) not in sys.path:
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
-from drive_config import FOLDERE_XML_IDS, FOLDER_INDEX_ID, get_file_params, get_list_params
+from googleapiclient.http import MediaIoBaseUpload
+from drive_config import (
+    FOLDERE_XML_IDS,
+    FOLDER_INDEX_ID,
+    get_file_params,
+    get_list_params
+)
 
 
 def get_drive_service():
-    """Autentificare în Google Drive API prin Service Account JSON."""
+    """Autentificare Google Drive API."""
     creds_json = (
         os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
         or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
@@ -44,225 +51,222 @@ def get_drive_service():
         )
         return build("drive", "v3", credentials=creds)
     except Exception as e:
-        print(f"❌ [AUTH] Eroare Google Drive: {e}", flush=True)
+        print(f"❌ [AUTH] Eroare autentificare: {e}", flush=True)
         sys.exit(1)
 
 
-def descarca_json_gz_din_drive(service, file_id):
-    """Descarcă și decomprimă un fișier .gz direct din memorie."""
-    try:
-        req = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-        continut_comprimat = req.execute()
-        with gzip.GzipFile(fileobj=io.BytesIO(continut_comprimat), mode='rb') as gz:
-            text_json = gz.read().decode('utf-8')
-            return json.loads(text_json)
-    except Exception as e:
-        print(f"⚠️ Eroare la citirea MasterIndex.json.gz (ID {file_id}): {e}", flush=True)
-        return None
+def cauta_arhive_pe_drives(service):
+    """Găsește toate arhivele brut_XML_YYYY.tar.gz de pe toate Shared Drive-urile."""
+    arhive_gasite = []
+    nume_drives = [d for d in FOLDERE_XML_IDS if d]
 
-
-def descarca_json_text_din_drive(service, file_id):
-    """Descarcă un fișier JSON text necomprimat de pe Drive."""
-    try:
-        req = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-        text = req.execute().decode('utf-8')
-        if not text.strip():
-            return {}
-        return json.loads(text)
-    except Exception:
-        return {}
-
-
-def goleleste_micro_index_pe_drive(service, file_id, file_name):
-    """
-    Încearcă să golească micro-indexul pe Drive (îl lasă `{}`).
-    Dacă întâmpină erori de scriere/rețea, raportează și continuă fără să întrerupă execuția.
-    """
-    try:
-        json_gol = "{}"
-        media = MediaIoBaseUpload(
-            io.BytesIO(json_gol.encode('utf-8')),
-            mimetype='application/json'
-        )
-        params = get_file_params()
-        params["fileId"] = file_id
-        params["media_body"] = media
-        service.files().update(**params).execute()
-        print(f"   🧹 Micro-index-ul '{file_name}' a fost golit pe Drive.", flush=True)
-    except Exception as e:
-        print(f"⚠️ Ignorat: Nu s-a putut goli micro-indexul '{file_name}': {e}", flush=True)
-
-
-def scaneaza_arhive_tar_pe_discuri(service, master_data):
-    """Scanează toate Shared Drive-urile de stocare după arhive brut_XML_*.tar.gz și le mapează în MasterIndex."""
-    print("\n📦 [SCANARE ARHIVE] Parcurgere arhive .tar.gz de pe cele 7 Shared Drive-uri...", flush=True)
-    
-    for idx, drive_id in enumerate(FOLDERE_XML_IDS, start=1):
-        if not drive_id:
-            continue
+    for shared_drive_id in nume_drives:
         try:
-            q = f"'{drive_id}' in parents and name contains 'brut_XML_' and name contains '.tar.gz' and trashed=false"
+            q = "'{}' in parents and name contains 'brut_XML_' and name contains '.tar.gz' and trashed = false".format(shared_drive_id)
             params = get_list_params()
             params["q"] = q
-            params["fields"] = "files(id, name)"
-            
+            params["fields"] = "files(id, name, size)"
             res = service.files().list(**params).execute()
-            arhive_gasite = res.get("files", [])
-            
-            if arhive_gasite:
-                print(f"   🔍 Shared Drive #{idx} (ID: {drive_id[:10]}...): S-au găsit {len(arhive_gasite)} arhive.", flush=True)
-                for f_tar in arhive_gasite:
-                    file_id = f_tar["id"]
-                    nume = f_tar["name"]
-                    
-                    parts = nume.replace(".tar.gz", "").split("_")
-                    if len(parts) >= 3 and parts[2].isdigit():
-                        an = parts[2]
-                        master_data["arhive"][str(an)] = {
-                            "archive_file_id": file_id,
-                            "status": "DETECTAT_DIN_ARHIVA",
-                            "ultimul_update": time.strftime("%Y-%m-%d %H:%M:%S")
-                        }
+            files = res.get("files", [])
+            arhive_gasite.extend(files)
         except Exception as e:
-            print(f"⚠️ Eroare la scanarea Drive-ului #{idx}: {e}", flush=True)
+            print(f"⚠️ Eroare la căutarea arhivelor în folderul {shared_drive_id}: {e}", flush=True)
+
+    return arhive_gasite
 
 
-def unifica_in_master_index(reset_complet=False):
-    """Procesul principal de unificare a micro-indecșilor în MasterIndex.json.gz."""
-    if not FOLDER_INDEX_ID:
-        print("❌ [CONFIG] FOLDER_INDEX_ID / XML_STORAGE_INDEX este gol! Verifică variabilele din GitHub Secrets.", flush=True)
-        sys.exit(1)
+def citeste_toc_arhiva(service, file_id, nume_fisier):
+    """Citește Cuprinsul (TOC) dintr-o arhivă .tar.gz de pe Drive fără a descărca XML-urile."""
+    pagini_in_arhiva = {}
+    m = re.search(r"brut_XML_(\d{4})\.tar\.gz", nume_fisier)
+    an = m.group(1) if m else "UNKNOWN"
 
+    try:
+        req = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+        # Descărcare în tampon temporar pentru citirea antetelor tar.gz
+        temp_tar = tempfile.NamedTemporaryFile(delete=False)
+        temp_tar.write(req.execute())
+        temp_tar.close()
+
+        with tarfile.open(temp_tar.name, "r:gz") as tar:
+            for member in tar.getmembers():
+                if member.isfile() and member.name.endswith(".xml"):
+                    # Extragere număr pagină din nume_fisier (ex: brut_XML_1990_pag45.xml -> 45)
+                    m_pag = re.search(r"pag(\d+)\.xml$", member.name)
+                    if m_pag:
+                        numar_pag = m_pag.group(1)
+                        pagini_in_arhiva[numar_pag] = {
+                            "sursa": "ARHIVA_TAR",
+                            "mtime": member.mtime,
+                            "dimensiune": member.size
+                        }
+
+        os.unlink(temp_tar.name)
+    except Exception as e:
+        print(f"⚠️ Eroare la citirea TOC-ului pentru {nume_fisier}: {e}", flush=True)
+
+    return an, pagini_in_arhiva
+
+
+def listeaza_si_citeste_micro_indecsi(service):
+    """Găsește și citește toți micro-indecșii index_an_YYYY.json de pe Discul 0."""
+    micro_data = {}
+    try:
+        q = f"'{FOLDER_INDEX_ID}' in parents and name contains 'index_an_' and name contains '.json' and trashed = false"
+        params = get_list_params()
+        params["q"] = q
+        params["fields"] = "files(id, name)"
+        res = service.files().list(**params).execute()
+        files = res.get("files", [])
+
+        for item in files:
+            m = re.search(r"index_an_(\d{4})\.json", item["name"])
+            if m:
+                an = m.group(1)
+                req = service.files().get_media(fileId=item["id"], supportsAllDrives=True)
+                content = req.execute().decode('utf-8')
+                data_json = json.loads(content)
+                micro_data[an] = {
+                    "file_id": item["id"],
+                    "data": data_json
+                }
+    except Exception as e:
+        print(f"⚠️ Eroare la citirea micro-indecșilor: {e}", flush=True)
+
+    return micro_data
+
+
+def curata_micro_index(service, file_id, index_data):
+    """Golește/Resetează conținutul micro-indexului prelucrat."""
+    index_data["pagini_descarcate"] = {}
+    index_data["status"] = "PRELUCRAT_IN_MASTER"
+    index_data["ultimul_update"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    json_bytes = json.dumps(index_data, indent=2, ensure_ascii=False).encode('utf-8')
+    media = MediaIoBaseUpload(io.BytesIO(json_bytes), mimetype='application/json')
+
+    params = get_file_params()
+    params["fileId"] = file_id
+    params["media_body"] = media
+    service.files().update(**params).execute()
+
+
+def reconstruieste_master_index():
+    """Audit complet: reconciliere TOC arhive .tar.gz + Micro-indecși."""
+    start_time = time.time()
     service = get_drive_service()
 
     print("============================================================", flush=True)
-    print(f"🔄 UNIFICARE MASTER INDEX | Discul 0 (Folder ID: {FOLDER_INDEX_ID})", flush=True)
-    print(f"⚙️ Mod de lucru: {'FULL RESET (Golire + Scanare Arhive + Micro-Indecși)' if reset_complet else 'UPDATE SIMPLU (Doar Micro-Indecși)'}", flush=True)
+    print("🚀 RECONSTRUCȚIE TOTALĂ MASTER INDEX (AUDIT TOC + MICRO-INDECȘI)", flush=True)
     print("============================================================", flush=True)
 
-    # 1. Căutăm MasterIndex.json.gz pe Discul 0
-    q_master = f"'{FOLDER_INDEX_ID}' in parents and name = 'MasterIndex.json.gz' and trashed=false"
-    params_master = get_list_params()
-    params_master["q"] = q_master
-    params_master["fields"] = "files(id, name)"
-    
-    res_master = service.files().list(**params_master).execute()
-    files_master = res_master.get("files", [])
+    # 1. Scanare arhive pe Drive
+    arhive = cauta_arhive_pe_drives(service)
+    print(f"📂 Am găsit {len(arhive)} arhive .tar.gz pe Shared Drives.", flush=True)
 
-    master_file_id = None
-    master_data = {
-        "ultimul_sync": "",
+    # 2. Citire Micro-indecși
+    micro_indecsi = listeaza_si_citeste_micro_indecsi(service)
+    print(f"📄 Am găsit {len(micro_indecsi)} micro-indecși pe Discul 0.", flush=True)
+
+    master_index = {
+        "generat_la": time.strftime("%Y-%m-%d %H:%M:%S"),
         "total_ani_procesati": 0,
         "total_xml_valide": 0,
-        "arhive": {},
-        "fisiere": {}  # Dicționar pentru deduplicare automată
+        "ani": {}
     }
 
-    if files_master and not reset_complet:
-        master_file_id = files_master[0]["id"]
-        print(f"📥 Încărcare MasterIndex.json.gz existent (ID: {master_file_id})...", flush=True)
-        date_incarcate = descarca_json_gz_din_drive(service, master_file_id)
-        if date_incarcate:
-            master_data.update(date_incarcate)
-    elif files_master and reset_complet:
-        master_file_id = files_master[0]["id"]
-        print("⚠️ [FULL RESET] Resetare completă! MasterIndex va fi golit și refăcut de la zero.", flush=True)
+    ani_totali = set()
 
-    # 2. Dacă este FULL RESET: Parcurgem arhivele .tar.gz de pe discuri
-    if reset_complet:
-        scaneaza_arhive_tar_pe_discuri(service, master_data)
+    # Procesare date din arhive .tar.gz (TOC)
+    for arh in arhive:
+        nume_fisier = arh["name"]
+        file_id = arh["id"]
+        print(f"🔍 Scanare TOC arhivă '{nume_fisier}'...", flush=True)
 
-    # 3. Parcurgem micro-indecșii unici pe an: index_an_*.json
-    q_micro = f"'{FOLDER_INDEX_ID}' in parents and name contains 'index_an_' and name contains '.json' and trashed=false"
-    params_micro = get_list_params()
-    params_micro["q"] = q_micro
-    params_micro["fields"] = "files(id, name)"
-    
-    res_micro = service.files().list(**params_micro).execute()
-    micro_files = res_micro.get("files", [])
-
-    print(f"\n🔍 Identificați {len(micro_files)} micro-indecși pe Discul 0...", flush=True)
-
-    micro_procesati = 0
-
-    for f_micro in micro_files:
-        micro_id = f_micro["id"]
-        micro_name = f_micro["name"]
-        
-        micro_content = descarca_json_text_din_drive(service, micro_id)
-        if not micro_content or len(micro_content) == 0:
-            continue
-
-        an = micro_content.get("an")
-        archive_file_id = micro_content.get("drive_archive_file_id")
-        pagini = micro_content.get("pagini_descarcate", {})
-
-        if not an or not archive_file_id:
-            continue
-
-        print(f"➕ Contopire micro-index pentru Anul {an}...", flush=True)
-
-        master_data["arhive"][str(an)] = {
-            "archive_file_id": archive_file_id,
-            "status": micro_content.get("status", "IN_PROGRES"),
-            "ultimul_update": micro_content.get("ultimul_update", ""),
-            "total_xml_valid": micro_content.get("total_xml_valid", 0)
-        }
-
-        for nr_pagina, stadiu in pagini.items():
-            if stadiu == "OK":
-                nume_xml = f"brut_XML_{an}_pag{nr_pagina}.xml"
-                master_data["fisiere"][nume_xml] = {
-                    "an": int(an),
-                    "pagina": int(nr_pagina),
-                    "archive_file_id": archive_file_id,
-                    "cale_in_arhiva": nume_xml
+        an, pagini_toc = citeste_toc_arhiva(service, file_id, nume_fisier)
+        if an != "UNKNOWN":
+            ani_totali.add(an)
+            if an not in master_index["ani"]:
+                master_index["ani"][an] = {
+                    "drive_archive_file_id": file_id,
+                    "pagini_ok": {},
+                    "ultimul_update": ""
                 }
 
-        goleleste_micro_index_pe_drive(service, micro_id, micro_name)
-        micro_procesati += 1
+            # Înregistrare pagini din TOC
+            for pag_num in pagini_toc:
+                master_index["ani"][an]["pagini_ok"][pag_num] = "OK"
 
-    # Recalculare totaluri
-    master_data["ultimul_sync"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    master_data["total_ani_procesati"] = len(master_data["arhive"])
-    master_data["total_xml_valide"] = len(master_data["fisiere"])
+    # Procesare și Reconciliere cu Micro-Indecșii
+    for an, item in micro_indecsi.items():
+        ani_totali.add(an)
+        file_id_micro = item["file_id"]
+        data_micro = item["data"]
+        pagini_micro = data_micro.get("pagini_descarcate", {})
 
-    # 4. Comprimare locală în `.gz` și salvare pe Drive
-    cale_gz_temp = RADACINA_PROIECT / "MasterIndex.json.gz"
-    json_bytes = json.dumps(master_data, indent=2, ensure_ascii=False).encode('utf-8')
-    with gzip.open(cale_gz_temp, 'wb') as gz_out:
-        gz_out.write(json_bytes)
+        if an not in master_index["ani"]:
+            master_index["ani"][an] = {
+                "drive_archive_file_id": data_micro.get("drive_archive_file_id", ""),
+                "pagini_ok": {},
+                "ultimul_update": data_micro.get("ultimul_update", "")
+            }
 
-    marime_mb = cale_gz_temp.stat().st_size / (1024 * 1024)
-    media = MediaFileUpload(str(cale_gz_temp), mimetype="application/gzip", resumable=True)
+        # Reconciliere/Păstrare unică a paginilor (Deduplicare)
+        pagini_noi_fuzionate = 0
+        for pag_num, status in pagini_micro.items():
+            if status == "OK":
+                if pag_num not in master_index["ani"][an]["pagini_ok"]:
+                    pagini_noi_fuzionate += 1
+                master_index["ani"][an]["pagini_ok"][pag_num] = "OK"
+
+        if pagini_micro:
+            print(f"🔄 Reconciliat micro-index anul {an}: adăugate/validate {pagini_noi_fuzionate} pagini noi.", flush=True)
+            # Golire micro-index prelucrat pentru curățare spațiu/redundanță
+            curata_micro_index(service, file_id_micro, data_micro)
+            print(f"   🧹 Micro-index anul {an} curățat cu succes!", flush=True)
+
+    # Calculare totaluri finale
+    total_xml_global = 0
+    for an_key in sorted(master_index["ani"].keys()):
+        total_pagini_an = len(master_index["ani"][an_key]["pagini_ok"])
+        master_index["ani"][an_key]["total_xml_valid"] = total_pagini_an
+        total_xml_global += total_pagini_an
+
+    master_index["total_ani_procesati"] = len(master_index["ani"])
+    master_index["total_xml_valide"] = total_xml_global
+
+    # Salvare Master Index pe Discul 0
+    nume_master = "master_index_XML.json"
+    q_master = f"'{FOLDER_INDEX_ID}' in parents and name = '{nume_master}' and trashed = false"
+    res_m = service.files().list(q=q_master, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+    files_m = res_m.get("files", [])
+    master_file_id = files_m[0]["id"] if files_m else None
+
+    json_bytes = json.dumps(master_index, indent=2, ensure_ascii=False).encode('utf-8')
+    media = MediaIoBaseUpload(io.BytesIO(json_bytes), mimetype='application/json')
 
     if master_file_id:
-        print(f"\n🔄 Salvat 'MasterIndex.json.gz' pe Discul 0 ({marime_mb:.2f} MB)...", flush=True)
         params = get_file_params()
         params["fileId"] = master_file_id
         params["media_body"] = media
         service.files().update(**params).execute()
     else:
-        print(f"\n☁️ Creare 'MasterIndex.json.gz' pe Discul 0 ({marime_mb:.2f} MB)...", flush=True)
-        file_metadata = {
-            "name": "MasterIndex.json.gz",
-            "parents": [FOLDER_INDEX_ID]
-        }
+        file_metadata = {"name": nume_master, "parents": [FOLDER_INDEX_ID]}
         params = get_file_params()
         params["body"] = file_metadata
         params["media_body"] = media
-        res_create = service.files().create(**params).execute()
-        master_file_id = res_create.get("id")
+        res_c = service.files().create(**params).execute()
+        master_file_id = res_c.get("id")
 
-    cale_gz_temp.unlink(missing_ok=True)
-
-    print("\n============================================================", flush=True)
-    print(f"✅ UNIFICARE MASTER INDEX FINALIZATĂ CU SUCCES!", flush=True)
-    print(f"📊 Micro-indecși procesați: {micro_procesati}", flush=True)
-    print(f"📊 Total ani unificați: {master_data['total_ani_procesati']} | Total fișiere XML mapate: {master_data['total_xml_valide']:,}", flush=True)
-    print("============================================================", flush=True)
+    durata = time.time() - start_time
+    print("\n" + "=" * 60, flush=True)
+    print(f"✨ RECONSTRUCȚIE MASTER INDEX FINALIZATĂ CU SUCCES!", flush=True)
+    print(f"📊 Total ani procesați:            {master_index['total_ani_procesati']}", flush=True)
+    print(f"🟢 Total pagini XML unice validate: {master_index['total_xml_valide']:,}", flush=True)
+    print(f"⏱️  Durată execuție:                {durata / 60:.2f} minute ({durata:.1f}s)", flush=True)
+    print(f"💾 File ID Master Index:           {master_file_id}", flush=True)
+    print("=" * 60 + "\n", flush=True)
 
 
 if __name__ == "__main__":
-    reset_arg = len(sys.argv) >= 2 and sys.argv[1].lower() in ["reset", "true", "full"]
-    unifica_in_master_index(reset_complet=reset_arg)
+    reconstruieste_master_index()
