@@ -5,7 +5,7 @@ on:
     inputs:
       full_reset:
         type: boolean
-        description: 'FULL RESET: Golire MasterIndex + Re-scanare arhive .tar.gz + Micro-Indecși'
+        description: 'FULL RESET: Golire MasterIndex + Re-scanare arhive .tar.gz + Micro-Indecsi'
         default: false
 
 jobs:
@@ -18,22 +18,25 @@ jobs:
       - name: Configurare Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.11'
 
-      - name: Instalare dependențe
-        run: |
-          pip install google-api-python-client google-auth
+      - name: Instalare dependente
+        run: pip install google-api-python-client google-auth
 
-      - name: Reconstrucție / Unificare Master Index
+      - name: Reconstructie Master Index (RESET)
+        if: ${{ inputs.full_reset == true }}
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
           XML_STORAGE_INDEX: ${{ secrets.XML_STORAGE_INDEX }}
           FOLDER_INDEX_ID: ${{ secrets.XML_STORAGE_INDEX }}
-          TEMPORARY_XML_INDEXES: ${{ secrets.TEMPORARY_XML_INDEXES }}
-        run: |
-          if [ "${{ inputs.full_reset }}" = "true" ]; then
-            python Scripts_XML/rebuild_master_index.py reset
-          else
-            python Scripts_XML/rebuild_master_index.py
-          fi
+        run: python Scripts_XML/rebuild_master_index.py reset
+
+      - name: Reconstructie Master Index (UPDATE SIMPLU)
+        if: ${{ inputs.full_reset == false }}
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
+          XML_STORAGE_INDEX: ${{ secrets.XML_STORAGE_INDEX }}
+          FOLDER_INDEX_ID: ${{ secrets.XML_STORAGE_INDEX }}
+        run: python Scripts_XML/rebuild_master_index.py
