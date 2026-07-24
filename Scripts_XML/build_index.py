@@ -6,13 +6,10 @@ import time
 import re
 from pathlib import Path
 
-# Force buffer flush pentru log-uri LIVE în GitHub Actions
+# Logare live instantanee (unbuffered output)
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
-# ==============================================================================
-# CONFIGURARE CĂI DE IMPORT
-# ==============================================================================
 DIRECTOR_CURENT = Path(__file__).resolve().parent
 RADACINA_PROIECT = DIRECTOR_CURENT.parent
 
@@ -27,15 +24,12 @@ from googleapiclient.http import MediaFileUpload
 
 from drive_config import FOLDERE_XML_IDS, get_file_params
 
-# ==============================================================================
-# CONFIGURARE CONSTANTE & ID-URI
-# ==============================================================================
 NOME_INDEX_MASTER_LOCAL = "index_xml.json.gz"
 FOLDER_TEMP_INDEXES_ID = os.getenv("TEMPORARY_XML_INDEXES")
 XML_STORAGE_INDEX_ID = os.getenv("XML_STORAGE_INDEX")
 
 if not XML_STORAGE_INDEX_ID:
-    print("🛑 EROARE CRITICĂ: Variabila 'XML_STORAGE_INDEX' nu este definită în mediu!", flush=True)
+    print("🛑 [EROARE CRITICĂ] Variabila 'XML_STORAGE_INDEX' nu este definită în mediu!", flush=True)
     sys.exit(1)
 
 
@@ -53,7 +47,7 @@ def get_drive_service():
             )
             return build("drive", "v3", credentials=creds)
         except Exception as e:
-            print(f"❌ Eroare la parsarea JSON Service Account: {e}", flush=True)
+            print(f"❌ [AUTH] Eroare la parsarea JSON Service Account: {e}", flush=True)
             sys.exit(1)
             
     cale_local = RADACINA_PROIECT / "service_account.json"
@@ -64,9 +58,9 @@ def get_drive_service():
             )
             return build("drive", "v3", credentials=creds)
         except Exception as e:
-            print(f"❌ Eroare citire service_account.json local: {e}", flush=True)
+            print(f"❌ [AUTH] Eroare citire service_account.json local: {e}", flush=True)
 
-    print("❌ Nu s-a găsit secretul GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
+    print("❌ [AUTH] Nu s-a găsit secretul GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
     sys.exit(1)
 
 
@@ -79,21 +73,23 @@ def Curata_parametri_google(params):
 
 def scaneaza_shared_drives_complet(service):
     """
-    Scanează fizic de la zero toate cele 7 Shared Drive-uri/Foldere XML.
-    Afișează LIVE progresul scanării.
+    Scanează fizic de la zero toate cele 7 Shared Drive-uri XML.
     """
-    print(f"\n🔍 [FULL RE-INDEX] Pornire scanare fizică în cele {len(FOLDERE_XML_IDS)} Shared Drive-uri XML...", flush=True)
+    t_start = time.time()
+    print(f"\n🔍 [FULL SCAN] Pornire scanare fizică în cele {len(FOLDERE_XML_IDS)} Shared Drive-uri XML...", flush=True)
     master_dict = {}
     pattern = re.compile(r"brut_(?:XML|legislatie)_(\d+)_pag(\d+)\.xml", re.IGNORECASE)
 
-    total_gasite = 0
+    total_fisiere_scanate = 0
 
     for idx, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
-        print(f"  📂 Scannare Drive {idx}/{len(FOLDERE_XML_IDS)} (ID: {folder_id})...", flush=True)
+        print(f"\n📂 [{idx}/{len(FOLDERE_XML_IDS)}] Scanare Shared Drive ID: {folder_id}", flush=True)
         page_token = None
         count_folder = 0
+        pasi_pagina = 0
 
         while True:
+            pasi_pagina += 1
             try:
                 response = service.files().list(
                     q=f"'{folder_id}' in parents and trashed=false and name contains 'brut_'",
@@ -112,7 +108,6 @@ def scaneaza_shared_drives_complet(service):
                     if match:
                         an = int(match.group(1))
                         pagina = int(match.group(2))
-                        
                         nume_standard = f"brut_XML_{an}_pag{pagina}.xml"
                         
                         master_dict[nume_standard] = {
@@ -125,102 +120,128 @@ def scaneaza_shared_drives_complet(service):
                         }
                         count_folder += 1
 
-                # Progres vizual la fiecare 5.000 fișiere
-                if count_folder > 0 and count_folder % 5000 == 0:
-                    print(f"     ⏳ Am găsit {count_folder:,} fișiere în Drive {idx}...", flush=True)
+                print(f"   ⏳ [Drive {idx}/{len(FOLDERE_XML_IDS)}] Pagina {pasi_pagina} interogată | +{len(files)} fișiere găsite (Total folder: {count_folder:,})", flush=True)
 
                 page_token = response.get('nextPageToken')
                 if not page_token:
                     break
             except Exception as e:
-                print(f"⚠️ Eroare la scanarea folderului {folder_id}: {e}", flush=True)
+                print(f"   ⚠️ [Eroare Folder {folder_id}]: {e}", flush=True)
                 break
 
-        print(f"  ✅ Finalizat Drive {idx}/{len(FOLDERE_XML_IDS)}! Găsite: {count_folder:,} fișiere XML.", flush=True)
-        total_gasite += count_folder
+        total_fisiere_scanate += count_folder
+        print(f"   ✅ [Drive {idx}/{len(FOLDERE_XML_IDS)}] Finalizat! Total fișiere unice colectate: {count_folder:,}", flush=True)
 
-    print(f"\n🎉 FULL SCAN COMPLET! Total fișiere indexate din Drive: {len(master_dict):,}\n", flush=True)
+    durata = time.time() - t_start
+    print(f"\n🎉 [FULL SCAN COMPLET] Scanat în {durata:.2f}s | Total fișiere unice indexate: {len(master_dict):,}\n", flush=True)
     return master_dict
 
 
-def colecteaza_micro_indecsi(service, master_dict):
-    """Integrează micro-indecșii neconsolidați peste indexul scanat."""
+def colecteaza_toti_micro_indecsii(service, master_dict):
+    """
+    Caută și citește ABSOLUT TOȚI micro-indecșii neconsolidați (cu paginare completă).
+    Returnează dicționarul actualizat și lista ID-urilor fișierelor care trebuie trimise la Trash.
+    """
     if not FOLDER_TEMP_INDEXES_ID:
+        print("ℹ️ [MICRO-INDEX] Variabila TEMPORARY_XML_INDEXES nu este definită. Se sare peste consolidare.", flush=True)
         return master_dict, []
 
-    print(f"🔍 Verificare micro-indecși în folderul temp (ID: {FOLDER_TEMP_INDEXES_ID})...", flush=True)
+    print(f"🔍 [MICRO-INDEX] Căutare paginată a TUTROR micro-indecșilor în folderul temp (ID: {FOLDER_TEMP_INDEXES_ID})...", flush=True)
     fisiere_temp_de_sters = []
-    
-    try:
-        rezultat = service.files().list(
-            q=f"'{FOLDER_TEMP_INDEXES_ID}' in parents and trashed=false and name contains 'temp_index_'",
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-            fields="files(id, name)"
-        ).execute()
+    total_micro_gasite = 0
+    page_token = None
+    pagina_nr = 0
 
-        micro_files = rezultat.get("files", [])
-        if micro_files:
-            print(f"🧩 Găsiți {len(micro_files)} micro-indecși neconsolidați. Integrare...", flush=True)
-            for mf in micro_files:
-                try:
-                    req = service.files().get_media(
-                        fileId=mf["id"],
-                        supportsAllDrives=True
-                    )
-                    continut = req.execute()
-                    date_micro = json.loads(continut.decode("utf-8"))
-                    updates = date_micro.get("flag_updates", {})
-                    
-                    master_dict.update(updates)
-                    fisiere_temp_de_sters.append(mf["id"])
-                except Exception as e:
-                    print(f"⚠️ Eroare citire micro-index {mf['name']}: {e}", flush=True)
-        else:
-            print("ℹ️ Niciun micro-index neconsolidat găsit.", flush=True)
+    while True:
+        pagina_nr += 1
+        try:
+            rezultat = service.files().list(
+                q=f"'{FOLDER_TEMP_INDEXES_ID}' in parents and trashed=false and name contains 'temp_index_'",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+                pageSize=1000,  # Preia până la 1.000 pe o singură pagină de API
+                pageToken=page_token,
+                fields="nextPageToken, files(id, name)"
+            ).execute()
 
-    except Exception as e:
-        print(f"⚠️ Eroare scanare micro-indecși: {e}", flush=True)
+            micro_files = rezultat.get("files", [])
+            if micro_files:
+                print(f"   🧩 Pagina {pagina_nr} micro-indecși: Găsite {len(micro_files)} fișiere. Ingerare date...", flush=True)
+                for idx, mf in enumerate(micro_files, start=1):
+                    try:
+                        req = service.files().get_media(
+                            fileId=mf["id"],
+                            supportsAllDrives=True
+                        )
+                        continut = req.execute()
+                        date_micro = json.loads(continut.decode("utf-8"))
+                        updates = date_micro.get("flag_updates", {})
+                        
+                        master_dict.update(updates)
+                        fisiere_temp_de_sters.append(mf["id"])
+                        total_micro_gasite += 1
+                    except Exception as e:
+                        print(f"   ⚠️ Eroare la procesarea micro-indexului {mf['name']}: {e}", flush=True)
+            
+            page_token = rezultat.get('nextPageToken')
+            if not page_token:
+                break
+        except Exception as e:
+            print(f"⚠️ [MICRO-INDEX] Eroare la interogarea listei: {e}", flush=True)
+            break
 
+    print(f"✅ [MICRO-INDEX COMPLET] Au fost ingerați cu succes TOȚI cei {total_micro_gasite} micro-indecși găsiți!\n", flush=True)
     return master_dict, fisiere_temp_de_sters
 
 
-def curata_micro_indecsi_procesati(service, lista_id_uri):
-    """Mută în Trash micro-indecșii integrați."""
-    if not lista_id_uri:
+def trimite_micro_indecsii_la_trash(service, lista_id_uri):
+    """
+    Trimite la Trash / Șterge absolut toți micro-indecșii care au fost procesați.
+    """
+    total = len(lista_id_uri)
+    if total == 0:
+        print("ℹ️ [TRASH] Nu există micro-indecși de curățat.", flush=True)
         return
-    print(f"\n🧹 Curățare {len(lista_id_uri)} micro-indecși procesați...", flush=True)
+
+    print(f"🧹 [TRASH] Se elimină / trimit la Trash TOȚI cei {total} micro-indecși procesați...", flush=True)
     curatati = 0
-    for fid in lista_id_uri:
+    for idx, fid in enumerate(lista_id_uri, start=1):
         try:
+            # Mai întâi încercăm delete direct (hard delete)
             try:
                 service.files().delete(fileId=fid, supportsAllDrives=True).execute()
             except Exception:
+                # Fallback pentru Shared Drives / Content Manager: Move to Trash (trashed=True)
                 service.files().update(
                     fileId=fid,
                     body={'trashed': True},
                     supportsAllDrives=True
                 ).execute()
             curatati += 1
-        except Exception:
+
+            if idx % 50 == 0 or idx == total:
+                print(f"   🧹 Curățați {idx}/{total} micro-indecși...", flush=True)
+        except Exception as e:
             pass
-    print(f"✅ Curățați {curatati}/{len(lista_id_uri)} micro-indecși.", flush=True)
+
+    print(f"✅ [TRASH COMPLET] Curățare finalizată! {curatati}/{total} micro-indecși eliminați de pe Drive.\n", flush=True)
 
 
 def salveaza_si_urca_master_index_gz(service, master_dict):
     """Comprimă local în .json.gz și face UPDATE pe Google Drive."""
-    print(f"\n📦 Comprimare Master Index cu {len(master_dict):,} intrări...", flush=True)
+    print(f"📦 [COMPRESIE] Generare Master Index GZIP ({len(master_dict):,} intrări totale)...", flush=True)
     
     cale_local = Path(NOME_INDEX_MASTER_LOCAL)
+    t_start = time.time()
     
     with gzip.open(cale_local, "wb") as f:
         json_bytes = json.dumps(master_dict, ensure_ascii=False, indent=2).encode("utf-8")
         f.write(json_bytes)
         
     dimensiune_mb = cale_local.stat().st_size / (1024 * 1024)
-    print(f"💾 Arhivă GZIP creată local: {NOME_INDEX_MASTER_LOCAL} ({dimensiune_mb:.2f} MB)", flush=True)
+    print(f"💾 Arhivă locală creată în {time.time() - t_start:.2f}s | Dimensiune: {dimensiune_mb:.2f} MB", flush=True)
 
-    print(f"⬆️ Actualizare Master Index pe Drive (ID: {XML_STORAGE_INDEX_ID})...", flush=True)
+    print(f"⬆️ [UPLOAD] Actualizare Master Index pe Drive (ID: {XML_STORAGE_INDEX_ID})...", flush=True)
     try:
         media = MediaFileUpload(str(cale_local), mimetype="application/gzip", resumable=True)
         
@@ -232,10 +253,10 @@ def salveaza_si_urca_master_index_gz(service, master_dict):
         params["supportsTeamDrives"] = True
 
         updated_file = service.files().update(**params).execute()
-        print(f"✅ Master Index GZIP actualizat cu succes pe Drive! [ID: {updated_file.get('id')}]", flush=True)
+        print(f"✅ [UPLOAD REUȘIT] Master Index GZIP actualizat cu succes pe Drive! [ID: {updated_file.get('id')}]", flush=True)
         return True
     except Exception as e:
-        print(f"❌ EROARE CRITICĂ la actualizarea Master Index pe Drive: {e}", flush=True)
+        print(f"❌ [UPLOAD EȘUAT] Eroare critică la actualizarea Master Index pe Drive: {e}", flush=True)
         return False
     finally:
         if cale_local.exists():
@@ -243,8 +264,9 @@ def salveaza_si_urca_master_index_gz(service, master_dict):
 
 
 def main():
+    t_global = time.time()
     print("============================================================", flush=True)
-    print("🏗️ PORNIRE RE-INDEXARE COMPLETĂ & SCANARE FIZICĂ SHARED DRIVES", flush=True)
+    print("🏗️ ENGINE INDEXARE: SCANARE DRIVES + INGERARE MICRO-INDECȘI + TRASH CLEANUP", flush=True)
     print("============================================================", flush=True)
 
     service = get_drive_service()
@@ -252,18 +274,21 @@ def main():
     # 1. SCANARE RECURSIVĂ DE LA ZERO PE TOATE CELE 7 SHARED DRIVES
     master_dict = scaneaza_shared_drives_complet(service)
 
-    # 2. INTEGRARE MICRO-INDECȘI
-    master_dict, temp_ids_de_sters = colecteaza_micro_indecsi(service, master_dict)
+    # 2. INGERARE PAGINATĂ A TUTUROR MICRO-INDECȘILOR EXISTENȚI
+    master_dict, temp_ids_de_sters = colecteaza_toti_micro_indecsii(service, master_dict)
 
-    # 3. COMPRESIE GZIP ȘI UPLOAD
+    # 3. COMPRESIE GZIP ȘI UPLOAD PE DRIVE A NOULUI MASTER INDEX
     succes_upload = salveaza_si_urca_master_index_gz(service, master_dict)
 
-    # 4. CURĂȚARE MICRO-INDECȘI
+    # 4. TRIMITEREA LA TRASH A TUTUROR MICRO-INDECȘILOR PROCESAȚI (DOAR DACĂ UPLOAD-UL A REUȘIT)
     if succes_upload:
-        curata_micro_indecsi_procesati(service, temp_ids_de_sters)
+        trimite_micro_indecsii_la_trash(service, temp_ids_de_sters)
+    else:
+        print("⚠️ [AVERTISMENT] Ștergerea micro-indecșilor a fost oprită deoarece salvarea pe Drive a eșuat!", flush=True)
 
+    durata_totala = time.time() - t_global
     print("============================================================", flush=True)
-    print("🏁 FULL RE-INDEX COMPLET FINALIZAT CU SUCCES!", flush=True)
+    print(f"🏁 PROCES DE RE-INDEXARE ȘI CURĂȚARE FINALIZAT ÎN {durata_totala:.2f} SECUNDE!", flush=True)
     print("============================================================", flush=True)
 
 
