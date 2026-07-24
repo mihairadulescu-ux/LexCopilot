@@ -1,6 +1,12 @@
-# Filename Scripts_XML/download_XML.py
-# Scop
-
+# Filename: Scripts_XML/download_XML.py
+# Scop: Descărcarea pachetelor XML SOAP de pe legislatie.just.ro pentru un an țintă,
+#       comprimarea incrementală în arhive `.tar.gz` și salvarea pe Google Shared Drives.
+# Specificații:
+#   - Punct de oprire flexibil: Oprește sesiunea curentă la 20 de pagini goale/invalide consecutive.
+#   - Reîncercare automată (3 retries cu pauză de 5s) per pagină.
+#   - Sincronizare intermediară la fiecare 50 de pagini noi valide.
+#   - Model Atomic Rename (.tar.gz.tmp -> os.replace) pentru protecție împotriva fișierelor corupte/trunchiate la crash.
+#   - Generare Raport detaliat de Sesiune la final.
 
 import os
 import sys
@@ -150,6 +156,28 @@ def salveaza_micro_index(service, file_id, index_data):
     return file_id
 
 
+def impacheteaza_arhiva_atomic(folder_xmls, cale_arhiva_local):
+    """
+    Creează arhiva în format .tmp, îi verifică integritatea și o înlocuiește
+    atomic (os.replace) peste fișierul final. Astfel se elimină riscul de fișier trunchiat la crash.
+    """
+    cale_arhiva_tmp = cale_arhiva_local.with_name(cale_arhiva_local.name + ".tmp")
+    
+    # 1. Creare arhivă temporară
+    with tarfile.open(cale_arhiva_tmp, "w:gz") as tar:
+        for f in folder_xmls.glob("*.xml"):
+            tar.add(f, arcname=f.name)
+            
+    # 2. Verificare integritate arhivă
+    if not tarfile.is_tarfile(cale_arhiva_tmp):
+        if cale_arhiva_tmp.exists():
+            cale_arhiva_tmp.unlink(missing_ok=True)
+        raise ValueError(f"❌ Arhiva temporară generată este coruptă sau invalidă: {cale_arhiva_tmp}")
+
+    # 3. Înlocuire atomică
+    os.replace(cale_arhiva_tmp, cale_arhiva_local)
+
+
 def descarca_si_sincronizeaza(an_target):
     """Procesul principal de descărcare SOAP cu raportare la final."""
     timp_start = time.time()
@@ -210,14 +238,12 @@ def descarca_si_sincronizeaza(an_target):
     fisiere_noi_in_pachet = 0
     pagini_goale_consecutive = 0
     
-    # Statistici pentru raport
     pagini_noi_descarcate_sesiune = 0
     total_erori_sesiune = 0
 
     while True:
         str_pag = str(pagina)
 
-        # Sare peste paginile validate anterior
         if pagini_ok.get(str_pag) == "OK":
             pagina += 1
             continue
@@ -261,7 +287,6 @@ def descarca_si_sincronizeaza(an_target):
                     time.sleep(PAUZA_RETRY_SECUNDE)
                     continue
 
-                # Salvare fișier XML valid local
                 nume_xml = f"brut_XML_{an_target}_pag{pagina}.xml"
                 cale_xml = folder_xmls / nume_xml
                 with open(cale_xml, "w", encoding="utf-8") as f:
@@ -284,19 +309,16 @@ def descarca_si_sincronizeaza(an_target):
             pagini_goale_consecutive += 1
             print(f"⚠️ [AN {an_target} | PAGINA {pagina}] Pagină fără date. Contor pagini goale: {pagini_goale_consecutive}/{MAX_PAGINI_GOALE_CONSECUTIVE}", flush=True)
 
-        # Oprire sesiune curentă la 20 de pagini goale consecutive
         if pagini_goale_consecutive >= MAX_PAGINI_GOALE_CONSECUTIVE:
             print(f"\n✋ [AN {an_target}] S-au înregistrat {MAX_PAGINI_GOALE_CONSECUTIVE} pagini goale consecutive.", flush=True)
             print(f"🛑 Oprire sesiune curentă. Se salvează starea și se finalizează scriptul.", flush=True)
             break
 
-        # Sincronizare intermediară pe Drive la 50 de pagini noi
+        # Sincronizare intermediară securizată
         if fisiere_noi_in_pachet >= PRAG_SYNC_PAGINI:
-            print(f"\n📦 [SYNC TAR.GZ & INDEX] Împachetare incrementală (50 de pagini noi)...", flush=True)
+            print(f"\n📦 [SYNC TAR.GZ & INDEX] Împachetare incrementală atomică (50 de pagini noi)...", flush=True)
             
-            with tarfile.open(cale_arhiva_local, "w:gz") as tar:
-                for f in folder_xmls.glob("*.xml"):
-                    tar.add(f, arcname=f.name)
+            impacheteaza_arhiva_atomic(folder_xmls, cale_arhiva_local)
             
             marime_mb = cale_arhiva_local.stat().st_size / (1024 * 1024)
             media = MediaFileUpload(str(cale_arhiva_local), mimetype="application/gzip", resumable=True)
@@ -327,14 +349,12 @@ def descarca_si_sincronizeaza(an_target):
 
         pagina += 1
 
-    # Sincronizare finală
+    # Sincronizare finală securizată
     marime_finala_mb = 0.0
     if any(folder_xmls.iterdir()):
-        print(f"\n🏁 [SYNC FINAL] Salvare finală arhivă și micro-index...", flush=True)
+        print(f"\n🏁 [SYNC FINAL] Salvare finală arhivă (atomică) și micro-index...", flush=True)
         
-        with tarfile.open(cale_arhiva_local, "w:gz") as tar:
-            for f in folder_xmls.glob("*.xml"):
-                tar.add(f, arcname=f.name)
+        impacheteaza_arhiva_atomic(folder_xmls, cale_arhiva_local)
         
         marime_finala_mb = cale_arhiva_local.stat().st_size / (1024 * 1024)
         media = MediaFileUpload(str(cale_arhiva_local), mimetype="application/gzip", resumable=True)
@@ -360,7 +380,6 @@ def descarca_si_sincronizeaza(an_target):
 
     shutil.rmtree(dir_temp, ignore_errors=True)
 
-    # Calculare Raport de Sesiune
     durata_secunde = time.time() - timp_start
     viteza_pagini_pe_sec = pagini_noi_descarcate_sesiune / durata_secunde if durata_secunde > 0 else 0
 
@@ -374,7 +393,6 @@ def descarca_si_sincronizeaza(an_target):
     print(f"⚡ Vitează medie:                 {viteza_pagini_pe_sec:.2f} pagini/secundă", flush=True)
     print(f"💾 Dimensiune arhivă Drive:        {marime_finala_mb:.2f} MB", flush=True)
     print("=" * 60 + "\n", flush=True)
-
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
