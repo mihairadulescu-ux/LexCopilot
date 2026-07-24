@@ -1,4 +1,3 @@
-YAML
 name: Download XML Just.ro (Matrix)
 
 on:
@@ -22,11 +21,13 @@ jobs:
     steps:
       - name: Calculare matrice ani
         id: set-matrix
+        env:
+          INPUT_ANI: ${{ github.event.inputs.ani_input }}
         run: |
           python3 -c '
           import os, json, re
 
-          input_str = "${{ github.event.inputs.ani_input }}"
+          input_str = os.environ.get("INPUT_ANI", "")
           ani_set = set()
 
           parti = re.split(r"[,\s]+", input_str.strip())
@@ -67,7 +68,7 @@ jobs:
       - name: Configurare Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.13'
 
       - name: Instalare dependente Python
         run: |
