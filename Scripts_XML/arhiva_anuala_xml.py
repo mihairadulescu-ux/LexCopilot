@@ -5,7 +5,7 @@ import time
 import re
 from pathlib import Path
 
-# Stream live instant în GitHub Actions
+# Unbuffered logging pentru GitHub Actions
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
@@ -21,13 +21,15 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from drive_config import FOLDERE_XML_IDS
 
-DIMENSIUNE_BATCH = 200
-PAUZA_SECUENTE_SEC = 4
+DIMENSIUNE_BATCH = 100
+PAUZA_SECUENTI_SEC = 2.5
 
-# Citire An Filtru din Argumente (ex: python redenumeste_fisiere_drive.py 1992)
-AN_FILTRU = None
+# Citire Index Drive din Argumente (ex: python redenumeste_fisiere_drive.py 1)
+INDEX_DRIVE_TARGET = None
 if len(sys.argv) >= 2 and sys.argv[1].isdigit():
-    AN_FILTRU = sys.argv[1]
+    idx_arg = int(sys.argv[1])
+    if 1 <= idx_arg <= len(FOLDERE_XML_IDS):
+        INDEX_DRIVE_TARGET = idx_arg
 
 
 def get_drive_service():
@@ -86,14 +88,18 @@ def redenumeste_fisiere_pe_drive():
     service = get_drive_service()
     pattern_pag = re.compile(r"_pag(\d+)\.xml", re.IGNORECASE)
 
-    print("============================================================", flush=True)
-    if AN_FILTRU:
-        print(f"🔍 REDENUMIRE & CURĂȚARE STRICTĂ PENTRU ANUL: {AN_FILTRU}", flush=True)
-        query_drive = f"trashed=false and name contains '{AN_FILTRU}' and name contains '.xml'"
+    # Stabilim pe ce discuri lucrăm
+    if INDEX_DRIVE_TARGET is not None:
+        discuri_de_procesat = [(INDEX_DRIVE_TARGET, FOLDERE_XML_IDS[INDEX_DRIVE_TARGET - 1])]
+        print(f"============================================================", flush=True)
+        print(f"📂 AUDIT & REDENUMIRE PE SHARED DRIVE #{INDEX_DRIVE_TARGET}", flush=True)
+        print(f"   Target ID: {FOLDERE_XML_IDS[INDEX_DRIVE_TARGET - 1]}", flush=True)
+        print(f"============================================================", flush=True)
     else:
-        print(f"🔍 REDENUMIRE & CURĂȚARE GENERALĂ (TOȚI ANII)", flush=True)
-        query_drive = "trashed=false and name contains '.xml'"
-    print("============================================================", flush=True)
+        discuri_de_procesat = list(enumerate(FOLDERE_XML_IDS, start=1))
+        print(f"============================================================", flush=True)
+        print(f"📂 AUDIT & REDENUMIRE PE TOATE CELE {len(FOLDERE_XML_IDS)} SHARED DRIVE-URI", flush=True)
+        print(f"============================================================", flush=True)
 
     total_evaluate = 0
     total_deja_perfecte = 0
@@ -101,15 +107,14 @@ def redenumeste_fisiere_pe_drive():
     actiuni_in_batch = 0
     numar_batch = 1
 
-    for idx, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
-        q_final = f"'{folder_id}' in parents and {query_drive}"
+    for idx, folder_id in discuri_de_procesat:
         page_token = None
         count_drive_red = 0
 
         while True:
             try:
                 response = service.files().list(
-                    q=q_final,
+                    q=f"'{folder_id}' in parents and trashed=false and name contains '.xml'",
                     spaces='drive',
                     fields="nextPageToken, files(id, name)",
                     pageToken=page_token,
@@ -128,7 +133,7 @@ def redenumeste_fisiere_pe_drive():
                         continue
                     pagina = m_pag.group(1)
 
-                    # Citim primii bytes din XML pentru determinare an real
+                    # Citim primii bytes din XML
                     try:
                         req = service.files().get_media(fileId=f['id'], supportsAllDrives=True)
                         req.headers['Range'] = 'bytes=0-4096'
@@ -143,8 +148,11 @@ def redenumeste_fisiere_pe_drive():
 
                     nume_nou_standard = f"brut_XML_{an_real}_pag{pagina}.xml"
 
+                    # Daca este deja corect, sarim peste
                     if nume_vechi == nume_nou_standard:
                         total_deja_perfecte += 1
+                        if total_evaluate % 500 == 0:
+                            print(f"   ⏳ Verificate {total_evaluate:,} fișiere pe Drive #{idx} | Corectate: {total_redenumite:,}", flush=True)
                         continue
 
                     # REDENUMIRE PE DRIVE
@@ -160,11 +168,12 @@ def redenumeste_fisiere_pe_drive():
                         count_drive_red += 1
                         actiuni_in_batch += 1
 
-                        print(f"   ✏️ [{total_redenumite:,}] Corectat: '{nume_vechi}' ➡️ '{nume_nou_standard}' (An real: {an_real})", flush=True)
+                        print(f"   ✏️ [{total_redenumite:,}] Corectat pe Drive #{idx}: '{nume_vechi}' ➡️ '{nume_nou_standard}' (An real: {an_real})", flush=True)
 
+                        # BATCH PAUSE (100 acțiuni)
                         if actiuni_in_batch >= DIMENSIUNE_BATCH:
                             print(f"\n☕ [BATCH {numar_batch} COMPLET] Pauză {PAUZA_SECUENTE_SEC}s...\n", flush=True)
-                            time.sleep(PAUZA_SECUENTI_SEC)
+                            time.sleep(PAUZA_SECUENTE_SEC)
                             numar_batch += 1
                             actiuni_in_batch = 0
 
@@ -178,12 +187,11 @@ def redenumeste_fisiere_pe_drive():
                 print(f"⚠️ Eroare la scanare Drive {idx}: {e}", flush=True)
                 break
 
-        if count_drive_red > 0:
-            print(f"✅ Drive {idx} - Redenumite în acest folder: {count_drive_red:,}", flush=True)
+        print(f"✅ Drive #{idx} finalizat! Corectate în acest folder: {count_drive_red:,}", flush=True)
 
     print("\n============================================================", flush=True)
-    print(f"🏁 CURĂȚARE CORECTĂ FINALIZATĂ!", flush=True)
-    print(f"📊 Scanate: {total_evaluate:,} | Deja corecte: {total_deja_perfecte:,} | Corectate: {total_redenumite:,}", flush=True)
+    print(f"🏁 CURĂȚARE FINALIZATĂ PENTRU DRIVE-UL CURENT!", flush=True)
+    print(f"📊 Evaluat: {total_evaluate:,} | Deja corecte: {total_deja_perfecte:,} | Corectate: {total_redenumite:,}", flush=True)
     print("============================================================", flush=True)
 
 
