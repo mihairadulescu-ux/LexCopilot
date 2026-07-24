@@ -3,7 +3,6 @@ import sys
 import json
 import time
 import tarfile
-import re
 import tempfile
 import io
 from pathlib import Path
@@ -27,12 +26,11 @@ from drive_config import (
     FOLDERE_XML_IDS,
     FOLDER_INDEX_ID,
     get_file_params,
-    get_list_params,
-    get_shared_drive_index_for_year
+    get_list_params
 )
 
-# Configuration Parameters
-PRAG_SYNC_PAGINI = 100  # Sincronizare la fiecare 100 de pagini
+# Setare prag de sincronizare la fiecare 100 de pagini
+PRAG_SYNC_PAGINI = 100
 REZULTATE_PER_PAGINA = 10
 
 
@@ -149,7 +147,9 @@ def descarca_si_sincronizeaza(an_target):
     wsdl_url = os.getenv("JUST_RO_WSDL_URL") or "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
     service = get_drive_service()
 
-    drive_idx = get_shared_drive_index_for_year(an_target)
+    # Calcul nativ de repartizare pe discuri (evită dependența de funcții externe)
+    nume_drives = [d for d in FOLDERE_XML_IDS if d]
+    drive_idx = int(an_target) % len(nume_drives) if nume_drives else 0
     shared_drive_id = FOLDERE_XML_IDS[drive_idx]
 
     print("🌐 Inițializare client SOAP WSDL...", flush=True)
@@ -166,7 +166,7 @@ def descarca_si_sincronizeaza(an_target):
     print(f"📂 Drive Destinație: Shared Drive #{drive_idx + 1} (ID: {shared_drive_id})", flush=True)
     print("============================================================", flush=True)
 
-    # Incarcare micro-index de pe Drive
+    # Încărcare micro-index de pe Drive
     micro_index_id, micro_data = incarca_micro_index(service, an_target)
     pagini_ok = micro_data.get("pagini_descarcate", {})
 
@@ -183,7 +183,7 @@ def descarca_si_sincronizeaza(an_target):
     dir_temp = tempfile.mkdtemp()
     cale_arhiva_local = Path(dir_temp) / nume_arhiva
 
-    # Daca arhiva exista pe Drive, o descarcam local pentru append/update
+    # Dacă arhiva există pe Drive, o descărcăm local pentru append/update
     if archive_file_id and not cale_arhiva_local.exists():
         try:
             print(f"📥 Descărcare arhivă existentă de pe Drive pentru actualizare incrementală...", flush=True)
@@ -235,7 +235,6 @@ def descarca_si_sincronizeaza(an_target):
                 continue
 
             if resp.status_code != 200 or "<a:Legi>" not in resp.text or "</a:Legi>" in resp.text and "<a:Legi/>" in resp.text:
-                # Verificăm dacă chiar am ajuns la finalul rezultatelor
                 if "<a:Legi/>" in resp.text or "<a:Legi></a:Legi>" in resp.text or resp.status_code == 200:
                     print(f"\n🏁 [AN {an_target}] S-a atins ultima pagină de date ({pagina - 1}).", flush=True)
                     break
