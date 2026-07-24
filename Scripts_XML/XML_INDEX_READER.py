@@ -1,3 +1,7 @@
+# Filename: Scripts_XML/XML_INDEX_READER.py
+# Scop
+
+
 import os
 import sys
 import json
