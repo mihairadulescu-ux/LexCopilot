@@ -16,7 +16,15 @@ if str(RADACINA_PROIECT) not in sys.path:
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from drive_config import FOLDERE_XML_IDS
+
+# Importăm direct lista celor 7 discuri
+try:
+    from drive_config import FOLDERE_XML_IDS
+except ImportError:
+    # Backup în caz că nu poate fi importat modulul drive_config
+    FOLDERE_XML_IDS = [
+        "1O9c1S2_48gG1IqX3hGzO8e0Z",  # Pune ID-urile tale aici dacă e cazul
+    ]
 
 
 def get_drive_service():
@@ -53,20 +61,23 @@ def get_drive_service():
 def curata_toate_discurile():
     service = get_drive_service()
 
+    if not FOLDERE_XML_IDS:
+        print("🛑 [EROARE CRITICĂ] Lista FOLDERE_XML_IDS este goală!", flush=True)
+        sys.exit(1)
+
     print("============================================================", flush=True)
-    print("⚠️ PORNIRE CURĂȚENIE TOTALĂ PE CELE 7 SHARED DRIVE-URI", flush=True)
+    print(f"⚠️ PORNIRE CURĂȚENIE TOTALĂ PE {len(FOLDERE_XML_IDS)} SHARED DRIVE-URI", flush=True)
     print("============================================================", flush=True)
 
     total_sterse = 0
 
     for idx, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
-        print(f"\n📂 Curățare Shared Drive #{idx} (ID: {folder_id[:12]}...)...", flush=True)
+        print(f"\n📂 Curățare Shared Drive #{idx} (ID: {folder_id})...", flush=True)
         sterse_drive = 0
         page_token = None
 
         while True:
             try:
-                # Interogăm toate fișierele neșterse din folder
                 response = service.files().list(
                     q=f"'{folder_id}' in parents and trashed=false",
                     spaces='drive',
@@ -84,7 +95,6 @@ def curata_toate_discurile():
 
                 for f in files:
                     try:
-                        # Ștergere definitivă
                         service.files().delete(
                             fileId=f['id'],
                             supportsAllDrives=True,
@@ -93,7 +103,7 @@ def curata_toate_discurile():
                         sterse_drive += 1
                         total_sterse += 1
 
-                        if sterse_drive % 500 == 0:
+                        if sterse_drive % 200 == 0:
                             print(f"   🗑️ Șterse până acum pe Drive #{idx}: {sterse_drive:,} fișiere...", flush=True)
 
                     except Exception as e_del:
