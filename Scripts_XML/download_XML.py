@@ -5,6 +5,7 @@ import time
 import tarfile
 import tempfile
 import io
+import shutil
 from pathlib import Path
 import requests
 from suds.client import Client
@@ -29,8 +30,8 @@ from drive_config import (
     get_list_params
 )
 
-# Setare prag de sincronizare la fiecare 100 de pagini
-PRAG_SYNC_PAGINI = 100
+# Prag de sincronizare setat la 50 de pagini noi
+PRAG_SYNC_PAGINI = 50
 REZULTATE_PER_PAGINA = 10
 
 
@@ -147,7 +148,6 @@ def descarca_si_sincronizeaza(an_target):
     wsdl_url = os.getenv("JUST_RO_WSDL_URL") or "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
     service = get_drive_service()
 
-    # Calcul nativ de repartizare pe discuri (evită dependența de funcții externe)
     nume_drives = [d for d in FOLDERE_XML_IDS if d]
     drive_idx = int(an_target) % len(nume_drives) if nume_drives else 0
     shared_drive_id = FOLDERE_XML_IDS[drive_idx]
@@ -181,17 +181,25 @@ def descarca_si_sincronizeaza(an_target):
         print(f"🔄 RELUARE DETECTATĂ: Paginile 1..{len(pagini_deja_procesate)} sunt deja descărcate și validate pe Drive.", flush=True)
 
     dir_temp = tempfile.mkdtemp()
+    folder_xmls = Path(dir_temp) / "xml_files"
+    folder_xmls.mkdir(parents=True, exist_ok=True)
     cale_arhiva_local = Path(dir_temp) / nume_arhiva
 
-    # Dacă arhiva există pe Drive, o descărcăm local pentru append/update
-    if archive_file_id and not cale_arhiva_local.exists():
+    # Descărcare și extragere arhivă existentă de pe Drive pe runner pentru pregătire
+    if archive_file_id:
         try:
-            print(f"📥 Descărcare arhivă existentă de pe Drive pentru actualizare incrementală...", flush=True)
+            print(f"📥 Descărcare și extragere arhivă existentă de pe Drive pe runner...", flush=True)
             req = service.files().get_media(fileId=archive_file_id, supportsAllDrives=True)
             with open(cale_arhiva_local, "wb") as f:
                 f.write(req.execute())
+
+            with tarfile.open(cale_arhiva_local, "r:gz") as tar:
+                tar.extractall(path=folder_xmls)
+            
+            cale_arhiva_local.unlink(missing_ok=True)
+            print("✅ Arhivă extrasă local cu succes!", flush=True)
         except Exception as e:
-            print(f"⚠️ Nu s-a putut descărca arhiva existentă: {e}. Se va crea una nouă.", flush=True)
+            print(f"⚠️ Arhiva existentă nu a putut fi extrasă ({e}). Se va genera una nouă.", flush=True)
 
     pagina = 1
     fisiere_noi_in_pachet = 0
@@ -199,7 +207,7 @@ def descarca_si_sincronizeaza(an_target):
     while True:
         str_pag = str(pagina)
 
-        # Verificăm dacă pagina este deja descărcată cu succes
+        # Verificăm dacă pagina este deja descărcată
         if pagini_ok.get(str_pag) == "OK":
             pagina += 1
             continue
@@ -239,26 +247,24 @@ def descarca_si_sincronizeaza(an_target):
                     print(f"\n🏁 [AN {an_target}] S-a atins ultima pagină de date ({pagina - 1}).", flush=True)
                     break
 
-            # Salvare fișier XML local
+            # Salvare fișier XML local în folderul de stocare temporară
             nume_xml = f"brut_XML_{an_target}_pag{pagina}.xml"
-            cale_xml_temp = Path(dir_temp) / nume_xml
-            with open(cale_xml_temp, "w", encoding="utf-8") as f:
+            cale_xml = folder_xmls / nume_xml
+            with open(cale_xml, "w", encoding="utf-8") as f:
                 f.write(resp.text)
-
-            # Adăugare în arhiva tar.gz locală
-            mod_deschidere = "a:" if cale_arhiva_local.exists() else "w:gz"
-            with tarfile.open(cale_arhiva_local, mod_deschidere) as tar:
-                tar.add(cale_xml_temp, arcname=nume_xml)
-
-            cale_xml_temp.unlink(missing_ok=True)
 
             pagini_ok[str_pag] = "OK"
             fisiere_noi_in_pachet += 1
             print(f"   🟢 [AN {an_target} | PAGINA {pagina}] SOAP XML Valid | Dimensiune: {len(resp.text):,} bytes", flush=True)
 
-            # Sincronizare pe Drive la fiecare 100 de pagini
+            # Sincronizare pe Drive la fiecare 50 de pagini noi
             if fisiere_noi_in_pachet >= PRAG_SYNC_PAGINI:
-                print(f"\n📦 [SYNC TAR.GZ & INDEX] Împachetare incrementală la pragul de {PRAG_SYNC_PAGINI} de pagini pentru anul {an_target}...", flush=True)
+                print(f"\n📦 [SYNC TAR.GZ & INDEX] Împachetare incrementală (50 de pagini noi) pentru anul {an_target}...", flush=True)
+                
+                # Împachetăm tot folderul local de XML-uri în arhiva .tar.gz
+                with tarfile.open(cale_arhiva_local, "w:gz") as tar:
+                    for f in folder_xmls.glob("*.xml"):
+                        tar.add(f, arcname=f.name)
                 
                 marime_mb = cale_arhiva_local.stat().st_size / (1024 * 1024)
                 media = MediaFileUpload(str(cale_arhiva_local), mimetype="application/gzip", resumable=True)
@@ -285,6 +291,8 @@ def descarca_si_sincronizeaza(an_target):
                 micro_data["ultimul_update"] = time.strftime("%Y-%m-%d %H:%M:%S")
                 micro_index_id = salveaza_micro_index(service, micro_index_id, micro_data)
 
+                # Curățăm arhiva locală temporară după upload ca să economisim spaițu
+                cale_arhiva_local.unlink(missing_ok=True)
                 fisiere_noi_in_pachet = 0
 
             pagina += 1
@@ -294,8 +302,13 @@ def descarca_si_sincronizeaza(an_target):
             time.sleep(2)
 
     # Sincronizare finală la încheierea anului
-    if cale_arhiva_local.exists():
+    if any(folder_xmls.iterdir()):
         print(f"\n🏁 [SYNC FINAL] Salvare finală arhivă și micro-index pentru anul {an_target}...", flush=True)
+        
+        with tarfile.open(cale_arhiva_local, "w:gz") as tar:
+            for f in folder_xmls.glob("*.xml"):
+                tar.add(f, arcname=f.name)
+        
         marime_mb = cale_arhiva_local.stat().st_size / (1024 * 1024)
         media = MediaFileUpload(str(cale_arhiva_local), mimetype="application/gzip", resumable=True)
 
@@ -320,6 +333,9 @@ def descarca_si_sincronizeaza(an_target):
         micro_data["total_xml_valid"] = len(pagini_ok)
         micro_data["ultimul_update"] = time.strftime("%Y-%m-%d %H:%M:%S")
         salveaza_micro_index(service, micro_index_id, micro_data)
+
+    # Curățare folder temporar
+    shutil.rmtree(dir_temp, ignore_errors=True)
 
     print(f"\n✨ PROCESARE COMPLETĂ PENTRU ANUL {an_target}! Total pagini XML salvate: {len(pagini_ok)}", flush=True)
 
