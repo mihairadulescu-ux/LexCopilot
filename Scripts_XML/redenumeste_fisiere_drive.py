@@ -90,7 +90,7 @@ def curata_masiv_batch():
                     spaces='drive',
                     fields="nextPageToken, files(id, name)",
                     pageToken=page_token,
-                    pageSize=100,
+                    pageSize=400,
                     includeItemsFromAllDrives=True,
                     supportsAllDrives=True
                 ).execute()
