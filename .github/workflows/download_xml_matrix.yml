@@ -75,10 +75,11 @@ jobs:
       - name: Descarcare si Arhivare XML pentru Anul ${{ matrix.an }}
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
-          XML_STORAGE_INDEX: ${{ secrets.XML_STORAGE_INDEX }}
-          FOLDER_INDEX_ID: ${{ secrets.XML_STORAGE_INDEX }}
-          JUST_RO_WSDL_URL: ${{ secrets.JUST_RO_WSDL_URL }}
+          DRIVE_FOLDER_XML: ${{ vars.DRIVE_FOLDER_XML || secrets.DRIVE_FOLDER_XML }}
+          XML_STORAGE_INDEX: ${{ vars.XML_STORAGE_INDEX || secrets.XML_STORAGE_INDEX }}
+          FOLDER_INDEX_ID: ${{ vars.XML_STORAGE_INDEX || secrets.XML_STORAGE_INDEX }}
+          TEMPORARY_XML_INDEXES: ${{ vars.TEMPORARY_XML_INDEXES || secrets.TEMPORARY_XML_INDEXES }}
+          JUST_RO_WSDL_URL: ${{ vars.JUST_RO_WSDL_URL || secrets.JUST_RO_WSDL_URL }}
         run: |
           python Scripts_XML/download_xml.py ${{ matrix.an }}
 
@@ -103,8 +104,9 @@ jobs:
       - name: Unificare Micro-Indecsi in MasterIndex.json.gz
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
-          XML_STORAGE_INDEX: ${{ secrets.XML_STORAGE_INDEX }}
-          FOLDER_INDEX_ID: ${{ secrets.XML_STORAGE_INDEX }}
+          DRIVE_FOLDER_XML: ${{ vars.DRIVE_FOLDER_XML || secrets.DRIVE_FOLDER_XML }}
+          XML_STORAGE_INDEX: ${{ vars.XML_STORAGE_INDEX || secrets.XML_STORAGE_INDEX }}
+          FOLDER_INDEX_ID: ${{ vars.XML_STORAGE_INDEX || secrets.XML_STORAGE_INDEX }}
+          TEMPORARY_XML_INDEXES: ${{ vars.TEMPORARY_XML_INDEXES || secrets.TEMPORARY_XML_INDEXES }}
         run: |
           python Scripts_XML/rebuild_master_index.py
