@@ -1,4 +1,8 @@
-name: Download XML Just.ro (Matrix)
+# Filename: .github/workflows/download_xml_matrix.yml
+# Scop 
+
+
+name: Descarcare XML de pe legislatie.just.ro
 
 on:
   workflow_dispatch:
