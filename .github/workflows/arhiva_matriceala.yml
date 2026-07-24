@@ -1,5 +1,5 @@
-name: Utilitar Matriceal - Arhivare Anuală TAR.GZ
-run-name: 📦 Arhivare XML (${{ github.event.inputs.matrice_ani }})
+name: Utilitar Matriceal - Redenumire Curată pe Ani
+run-name: ✏️ Redenumire XML (${{ github.event.inputs.matrice_ani }})
 
 on:
   workflow_dispatch:
@@ -48,13 +48,13 @@ jobs:
           print('matrix=' + json.dumps({'an': [str(a) for a in ani_finali]}))
           " >> $GITHUB_OUTPUT
 
-  arhiva-xml:
-    name: Arhivare Anul ${{ matrix.an }}
+  redenumire-xml:
+    name: Curățare Anul ${{ matrix.an }}
     needs: generate-matrix
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 3  # Rulăm maxim 3 ani simultan pentru ordine și stabilitate
+      max-parallel: 3
       matrix: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
 
     env:
@@ -75,6 +75,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
-      - name: Execuție Arhivare Anuală
+      - name: Execuție Redenumire pe Anul Curent
         run: |
-          python Scripts_XML/arhiva_anuala_xml.py ${{ matrix.an }}
+          python Scripts_XML/redenumeste_fisiere_drive.py ${{ matrix.an }}
