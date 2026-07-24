@@ -18,7 +18,7 @@ jobs:
       - name: Configurare Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.13'
 
       - name: Instalare dependente
         run: pip install google-api-python-client google-auth
@@ -27,16 +27,16 @@ jobs:
         if: ${{ inputs.full_reset == true }}
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
-          XML_STORAGE_INDEX: ${{ secrets.XML_STORAGE_INDEX }}
-          FOLDER_INDEX_ID: ${{ secrets.XML_STORAGE_INDEX }}
+          DRIVE_FOLDER_XML: ${{ vars.DRIVE_FOLDER_XML || secrets.DRIVE_FOLDER_XML }}
+          XML_STORAGE_INDEX: ${{ vars.XML_STORAGE_INDEX || secrets.XML_STORAGE_INDEX }}
+          FOLDER_INDEX_ID: ${{ vars.XML_STORAGE_INDEX || secrets.XML_STORAGE_INDEX }}
         run: python Scripts_XML/rebuild_master_index.py reset
 
       - name: Reconstructie Master Index (UPDATE SIMPLU)
         if: ${{ inputs.full_reset == false }}
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
-          XML_STORAGE_INDEX: ${{ secrets.XML_STORAGE_INDEX }}
-          FOLDER_INDEX_ID: ${{ secrets.XML_STORAGE_INDEX }}
+          DRIVE_FOLDER_XML: ${{ vars.DRIVE_FOLDER_XML || secrets.DRIVE_FOLDER_XML }}
+          XML_STORAGE_INDEX: ${{ vars.XML_STORAGE_INDEX || secrets.XML_STORAGE_INDEX }}
+          FOLDER_INDEX_ID: ${{ vars.XML_STORAGE_INDEX || secrets.XML_STORAGE_INDEX }}
         run: python Scripts_XML/rebuild_master_index.py
