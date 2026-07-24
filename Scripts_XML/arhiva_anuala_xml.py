@@ -9,9 +9,6 @@ from pathlib import Path
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
-# ==============================================================================
-# CONFIGURARE CĂI DE IMPORT
-# ==============================================================================
 DIRECTOR_CURENT = Path(__file__).resolve().parent
 RADACINA_PROIECT = DIRECTOR_CURENT.parent
 
@@ -26,6 +23,11 @@ from drive_config import FOLDERE_XML_IDS
 
 DIMENSIUNE_BATCH = 100
 PAUZA_SECUENTE_SEC = 2.5
+
+# Citire An Filtru din Argumente (ex: python redenumeste_fisiere_drive.py 1992)
+AN_FILTRU = None
+if len(sys.argv) >= 2 and sys.argv[1].isdigit():
+    AN_FILTRU = sys.argv[1]
 
 
 def get_drive_service():
@@ -60,23 +62,19 @@ def get_drive_service():
 
 
 def extrage_an_real_din_continut_xml(continut_str):
-    """Extrage anul real al actului direct din tag-urile sau textul XML."""
-    # 1. Tag-uri specifice de An
+    """Extrage anul real al actului din tag-urile sau textul XML."""
     m_tag = re.search(r"<(?:An|AnEmitere|AnPublicare|AnAparitie)>(\d{4})</", continut_str, re.IGNORECASE)
     if m_tag:
         return m_tag.group(1)
 
-    # 2. Atribute de tip Data="YYYY-MM-DD"
     m_data = re.search(r'(?:Data|DataEmitere|DataAparitie|DataPublicarii)=["\'](\d{4})-\d{2}-\d{2}', continut_str, re.IGNORECASE)
     if m_data:
         return m_data.group(1)
 
-    # 3. Anul menționat în text "din YYYY" sau "nr. ... / YYYY"
     m_text = re.search(r"(?:din|anul)\s+(19\d\d|20\d\d)", continut_str, re.IGNORECASE)
     if m_text:
         return m_text.group(1)
 
-    # 4. Fallback: orice an de 4 cifre valid între 1800 și 2026 găsit în XML
     m_gen = re.search(r"\b(18\d\d|19\d\d|20[0-2]\d)\b", continut_str)
     if m_gen:
         return m_gen.group(1)
@@ -85,30 +83,33 @@ def extrage_an_real_din_continut_xml(continut_str):
 
 
 def redenumeste_fisiere_pe_drive():
-    print("============================================================", flush=True)
-    print("🔍 AUDIT & REDENUMIRE TOTALĂ: VERIFICARE CONȚINUT XML LA FIECARE FIȘIER", flush=True)
-    print("============================================================", flush=True)
-
     service = get_drive_service()
-
     pattern_pag = re.compile(r"_pag(\d+)\.xml", re.IGNORECASE)
+
+    print("============================================================", flush=True)
+    if AN_FILTRU:
+        print(f"🔍 REDENUMIRE & CURĂȚARE STRICTĂ PENTRU ANUL: {AN_FILTRU}", flush=True)
+        query_drive = f"trashed=false and name contains '{AN_FILTRU}' and name contains '.xml'"
+    else:
+        print(f"🔍 REDENUMIRE & CURĂȚARE GENERALĂ (TOȚI ANII)", flush=True)
+        query_drive = "trashed=false and name contains '.xml'"
+    print("============================================================", flush=True)
 
     total_evaluate = 0
     total_deja_perfecte = 0
     total_redenumite = 0
-    total_fara_an = 0
-    actiuni_in_batch_curent = 0
+    actiuni_in_batch = 0
     numar_batch = 1
 
     for idx, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
-        print(f"\n📂 [{idx}/{len(FOLDERE_XML_IDS)}] Scanare completă Shared Drive ID: {folder_id}...", flush=True)
+        q_final = f"'{folder_id}' in parents and {query_drive}"
         page_token = None
-        count_drive_redenumite = 0
+        count_drive_red = 0
 
         while True:
             try:
                 response = service.files().list(
-                    q=f"'{folder_id}' in parents and trashed=false and name contains '.xml'",
+                    q=q_final,
                     spaces='drive',
                     fields="nextPageToken, files(id, name)",
                     pageToken=page_token,
@@ -122,45 +123,31 @@ def redenumeste_fisiere_pe_drive():
                     nume_vechi = f['name']
                     total_evaluate += 1
 
-                    # Extragem numărul paginii din nume
                     m_pag = pattern_pag.search(nume_vechi)
                     if not m_pag:
                         continue
                     pagina = m_pag.group(1)
 
-                    # CITIM PRIMII KILOOCTEȚI DIN CONȚINUTUL FIȘIERULUI
+                    # Citim primii bytes din XML pentru determinare an real
                     try:
                         req = service.files().get_media(fileId=f['id'], supportsAllDrives=True)
-                        # Descărcăm doar primii 4KB pentru eficiență maximă
                         req.headers['Range'] = 'bytes=0-4096'
                         continut_bytes = req.execute()
                         continut_str = continut_bytes.decode('utf-8', errors='ignore')
                         an_real = extrage_an_real_din_continut_xml(continut_str)
-                    except Exception as e_read:
-                        # Fallback dacă serverul refuză Range request
-                        try:
-                            req = service.files().get_media(fileId=f['id'], supportsAllDrives=True)
-                            continut_bytes = req.execute()
-                            continut_str = continut_bytes.decode('utf-8', errors='ignore')
-                            an_real = extrage_an_real_din_continut_xml(continut_str)
-                        except Exception:
-                            print(f"   ⚠️ Nu s-a putut citi conținutul fișierului {nume_vechi}", flush=True)
-                            continue
+                    except Exception:
+                        continue
 
                     if not an_real:
-                        total_fara_an += 1
                         continue
 
                     nume_nou_standard = f"brut_XML_{an_real}_pag{pagina}.xml"
 
-                    # DĂCĂ DEJA CORESPUNDE 100%, IL IGNORĂM
                     if nume_vechi == nume_nou_standard:
                         total_deja_perfecte += 1
-                        if total_evaluate % 500 == 0:
-                            print(f"   ⏳ Verificate {total_evaluate:,} fișiere | Corectate până acum: {total_redenumite:,}", flush=True)
                         continue
 
-                    # REDENUMIRE PE DRIVE PENTRU CELE NEINCONFORMĂ
+                    # REDENUMIRE PE DRIVE
                     try:
                         service.files().update(
                             fileId=f['id'],
@@ -170,17 +157,16 @@ def redenumeste_fisiere_pe_drive():
                         ).execute()
 
                         total_redenumite += 1
-                        count_drive_redenumite += 1
-                        actiuni_in_batch_curent += 1
+                        count_drive_red += 1
+                        actiuni_in_batch += 1
 
-                        print(f"   ✏️ [{total_redenumite:,}] Corectat: '{nume_vechi}' ➡️ '{nume_nou_standard}' (An din XML: {an_real})", flush=True)
+                        print(f"   ✏️ [{total_redenumite:,}] Corectat: '{nume_vechi}' ➡️ '{nume_nou_standard}' (An real: {an_real})", flush=True)
 
-                        # BATCH PAUSE (100 acțiuni)
-                        if actiuni_in_batch_curent >= DIMENSIUNE_BATCH:
-                            print(f"\n☕ [BATCH {numar_batch} COMPLET] Am procesat 100 redenumiri. Pauză de {PAUZA_SECUENTE_SEC}s...\n", flush=True)
-                            time.sleep(PAUZA_SECUENTE_SEC)
+                        if actiuni_in_batch >= DIMENSIUNE_BATCH:
+                            print(f"\n☕ [BATCH {numar_batch} COMPLET] Pauză {PAUZA_SECUENTE_SEC}s...\n", flush=True)
+                            time.sleep(PAUZA_SECUENTI_SEC)
                             numar_batch += 1
-                            actiuni_in_batch_curent = 0
+                            actiuni_in_batch = 0
 
                     except Exception as e_red:
                         print(f"   ⚠️ Eroare redenumire {f['id']} ({nume_vechi}): {e_red}", flush=True)
@@ -189,14 +175,15 @@ def redenumeste_fisiere_pe_drive():
                 if not page_token:
                     break
             except Exception as e:
-                print(f"⚠️ Eroare la scanarea folderului {folder_id}: {e}", flush=True)
+                print(f"⚠️ Eroare la scanare Drive {idx}: {e}", flush=True)
                 break
 
-        print(f"✅ Drive {idx} finalizat! Corectate în acest folder: {count_drive_redenumite:,}", flush=True)
+        if count_drive_red > 0:
+            print(f"✅ Drive {idx} - Redenumite în acest folder: {count_drive_red:,}", flush=True)
 
     print("\n============================================================", flush=True)
-    print(f"🏁 REPARARE & AUDIT TOTAL FINALIZAT!", flush=True)
-    print(f"📊 Evaluat: {total_evaluate:,} | De la început corecte: {total_deja_perfecte:,} | Corectate din XML: {total_redenumite:,}", flush=True)
+    print(f"🏁 CURĂȚARE CORECTĂ FINALIZATĂ!", flush=True)
+    print(f"📊 Scanate: {total_evaluate:,} | Deja corecte: {total_deja_perfecte:,} | Corectate: {total_redenumite:,}", flush=True)
     print("============================================================", flush=True)
 
 
