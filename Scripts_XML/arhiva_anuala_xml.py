@@ -21,8 +21,8 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from drive_config import FOLDERE_XML_IDS
 
-DIMENSIUNE_BATCH = 100
-PAUZA_SECUENTE_SEC = 2.5
+DIMENSIUNE_BATCH = 300
+PAUZA_SECUENTE_SEC = 4
 
 # Citire Index Drive din Argumente (ex: python redenumeste_fisiere_drive.py 1)
 INDEX_DRIVE_TARGET = None
