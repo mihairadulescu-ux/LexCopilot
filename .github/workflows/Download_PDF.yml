@@ -1,5 +1,4 @@
-name: REGELE PDF - Sincronizare Matriceala in Paralel
-
+name: Descarcare Monitoare Oficiale PDF
 on:
   workflow_dispatch:
     inputs:
