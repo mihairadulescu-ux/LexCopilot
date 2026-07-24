@@ -148,27 +148,27 @@ def proceseaza_si_arhiveaza_an(service, an, lista_fisiere, index_master):
         ).execute()
 
         arhiva_drive_id = res.get('id')
-        print(f"✅ Arhivă creată pe Drive! ID: {arhiva_drive_id}", flush=True)
+        print(f"✅ Arhivă creată pe Drive! ID unic arhivă: {arhiva_drive_id}", flush=True)
     except Exception as e_up:
         print(f"❌ Eroare upload arhivă {nume_arhiva}: {e_up}", flush=True)
 
-    # ACTUALIZARE INDEX MASTER CU METADATELE DE ARHIVĂ (FĂRĂ ȘTERGERE)
-    print(f"📝 Actualizare status arhivă în indexul master...", flush=True)
+    # ACTUALIZARE INDEX MASTER - FĂRĂ DRIVE ID INDIVIDUAL (DOAR ID ARHIVĂ PĂRINTE)
+    print(f"📝 Actualizare metadate arhivare în indexul master...", flush=True)
+    pattern_pag = re.compile(r"_pag(\d+)\.xml", re.IGNORECASE)
+
     for f_info in fisiere_descarcate_cu_succes:
-        key = f_info['name']  # Numele fișierului XML servește drept cheie
-        
-        if key not in index_master:
-            index_master[key] = {
-                "file_id": f_info['id'],
-                "nume_fisier": f_info['name'],
-                "folder_id": f_info.get('folder_id')
-            }
-        
-        # Adăugăm starea de arhivare
-        index_master[key]["status_arhiva"] = "arhivat"
-        index_master[key]["nume_arhiva"] = nume_arhiva
-        index_master[key]["arhiva_drive_id"] = arhiva_drive_id
-        index_master[key]["cale_interna_arhiva"] = f_info['name']
+        key = f_info['name']
+        m_pag = pattern_pag.search(key)
+        pagina_num = int(m_pag.group(1)) if m_pag else None
+
+        index_master[key] = {
+            "status": "arhivat",
+            "nume_arhiva": nume_arhiva,
+            "arhiva_drive_id": arhiva_drive_id,
+            "cale_interna": f_info['name'],
+            "an": an,
+            "pagina": pagina_num
+        }
 
     # Curățare temporare locale
     for f_p in dir_temp.glob("*.xml"):
@@ -216,8 +216,7 @@ def main():
                         an = int(m.group(1))
                         fisiere_per_an[an].append({
                             "id": f['id'], 
-                            "name": f['name'],
-                            "folder_id": folder_id
+                            "name": f['name']
                         })
                         count_drive += 1
 
@@ -237,11 +236,10 @@ def main():
         lista_fisiere = fisiere_per_an[an]
         if lista_fisiere:
             proceseaza_si_arhiveaza_an(service, an, lista_fisiere, index_master)
-            # Salvare intermediară a indexului după fiecare an procesat cu succes
             salvare_index_master(index_master)
 
     print("\n============================================================", flush=True)
-    print("🏁 PROCES COMPLET FINALIZAT! NICIUN FIȘIER BRUT NU A FOST ȘTERS.", flush=True)
+    print("🏁 PROCES COMPLET FINALIZAT!", flush=True)
     print("============================================================", flush=True)
 
 
