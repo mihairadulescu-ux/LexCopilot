@@ -3,9 +3,14 @@ import sys
 import json
 import time
 import tarfile
+import re
+import tempfile
+import io
 from pathlib import Path
+import requests
+from suds.client import Client
 
-# Stream live ne-bufferat pentru GitHub Actions
+# Stream direct live fără buffer pentru GitHub Actions
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
@@ -15,28 +20,24 @@ RADACINA_PROIECT = DIRECTOR_CURENT.parent
 if str(RADACINA_PROIECT) not in sys.path:
     sys.path.insert(0, str(RADACINA_PROIECT))
 
-try:
-    from suds.client import Client
-except ImportError:
-    import subprocess
-    subprocess.run([sys.executable, "-m", "pip", "install", "suds-py3"], check=True)
-    from suds.client import Client
-
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-from drive_config import FOLDERE_XML_IDS, FOLDER_INDEX_ID, URL_WSDL
+from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
+from drive_config import (
+    FOLDERE_XML_IDS,
+    FOLDER_INDEX_ID,
+    get_file_params,
+    get_list_params,
+    get_shared_drive_index_for_year
+)
 
-# Preluare An din linia de comandă (ex: python download_xml.py 1990)
-AN_TARGET = int(sys.argv[1]) if len(sys.argv) >= 2 and sys.argv[1].isdigit() else 1990
+# Configuration Parameters
+PRAG_SYNC_PAGINI = 100  # Sincronizare la fiecare 100 de pagini
 REZULTATE_PER_PAGINA = 10
-
-# Workspace local pe runner-ul de Linux
-DIR_TEMP_LOCAL = Path(f"/tmp/xml_workspace_{AN_TARGET}")
-DIR_TEMP_LOCAL.mkdir(parents=True, exist_ok=True)
 
 
 def get_drive_service():
+    """Autentificare în Google Drive API prin Service Account JSON."""
     creds_json = (
         os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
         or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
@@ -53,305 +54,281 @@ def get_drive_service():
         )
         return build("drive", "v3", credentials=creds)
     except Exception as e:
-        print(f"❌ [AUTH] Eroare Google Drive: {e}", flush=True)
+        print(f"❌ [AUTH] Eroare Google Drive API: {e}", flush=True)
         sys.exit(1)
 
 
-# ==============================================================================
-# CLIENT SOAP JUST.RO
-# ==============================================================================
-class JustRoSoapClient:
-    def __init__(self, wsdl_url):
-        if not wsdl_url:
-            print("❌ [SOAP] Adresa WSDL nu este definită în mediu!", flush=True)
-            sys.exit(1)
-        self.wsdl_url = wsdl_url
-        print("🌐 Inițializare client SOAP WSDL...", flush=True)
-        self.client = Client(self.wsdl_url)
-        self.token = None
-        self.renoieste_token()
-
-    def renoieste_token(self):
-        print("🔑 Solicitare Token nou...", flush=True)
-        for incercare in range(3):
-            try:
-                self.token = self.client.service.GetToken()
-                if self.token:
-                    print("✅ Token obținut cu succes!", flush=True)
-                    return True
-            except Exception as e:
-                print(f"⚠️ Eroare obținere token ({incercare+1}/3): {e}", flush=True)
-                time.sleep(2)
-        print("❌ Nu s-a putut obține token-ul după 3 încercări!", flush=True)
-        return False
-
-    def descarca_pagina_cu_retry(self, an, pagina):
-        max_retries = 4
-        for incercare in range(1, max_retries + 1):
-            try:
-                search_model = self.client.factory.create('SearchModel')
-                search_model.NumarPagina = pagina
-                search_model.RezultatePagina = REZULTATE_PER_PAGINA
-                search_model.SearchAn = an
-
-                raspuns = self.client.service.Search(search_model, self.token)
-                continut_str = str(raspuns)
-
-                if not continut_str or "Legi[] = None" in continut_str or len(continut_str.strip()) < 50:
-                    return False, None, 0
-
-                return True, continut_str, len(continut_str.encode('utf-8'))
-
-            except Exception as e:
-                err_msg = str(e).lower()
-                if "token" in err_msg or "expired" in err_msg or "unauthorized" in err_msg:
-                    print("🔄 Token expirat. Reîmprospătare...", flush=True)
-                    self.renoieste_token()
-                else:
-                    print(f"⚠️ Eroare descărcare An={an}, Pagina={pagina} (încercare {incercare}/{max_retries}): {e}", flush=True)
-                    if incercare < max_retries:
-                        time.sleep(2)
-        
-        return False, None, 0
-
-
-# ==============================================================================
-# AUTO-INITIALIZARE & GESTIONARE RESURSE DRIVE
-# ==============================================================================
-def initializeaza_sau_incarca_micro_index(service, an):
-    """
-    Caută micro-indexul pe Discul 0.
-    Dacă NU există, îl inițializează automat și îl creează pe Drive.
-    """
-    nume_micro = f"index_an_{an}.json"
+def primeste_token_soap(wsdl_url):
+    """Solicită un token nou de autentificare de la serviciul SOAP Just.ro."""
     try:
-        q = f"'{FOLDER_INDEX_ID}' in parents and name = '{nume_micro}' and trashed=false"
-        res = service.files().list(q=q, spaces='drive', fields="files(id)", supportsAllDrives=True).execute()
-        files = res.get('files', [])
-
-        if files:
-            file_id = files[0]['id']
-            req = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-            continut = req.execute().decode('utf-8')
-            if continut.strip() and continut.strip() != "{}":
-                stare = json.loads(continut)
-                print(f"   ℹ️ Micro-index existent încărcat de pe Discul 0 (ID: {file_id}).", flush=True)
-                return file_id, stare
-            else:
-                print(f"   ℹ️ Micro-index existent este gol. Se va re-inițializa.", flush=True)
-                file_id_existenta = file_id
-        else:
-            file_id_existenta = None
-
+        client = Client(wsdl_url)
+        token = client.service.GetToken()
+        return token
     except Exception as e:
-        print(f"⚠️ Atenție la căutarea micro-indexului: {e}", flush=True)
-        file_id_existenta = None
-
-    # Inițializare structură nouă dacă nu s-a găsit sau era gol
-    stare_noua = {
-        "an": an,
-        "status": "IN_PROGRES",
-        "ultimul_update": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "total_xml_valid": 0,
-        "drive_archive_file_id": None,
-        "pagini_descarcate": {}
-    }
-
-    print(f"   🆕 Auto-inițializare Micro-Index nou pentru anul {an}...", flush=True)
-    file_id = salveaza_micro_index(service, an, stare_noua, file_id_existenta)
-    return file_id, stare_noua
+        print(f"❌ Eroare la obținerea token-ului SOAP: {e}", flush=True)
+        return None
 
 
-def cauta_sau_initializeaza_arhiva(service, an, target_drive_id):
-    """
-    Verifică dacă există deja arhiva .tar.gz pe Drive-ul de stocare alocat.
-    Returnează ID-ul dacă există sau None dacă va fi creată la prima sincronizare.
-    """
-    nume_tar = f"brut_XML_{an}.tar.gz"
+def cauta_fisiere_pe_drive(service, parent_id, nume_fisier):
+    """Caută un fișier după nume într-un folder specific pe Google Drive."""
     try:
-        q = f"'{target_drive_id}' in parents and name = '{nume_tar}' and trashed=false"
-        res = service.files().list(q=q, spaces='drive', fields="files(id)", supportsAllDrives=True).execute()
-        files = res.get('files', [])
-        if files:
-            f_id = files[0]['id']
-            print(f"   📦 Arhivă existentă găsită pe Drive (ID: {f_id}).", flush=True)
-            return f_id
+        q = f"'{parent_id}' in parents and name = '{nume_fisier}' and trashed = false"
+        params = get_list_params()
+        params["q"] = q
+        params["fields"] = "files(id, name)"
+        res = service.files().list(**params).execute()
+        files = res.get("files", [])
+        return files[0]["id"] if files else None
     except Exception as e:
-        print(f"⚠️ Atenție la verificare arhivă: {e}", flush=True)
-
-    print(f"   📦 Nicio arhivă găsită pentru anul {an}. Va fi creată automat pe Drive la primul sync.", flush=True)
-    return None
+        print(f"⚠️ Eroare la căutarea fișierului '{nume_fisier}': {e}", flush=True)
+        return None
 
 
-def actualizeaza_sau_creeaza_tar(service, an, dir_xml_local, target_drive_id, archive_file_id_existenta=None):
-    cale_tar_local = DIR_TEMP_LOCAL / f"brut_XML_{an}.tar.gz"
-    print(f"\n📦 [SYNC TAR.GZ] Împachetare incrementală pentru anul {an}...", flush=True)
+def incarca_micro_index(service, an):
+    """Încarcă fișierul index_an_YYYY.json de pe Discul 0 (Folder Index)."""
+    nume_index = f"index_an_{an}.json"
+    file_id = cauta_fisiere_pe_drive(service, FOLDER_INDEX_ID, nume_index)
 
-    with tarfile.open(cale_tar_local, "w:gz") as tar:
-        for f_xml in dir_xml_local.glob("*.xml"):
-            tar.add(f_xml, arcname=f_xml.name)
+    if not file_id:
+        return None, {
+            "an": str(an),
+            "status": "IN_PROGRES",
+            "drive_archive_file_id": "",
+            "ultimul_update": "",
+            "total_xml_valid": 0,
+            "pagini_descarcate": {}
+        }
 
-    marime_mb = cale_tar_local.stat().st_size / (1024 * 1024)
-    media = MediaFileUpload(str(cale_tar_local), mimetype='application/gzip', resumable=True)
+    try:
+        req = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+        content = req.execute().decode('utf-8')
+        data = json.loads(content)
+        return file_id, data
+    except Exception as e:
+        print(f"⚠️ Eroare la citirea micro-indexului {nume_index}: {e}", flush=True)
+        return file_id, {
+            "an": str(an),
+            "status": "IN_PROGRES",
+            "drive_archive_file_id": "",
+            "ultimul_update": "",
+            "total_xml_valid": 0,
+            "pagini_descarcate": {}
+        }
 
-    if archive_file_id_existenta:
-        print(f"   🔄 Actualizare arhivă pe Drive (ID: {archive_file_id_existenta}) | {marime_mb:.2f} MB...", flush=True)
-        updated_file = service.files().update(
-            fileId=archive_file_id_existenta,
-            media_body=media,
-            fields='id',
-            supportsAllDrives=True
-        ).execute()
-        drive_id = updated_file.get('id')
+
+def salveaza_micro_index(service, file_id, index_data):
+    """Salvează/Actualizează micro-indexul pe Discul 0 și anunță explicit în consolă."""
+    an = index_data.get("an")
+    nume_index = f"index_an_{an}.json"
+    json_bytes = json.dumps(index_data, indent=2, ensure_ascii=False).encode('utf-8')
+
+    media = MediaIoBaseUpload(io.BytesIO(json_bytes), mimetype='application/json')
+
+    if file_id:
+        params = get_file_params()
+        params["fileId"] = file_id
+        params["media_body"] = media
+        service.files().update(**params).execute()
     else:
-        print(f"   ☁️ Inițializare și creare arhivă nouă pe Drive | {marime_mb:.2f} MB...", flush=True)
-        file_metadata = {'name': f"brut_XML_{an}.tar.gz", 'parents': [target_drive_id]}
-        created_file = service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id',
-            supportsAllDrives=True
-        ).execute()
-        drive_id = created_file.get('id')
+        file_metadata = {
+            "name": nume_index,
+            "parents": [FOLDER_INDEX_ID]
+        }
+        params = get_file_params()
+        params["body"] = file_metadata
+        params["media_body"] = media
+        res = service.files().create(**params).execute()
+        file_id = res.get("id")
 
-    print(f"   ✅ Arhivă sincronizată cu succes! File ID: {drive_id}", flush=True)
-    return drive_id
+    print(f"   💾 Micro-index '{nume_index}' salvat/actualizat cu succes pe Discul 0!", flush=True)
+    return file_id
 
 
-def salveaza_micro_index(service, an, stare_index, index_file_id=None):
-    nume_micro = f"index_an_{an}.json"
-    cale_json_local = DIR_TEMP_LOCAL / nume_micro
+def descarca_si_sincronizeaza(an_target):
+    """Procesul principal de descărcare SOAP și sincronizare arhivă + micro-index."""
+    wsdl_url = os.getenv("JUST_RO_WSDL_URL") or "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
+    service = get_drive_service()
 
-    with open(cale_json_local, "w", encoding="utf-8") as f:
-        json.dump(stare_index, f, indent=2, ensure_ascii=False)
+    drive_idx = get_shared_drive_index_for_year(an_target)
+    shared_drive_id = FOLDERE_XML_IDS[drive_idx]
 
-    media = MediaFileUpload(str(cale_json_local), mimetype='application/json')
-
-    if index_file_id:
-        service.files().update(
-            fileId=index_file_id,
-            media_body=media,
-            fields='id',
-            supportsAllDrives=True
-        ).execute()
-        ret_id = index_file_id
+    print("🌐 Inițializare client SOAP WSDL...", flush=True)
+    print("🔑 Solicitare Token nou...", flush=True)
+    token = primeste_token_soap(wsdl_url)
+    if token:
+        print("✅ Token obținut cu succes!", flush=True)
     else:
-        file_metadata = {'name': nume_micro, 'parents': [FOLDER_INDEX_ID]}
-        res = service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id',
-            supportsAllDrives=True
-        ).execute()
-        ret_id = res.get('id')
-
-    cale_json_local.unlink(missing_ok=True)
-    return ret_id
-
-
-# ==============================================================================
-# ENGINE PRINCIPAL PER AN
-# ==============================================================================
-def proceseaza_an_fir_independent(an):
-    drive_service = get_drive_service()
-    soap_client = JustRoSoapClient(URL_WSDL)
-
-    if not FOLDERE_XML_IDS:
-        print("❌ [CONFIG] FOLDERE_XML_IDS este gol!", flush=True)
+        print("❌ Nu s-a putut obține token-ul SOAP!", flush=True)
         sys.exit(1)
 
-    idx_disc = (an % len(FOLDERE_XML_IDS))
-    target_drive_id = FOLDERE_XML_IDS[idx_disc]
-
-    dir_xml_local = DIR_TEMP_LOCAL / "xml_files"
-    dir_xml_local.mkdir(parents=True, exist_ok=True)
-
     print("============================================================", flush=True)
-    print(f"🚀 START PROCESARE SOAP PENTRU ANUL {an}", flush=True)
-    print(f"📂 Drive Destinație: Shared Drive #{idx_disc + 1} (ID: {target_drive_id})", flush=True)
+    print(f"🚀 START PROCESARE SOAP PENTRU ANUL {an_target}", flush=True)
+    print(f"📂 Drive Destinație: Shared Drive #{drive_idx + 1} (ID: {shared_drive_id})", flush=True)
     print("============================================================", flush=True)
 
-    # 1. AUTO-INITIALIZARE SAU ÎNCĂRCARE MICRO-INDEX
-    index_file_id, stare_index = initializeaza_sau_incarca_micro_index(drive_service, an)
-    
-    # 2. AUTO-INITIALIZARE SAU CĂUTARE ARHIVĂ EXISTENTĂ
-    archive_file_id = stare_index.get("drive_archive_file_id")
-    if not archive_file_id:
-        archive_file_id = cauta_sau_initializeaza_arhiva(drive_service, an, target_drive_id)
+    # Incarcare micro-index de pe Drive
+    micro_index_id, micro_data = incarca_micro_index(service, an_target)
+    pagini_ok = micro_data.get("pagini_descarcate", {})
 
-    pagini_descarcate = stare_index.get("pagini_descarcate", {})
+    nume_arhiva = f"brut_XML_{an_target}.tar.gz"
+    archive_file_id = micro_data.get("drive_archive_file_id") or cauta_fisiere_pe_drive(service, shared_drive_id, nume_arhiva)
 
-    numarator_consecutive_goale = 0
-    pagini_de_la_ultimul_sync = 0
-    pagina_curenta = 1
+    if archive_file_id:
+        micro_data["drive_archive_file_id"] = archive_file_id
+
+    pagini_deja_procesate = [p for p, status in pagini_ok.items() if status == "OK"]
+    if pagini_deja_procesate:
+        print(f"🔄 RELUARE DETECTATĂ: Paginile 1..{len(pagini_deja_procesate)} sunt deja descărcate și validate pe Drive.", flush=True)
+
+    dir_temp = tempfile.mkdtemp()
+    cale_arhiva_local = Path(dir_temp) / nume_arhiva
+
+    # Daca arhiva exista pe Drive, o descarcam local pentru append/update
+    if archive_file_id and not cale_arhiva_local.exists():
+        try:
+            print(f"📥 Descărcare arhivă existentă de pe Drive pentru actualizare incrementală...", flush=True)
+            req = service.files().get_media(fileId=archive_file_id, supportsAllDrives=True)
+            with open(cale_arhiva_local, "wb") as f:
+                f.write(req.execute())
+        except Exception as e:
+            print(f"⚠️ Nu s-a putut descărca arhiva existentă: {e}. Se va crea una nouă.", flush=True)
+
+    pagina = 1
+    fisiere_noi_in_pachet = 0
 
     while True:
-        pagina_str = str(pagina_curenta)
+        str_pag = str(pagina)
 
-        # Skip pagini deja descărcate cu succes (Reluare inteligentă)
-        if pagini_descarcate.get(pagina_str) == "OK":
-            pagina_curenta += 1
-            numarator_consecutive_goale = 0
+        # Verificăm dacă pagina este deja descărcată cu succes
+        if pagini_ok.get(str_pag) == "OK":
+            pagina += 1
             continue
 
-        is_ok, continut_xml, marime_bytes = soap_client.descarca_pagina_cu_retry(an, pagina_curenta)
+        # Apel SOAP către Just.ro
+        soap_request = f"""<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ns0="http://schemas.datacontract.org/2004/07/FreeWebService" xmlns:ns1="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns2="http://tempuri.org/">
+   <SOAP-ENV:Header/>
+   <ns1:Body>
+      <ns2:Search>
+         <ns2:SearchModel>
+            <ns0:NumarPagina>{pagina}</ns0:NumarPagina>
+            <ns0:RezultatePagina>{REZULTATE_PER_PAGINA}</ns0:RezultatePagina>
+            <ns0:SearchAn>{an_target}</ns0:SearchAn>
+         </ns2:SearchModel>
+         <ns2:tokenKey>{token}</ns2:tokenKey>
+      </ns2:Search>
+   </ns1:Body>
+</SOAP-ENV:Envelope>"""
 
-        if is_ok:
-            nume_xml = f"brut_XML_{an}_pag{pagina_curenta}.xml"
-            with open(dir_xml_local / nume_xml, "w", encoding="utf-8") as f:
-                f.write(continut_xml)
+        headers = {
+            "Content-Type": "text/xml; charset=utf-8",
+            "SOAPAction": "http://tempuri.org/IFreeWebService/Search"
+        }
 
-            pagini_descarcate[pagina_str] = "OK"
-            numarator_consecutive_goale = 0
-            pagini_de_la_ultimul_sync += 1
-
-            print(f"   🟢 [AN {an} | PAGINA {pagina_curenta}] SOAP XML Valid | Dimensiune: {marime_bytes:,} bytes", flush=True)
-        else:
-            pagini_descarcate[pagina_str] = "GOL"
-            numarator_consecutive_goale += 1
-            print(f"   ⚪ [AN {an} | PAGINA {pagina_curenta}] Răspuns GOL | Consecutiv goale: {numarator_consecutive_goale}/20", flush=True)
-
-        # Salvare incrementală la fiecare 200 de pagini noi
-        if pagini_de_la_ultimul_sync >= 200:
-            archive_file_id = actualizeaza_sau_creeaza_tar(drive_service, an, dir_xml_local, target_drive_id, archive_file_id)
+        try:
+            resp = requests.post("http://legislatie.just.ro/apiws/FreeWebService.svc", data=soap_request, headers=headers, timeout=30)
             
-            stare_index.update({
-                "an": an,
-                "status": "IN_PROGRES",
-                "ultimul_update": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "total_xml_valid": sum(1 for v in pagini_descarcate.values() if v == "OK"),
-                "drive_archive_file_id": archive_file_id,
-                "pagini_descarcate": pagini_descarcate
-            })
-            index_file_id = salveaza_micro_index(drive_service, an, stare_index, index_file_id)
-            pagini_de_la_ultimul_sync = 0
+            # Verificare Token expirat
+            if "token" in resp.text.lower() and ("expirat" in resp.text.lower() or "invalid" in resp.text.lower()):
+                print("🔄 Token expirat. Reîmprospătare...", flush=True)
+                token = primeste_token_soap(wsdl_url)
+                continue
 
-        # Punct de oprire: 20 de pagini goale consecutive
-        if numarator_consecutive_goale >= 20:
-            print(f"\n🛑 [STOP AN {an}] 20 de pagini goale consecutive. Anul {an} este complet!", flush=True)
-            break
+            if resp.status_code != 200 or "<a:Legi>" not in resp.text or "</a:Legi>" in resp.text and "<a:Legi/>" in resp.text:
+                # Verificăm dacă chiar am ajuns la finalul rezultatelor
+                if "<a:Legi/>" in resp.text or "<a:Legi></a:Legi>" in resp.text or resp.status_code == 200:
+                    print(f"\n🏁 [AN {an_target}] S-a atins ultima pagină de date ({pagina - 1}).", flush=True)
+                    break
 
-        pagina_curenta += 1
-        time.sleep(0.2)
+            # Salvare fișier XML local
+            nume_xml = f"brut_XML_{an_target}_pag{pagina}.xml"
+            cale_xml_temp = Path(dir_temp) / nume_xml
+            with open(cale_xml_temp, "w", encoding="utf-8") as f:
+                f.write(resp.text)
 
-    # Sincronizare finală la terminarea anului
-    if pagini_de_la_ultimul_sync > 0 or not archive_file_id:
-        archive_file_id = actualizeaza_sau_creeaza_tar(drive_service, an, dir_xml_local, target_drive_id, archive_file_id)
+            # Adăugare în arhiva tar.gz locală
+            mod_deschidere = "a:" if cale_arhiva_local.exists() else "w:gz"
+            with tarfile.open(cale_arhiva_local, mod_deschidere) as tar:
+                tar.add(cale_xml_temp, arcname=nume_xml)
 
-    stare_index.update({
-        "an": an,
-        "status": "FINALIZAT",
-        "ultimul_update": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "total_xml_valid": sum(1 for v in pagini_descarcate.values() if v == 'OK'),
-        "drive_archive_file_id": archive_file_id,
-        "pagini_descarcate": pagini_descarcate
-    })
-    salveaza_micro_index(drive_service, an, stare_index, index_file_id)
+            cale_xml_temp.unlink(missing_ok=True)
 
-    print("\n============================================================", flush=True)
-    print(f"🏁 PROCESARE FINALIZATĂ CU SUCCES PENTRU ANUL {an}!", flush=True)
-    print("============================================================", flush=True)
+            pagini_ok[str_pag] = "OK"
+            fisiere_noi_in_pachet += 1
+            print(f"   🟢 [AN {an_target} | PAGINA {pagina}] SOAP XML Valid | Dimensiune: {len(resp.text):,} bytes", flush=True)
+
+            # Sincronizare pe Drive la fiecare 100 de pagini
+            if fisiere_noi_in_pachet >= PRAG_SYNC_PAGINI:
+                print(f"\n📦 [SYNC TAR.GZ & INDEX] Împachetare incrementală la pragul de {PRAG_SYNC_PAGINI} de pagini pentru anul {an_target}...", flush=True)
+                
+                marime_mb = cale_arhiva_local.stat().st_size / (1024 * 1024)
+                media = MediaFileUpload(str(cale_arhiva_local), mimetype="application/gzip", resumable=True)
+
+                if archive_file_id:
+                    params = get_file_params()
+                    params["fileId"] = archive_file_id
+                    params["media_body"] = media
+                    service.files().update(**params).execute()
+                else:
+                    file_metadata = {"name": nume_arhiva, "parents": [shared_drive_id]}
+                    params = get_file_params()
+                    params["body"] = file_metadata
+                    params["media_body"] = media
+                    res = service.files().create(**params).execute()
+                    archive_file_id = res.get("id")
+                    micro_data["drive_archive_file_id"] = archive_file_id
+
+                print(f"   ☁️ Arhivă '{nume_arhiva}' ({marime_mb:.2f} MB) sincronizată pe Drive | File ID: {archive_file_id}", flush=True)
+
+                # Salvare Micro-Index pe Discul 0
+                micro_data["pagini_descarcate"] = pagini_ok
+                micro_data["total_xml_valid"] = len(pagini_ok)
+                micro_data["ultimul_update"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                micro_index_id = salveaza_micro_index(service, micro_index_id, micro_data)
+
+                fisiere_noi_in_pachet = 0
+
+            pagina += 1
+
+        except Exception as e:
+            print(f"⚠️ Eroare la procesarea paginii {pagina}: {e}. Reîncercare...", flush=True)
+            time.sleep(2)
+
+    # Sincronizare finală la încheierea anului
+    if cale_arhiva_local.exists():
+        print(f"\n🏁 [SYNC FINAL] Salvare finală arhivă și micro-index pentru anul {an_target}...", flush=True)
+        marime_mb = cale_arhiva_local.stat().st_size / (1024 * 1024)
+        media = MediaFileUpload(str(cale_arhiva_local), mimetype="application/gzip", resumable=True)
+
+        if archive_file_id:
+            params = get_file_params()
+            params["fileId"] = archive_file_id
+            params["media_body"] = media
+            service.files().update(**params).execute()
+        else:
+            file_metadata = {"name": nume_arhiva, "parents": [shared_drive_id]}
+            params = get_file_params()
+            params["body"] = file_metadata
+            params["media_body"] = media
+            res = service.files().create(**params).execute()
+            archive_file_id = res.get("id")
+            micro_data["drive_archive_file_id"] = archive_file_id
+
+        print(f"   ☁️ Arhivă finală '{nume_arhiva}' ({marime_mb:.2f} MB) salvată pe Drive!", flush=True)
+
+        micro_data["status"] = "FINALIZAT"
+        micro_data["pagini_descarcate"] = pagini_ok
+        micro_data["total_xml_valid"] = len(pagini_ok)
+        micro_data["ultimul_update"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        salveaza_micro_index(service, micro_index_id, micro_data)
+
+    print(f"\n✨ PROCESARE COMPLETĂ PENTRU ANUL {an_target}! Total pagini XML salvate: {len(pagini_ok)}", flush=True)
 
 
 if __name__ == "__main__":
-    proceseaza_an_fir_independent(AN_TARGET)
+    if len(sys.argv) < 2:
+        print("❌ Specificați anul ca argument (ex: python download_XML.py 1990)", flush=True)
+        sys.exit(1)
+
+    an_input = sys.argv[1]
+    descarca_si_sincronizeaza(an_input)
