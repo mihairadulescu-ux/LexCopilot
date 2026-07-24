@@ -5,9 +5,9 @@ on:
   workflow_dispatch:
     inputs:
       matrice_ani:
-        description: 'Ani sau intervale (ex: 1990, 1995-1999, 2000-2005)'
+        description: 'Ani sau intervale separate prin virgulă'
         required: true
-        default: '1990, 1993, 1995-1999, 2004, 2010-2015, 2026'
+        default: '1990-1999, 2000-2009, 2010-2015, 2016-2020, 2021-2026'
 
 jobs:
   generate-matrix:
@@ -44,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 2
-      matrix: ${{ json(needs.generate-matrix.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
 
     env:
       DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML || vars.DRIVE_FOLDER_XML }}
