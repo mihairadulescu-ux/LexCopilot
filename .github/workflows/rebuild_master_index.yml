@@ -18,7 +18,7 @@ jobs:
       - name: Configurare Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.13'
 
       - name: Instalare dependențe
         run: |
@@ -29,6 +29,8 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
           XML_STORAGE_INDEX: ${{ secrets.XML_STORAGE_INDEX }}
+          FOLDER_INDEX_ID: ${{ secrets.XML_STORAGE_INDEX }}
+          TEMPORARY_XML_INDEXES: ${{ secrets.TEMPORARY_XML_INDEXES }}
         run: |
           if [ "${{ inputs.full_reset }}" = "true" ]; then
             python Scripts_XML/rebuild_master_index.py reset
