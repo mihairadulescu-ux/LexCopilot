@@ -1,4 +1,7 @@
-name: Descarcare Monitoare Oficiale PDF
+# Filename:.github/workflows/PDF _downloader.yml
+# Scop
+
+name: Descarcare Monitoare Oficiale in format PDF
 on:
   workflow_dispatch:
     inputs:
