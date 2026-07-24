@@ -1,9 +1,10 @@
 import os
 import sys
 import json
+import time
 from pathlib import Path
 
-# Unbuffered stream - mesaje directe pe ecran
+# Stream direct ne-bufferat (Live pe GitHub Actions)
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
@@ -19,7 +20,6 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from drive_config import FOLDERE_XML_IDS
 
-# Preluăm discul țintă din comandă (dacă există)
 INDEX_DRIVE_TARGET = None
 if len(sys.argv) >= 2 and sys.argv[1].isdigit():
     INDEX_DRIVE_TARGET = int(sys.argv[1])
@@ -39,7 +39,7 @@ def get_drive_service():
             )
             return build("drive", "v3", credentials=creds)
         except Exception as e:
-            print(f"❌ [AUTH] Eroare parsare JSON: {e}", flush=True)
+            print(f"❌ [AUTH] Eroare JSON: {e}", flush=True)
             sys.exit(1)
             
     cale_local = RADACINA_PROIECT / "service_account.json"
@@ -50,98 +50,94 @@ def get_drive_service():
             )
             return build("drive", "v3", credentials=creds)
         except Exception as e:
-            print(f"❌ [AUTH] Eroare citire locală: {e}", flush=True)
+            print(f"❌ [AUTH] Eroare local: {e}", flush=True)
 
-    print("❌ [AUTH] Nu s-a găsit secretul GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
+    print("❌ [AUTH] Lipsă secret GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
     sys.exit(1)
 
 
-def curata_fisiere():
+def curata_masiv_batch():
     service = get_drive_service()
     total_discuri = len(FOLDERE_XML_IDS)
 
     if INDEX_DRIVE_TARGET is not None:
         idx_zero = INDEX_DRIVE_TARGET - 1
         if 0 <= idx_zero < total_discuri:
-            discuri_de_procesat = [(INDEX_DRIVE_TARGET, FOLDERE_XML_IDS[idx_zero])]
-            print(f"🧹 [START] Ștergere strictă pe Drive #{INDEX_DRIVE_TARGET}...", flush=True)
+            discuri = [(INDEX_DRIVE_TARGET, FOLDERE_XML_IDS[idx_zero])]
         else:
-            print(f"❌ Index {INDEX_DRIVE_TARGET} invalid!", flush=True)
+            print(f"❌ Disc {INDEX_DRIVE_TARGET} invalid!", flush=True)
             return
     else:
-        discuri_de_procesat = list(enumerate(FOLDERE_XML_IDS, start=1))
-        print(f"🧹 [START] Ștergere pe TOATE cele {total_discuri} discuri...", flush=True)
+        discuri = list(enumerate(FOLDERE_XML_IDS, start=1))
+
+    print("============================================================", flush=True)
+    print(f"⚡ PORNIRE ȘTERGERE RAPIDĂ ÎN BATCH (PACHETE DE 100)", flush=True)
+    print("============================================================", flush=True)
 
     total_sterse = 0
 
-    for idx, folder_id in discuri_de_procesat:
-        print(f"\n📂 Procesare Drive #{idx} (ID: {folder_id})...", flush=True)
-        page_token = None
+    for idx, folder_id in discuri:
+        print(f"\n📂 Curățare Drive #{idx} ({folder_id})...", flush=True)
         sterse_pe_disc = 0
+        page_token = None
 
         while True:
             try:
-                # Citim fișierele neșterse
+                # Interogăm pachete de câte 100
                 response = service.files().list(
                     q=f"'{folder_id}' in parents and trashed=false",
                     spaces='drive',
-                    fields="nextPageToken, files(id, name)",
+                    fields="nextPageToken, files(id)",
                     pageToken=page_token,
-                    pageSize=200,
+                    pageSize=100,
                     includeItemsFromAllDrives=True,
                     supportsAllDrives=True
                 ).execute()
 
                 files = response.get('files', [])
                 if not files:
-                    print(f"✨ Drive #{idx} este curat/gol.", flush=True)
+                    print(f"✨ Drive #{idx} este 100% gol!", flush=True)
                     break
 
-                print(f"   🔎 Am găsit {len(files)} fișiere în lot. Se șterg...", flush=True)
+                # CREĂM CEREREA BATCH (Toate 100 nimeresc într-un singur pachet HTTP)
+                batch = service.new_batch_http_request()
+
+                def callback(request_id, response, exception):
+                    nonlocal sterse_pe_disc, total_sterse
+                    if exception is None:
+                        sterse_pe_disc += 1
+                        total_sterse += 1
 
                 for f in files:
-                    try:
-                        # Comanda de ștergere directă
+                    batch.add(
                         service.files().delete(
                             fileId=f['id'],
                             supportsAllDrives=True,
                             supportsTeamDrives=True
-                        ).execute()
-                        
-                        total_sterse += 1
-                        sterse_pe_disc += 1
+                        ),
+                        callback=callback
+                    )
 
-                        if sterse_pe_disc % 50 == 0:
-                            print(f"   🗑️ [Drive #{idx}] Șterse {sterse_pe_disc:,} fișiere...", flush=True)
+                # Executăm tot pachetul dintr-o singură mișcare
+                batch.execute()
+                print(f"   🔥 [Drive #{idx}] Eliminat lot de {len(files)} fișiere... Total șterse pe disc: {sterse_pe_disc:,}", flush=True)
 
-                    except Exception as e_del:
-                        # Fallback în caz că nu permite delete definitiv
-                        try:
-                            service.files().update(
-                                fileId=f['id'],
-                                body={'trashed': True},
-                                supportsAllDrives=True,
-                                supportsTeamDrives=True
-                            ).execute()
-                            total_sterse += 1
-                            sterse_pe_disc += 1
-                        except Exception:
-                            pass
+                # Pauză de 0.2s anti-flood
+                time.sleep(0.2)
 
-                page_token = response.get('nextPageToken')
+            except Exception as e:
+                print(f"⚠️ Eroare la lotul curent: {e}", flush=True)
+                time.sleep(1)
+                page_token = response.get('nextPageToken') if 'response' in locals() else None
                 if not page_token:
                     break
 
-            except Exception as e:
-                print(f"⚠️ Eroare scanare Drive #{idx}: {e}", flush=True)
-                break
-
-        print(f"✅ Drive #{idx} curățat! Total șterse: {sterse_pe_disc:,}", flush=True)
+        print(f"✅ Drive #{idx} curățat complet! Total șterse: {sterse_pe_disc:,}", flush=True)
 
     print("\n============================================================", flush=True)
-    print(f"🏁 CURĂȚENIE FINALIZATĂ! Total fișiere eliminate: {total_sterse:,}", flush=True)
+    print(f"🏁 CURĂȚENIE TOTALĂ CU SUCCES! Total eliminate: {total_sterse:,}", flush=True)
     print("============================================================", flush=True)
 
 
 if __name__ == "__main__":
-    curata_fisiere()
+    curata_masiv_batch()
