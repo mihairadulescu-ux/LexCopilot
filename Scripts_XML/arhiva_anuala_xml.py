@@ -22,14 +22,12 @@ from googleapiclient.discovery import build
 from drive_config import FOLDERE_XML_IDS
 
 DIMENSIUNE_BATCH = 100
-PAUZA_SECUENTI_SEC = 2.5
+PAUZA_SECUENTE_SEC = 2.5
 
 # Citire Index Drive din Argumente (ex: python redenumeste_fisiere_drive.py 1)
 INDEX_DRIVE_TARGET = None
 if len(sys.argv) >= 2 and sys.argv[1].isdigit():
-    idx_arg = int(sys.argv[1])
-    if 1 <= idx_arg <= len(FOLDERE_XML_IDS):
-        INDEX_DRIVE_TARGET = idx_arg
+    INDEX_DRIVE_TARGET = int(sys.argv[1])
 
 
 def get_drive_service():
@@ -88,18 +86,26 @@ def redenumeste_fisiere_pe_drive():
     service = get_drive_service()
     pattern_pag = re.compile(r"_pag(\d+)\.xml", re.IGNORECASE)
 
-    # Stabilim pe ce discuri lucrăm
+    # Verificăm discurile disponibile din config
+    total_discuri_config = len(FOLDERE_XML_IDS)
+
     if INDEX_DRIVE_TARGET is not None:
-        discuri_de_procesat = [(INDEX_DRIVE_TARGET, FOLDERE_XML_IDS[INDEX_DRIVE_TARGET - 1])]
-        print(f"============================================================", flush=True)
-        print(f"📂 AUDIT & REDENUMIRE PE SHARED DRIVE #{INDEX_DRIVE_TARGET}", flush=True)
-        print(f"   Target ID: {FOLDERE_XML_IDS[INDEX_DRIVE_TARGET - 1]}", flush=True)
-        print(f"============================================================", flush=True)
+        idx_zero = INDEX_DRIVE_TARGET - 1
+        if idx_zero < total_discuri_config:
+            folder_id_target = FOLDERE_XML_IDS[idx_zero]
+            discuri_de_procesat = [(INDEX_DRIVE_TARGET, folder_id_target)]
+            print("============================================================", flush=True)
+            print(f"📂 AUDIT & REDENUMIRE PE SHARED DRIVE #{INDEX_DRIVE_TARGET} din {total_discuri_config}", flush=True)
+            print(f"   Target Folder ID: {folder_id_target}", flush=True)
+            print("============================================================", flush=True)
+        else:
+            print(f"⚠️ Indexul transmis ({INDEX_DRIVE_TARGET}) depășește numărul de discuri găsite ({total_discuri_config}). Abandon.", flush=True)
+            return
     else:
         discuri_de_procesat = list(enumerate(FOLDERE_XML_IDS, start=1))
-        print(f"============================================================", flush=True)
-        print(f"📂 AUDIT & REDENUMIRE PE TOATE CELE {len(FOLDERE_XML_IDS)} SHARED DRIVE-URI", flush=True)
-        print(f"============================================================", flush=True)
+        print("============================================================", flush=True)
+        print(f"📂 AUDIT & REDENUMIRE PE TOATE CELE {total_discuri_config} SHARED DRIVE-URI", flush=True)
+        print("============================================================", flush=True)
 
     total_evaluate = 0
     total_deja_perfecte = 0
@@ -184,7 +190,7 @@ def redenumeste_fisiere_pe_drive():
                 if not page_token:
                     break
             except Exception as e:
-                print(f"⚠️ Eroare la scanare Drive {idx}: {e}", flush=True)
+                print(f"⚠️ Eroare la scanare Drive #{idx} ({folder_id}): {e}", flush=True)
                 break
 
         print(f"✅ Drive #{idx} finalizat! Corectate în acest folder: {count_drive_red:,}", flush=True)
