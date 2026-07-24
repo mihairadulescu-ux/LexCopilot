@@ -92,15 +92,15 @@ def proceseaza_arhiva_pentru_an(service, an):
         r"(?:brut_legislatie|XML_legislatie|Brut_XML|XML_brut|legislatie_XML)_(\d+)_pag(\d+)\.xml", 
         re.IGNORECASE
     )
-    pattern_an = re.compile(rf"brut_XML_{an}_pag(\d+)\.xml", re.IGNORECASE)
 
     # --------------------------------------------------------------------------
-    # PAS 1: SCANARE ȘI REDENUMIRE ÎN BATCH-URI DE 100 CU PROGRES LIVE
+    # PAS 1: SCANARE ȘI REDENUMIRE DOAR PE FIȘIERELE CARE NU SUNT CORECTE
     # --------------------------------------------------------------------------
-    print(f"🔍 [PAS 1] Căutare și redenumire fișiere an {an} în cele {len(FOLDERE_XML_IDS)} Shared Drive-uri...", flush=True)
+    print(f"🔍 [PAS 1] Scanare fișiere an {an} în cele {len(FOLDERE_XML_IDS)} Shared Drive-uri...", flush=True)
     fisiere_an = []
     
     total_redenumite_an = 0
+    total_deja_corecte = 0
     actiuni_batch_curent = 0
     numar_batch = 1
 
@@ -126,7 +126,15 @@ def proceseaza_arhiva_pentru_an(service, an):
                     match_nestandard = pattern_nestandard.match(nume_vechi)
                     m_generat = re.search(rf"_{an}_pag(\d+)", nume_vechi, re.IGNORECASE)
 
-                    if match_nestandard or (m_generat and not nume_vechi.startswith(f"brut_XML_{an}_pag")):
+                    # 1. VERIFICARE: Este DEJA corect (ex: brut_XML_1990_pag1.xml)?
+                    if nume_vechi.startswith(f"brut_XML_{an}_pag") and nume_vechi.endswith(".xml"):
+                        fisiere_an.append({"id": f['id'], "name": nume_vechi})
+                        count_drive_fisiere += 1
+                        total_deja_corecte += 1
+                        continue  # ⏩ NU REDENUMIM Nimic, Trecem Direct Peste!
+
+                    # 2. DACA NU ESTE CORECT, ÎI APLICĂM NORMALIZE Numele
+                    if match_nestandard or m_generat:
                         pag = match_nestandard.group(2) if match_nestandard else m_generat.group(1)
                         nume_nou = f"brut_XML_{an}_pag{pag}.xml"
                         
@@ -147,17 +155,13 @@ def proceseaza_arhiva_pentru_an(service, an):
 
                             # PAUZĂ PACHET 100 REDENUMIRI
                             if actiuni_batch_curent >= DIMENSIUNE_BATCH:
-                                print(f"\n☕ [BATCH {numar_batch} REDENUMIRI COMPLET] S-au procesat {DIMENSIUNE_BATCH} redenumiri. Pauză {PAUZA_SECUENTE_SEC}s...", flush=True)
+                                print(f"\n☕ [BATCH {numar_batch} REDENUMIRI COMPLET] Pauză {PAUZA_SECUENTE_SEC}s...\n", flush=True)
                                 time.sleep(PAUZA_SECUENTE_SEC)
                                 numar_batch += 1
                                 actiuni_batch_curent = 0
 
                         except Exception as e_red:
                             print(f"   ⚠️ Eroare redenumire {f['id']}: {e_red}", flush=True)
-
-                    elif pattern_an.match(nume_vechi):
-                        fisiere_an.append({"id": f['id'], "name": nume_vechi})
-                        count_drive_fisiere += 1
 
                 page_token = response.get('nextPageToken')
                 if not page_token:
@@ -167,10 +171,10 @@ def proceseaza_arhiva_pentru_an(service, an):
                 break
 
         if count_drive_fisiere > 0:
-            print(f"   📂 Drive [{idx}/{len(FOLDERE_XML_IDS)}]: {count_drive_fisiere:,} fișiere XML găsite pt. anul {an}.", flush=True)
+            print(f"   📂 Drive [{idx}/{len(FOLDERE_XML_IDS)}]: Găsite {count_drive_fisiere:,} fișiere XML pt. anul {an}.", flush=True)
 
     total_fisiere = len(fisiere_an)
-    print(f"\n✅ [PAS 1 COMPLET] Total fișiere XML identificate: {total_fisiere:,} (Redenumite: {total_redenumite_an:,})", flush=True)
+    print(f"\n✅ [PAS 1 COMPLET] Total fișiere an {an}: {total_fisiere:,} (Deja corecte: {total_deja_corecte:,} | Corectate: {total_redenumite_an:,})", flush=True)
 
     if total_fisiere == 0:
         print(f"ℹ️ Niciun fișier XML găsit pentru anul {an}. Se sare peste arhivare.", flush=True)
