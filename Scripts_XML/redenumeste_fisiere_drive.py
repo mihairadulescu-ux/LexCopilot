@@ -2,7 +2,6 @@ import os
 import sys
 import json
 import time
-from pathlibPath import Path if 'Path' in globals() else None
 from pathlib import Path
 
 # Stream direct ne-bufferat (Live pe GitHub Actions)
@@ -112,7 +111,6 @@ def curata_masiv_batch():
                         print(f"   ⚠️ Eroare Trash: {exception}", flush=True)
 
                 for f in files:
-                    # Folosim UPDATE cu trashed: True (permisiunea implicită)
                     batch.add(
                         service.files().update(
                             fileId=f['id'],
