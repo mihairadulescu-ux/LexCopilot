@@ -14,7 +14,7 @@ jobs:
       - name: 🐍 Configurare Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.11'
 
       - name: 📦 Instalare Dependințe
         run: |
@@ -24,5 +24,6 @@ jobs:
       - name: 🗑️ Executare Ștergere Definitivă
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          PYTHONUNBUFFERED: "1"
         run: |
           python -u Scripts_XML/curata_tot_drive.py
