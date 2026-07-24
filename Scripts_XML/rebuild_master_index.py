@@ -1,3 +1,7 @@
+# Filename: Scripts_XML/rebuild_master_index.py
+# Scop
+
+
 import os
 import sys
 import json
