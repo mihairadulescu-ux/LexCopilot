@@ -27,7 +27,7 @@ from drive_config import FOLDERE_XML_IDS
 
 # CONFIGURARE BATCH & PAUZĂ
 DIMENSIUNE_BATCH = 100
-PAUZA_SECUENȚA_SEC = 2.5  # pauză de 2.5 secunde între batch-uri
+PAUZA_SECUENTI_SEC = 2.5  # pauză de 2.5 secunde între batch-uri
 
 
 def get_drive_service():
@@ -75,18 +75,20 @@ def redenumeste_fisiere_pe_drive():
     )
 
     total_redenumite = 0
+    total_evaluate = 0
     actiuni_in_batch_curent = 0
     numar_batch = 1
 
     for idx, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
-        print(f"\n📂 [{idx}/{len(FOLDERE_XML_IDS)}] Scanare Shared Drive ID: {folder_id}...", flush=True)
+        print(f"\n📂 [{idx}/{len(FOLDERE_XML_IDS)}] Pornire scanare Shared Drive ID: {folder_id}...", flush=True)
         page_token = None
-        count_drive = 0
+        count_drive_redenumite = 0
+        count_drive_evaluate = 0
 
         while True:
             try:
                 response = service.files().list(
-                    q=f"'{folder_id}' in parents and trashed=false and (name contains 'legislatie' or name contains 'Brut' or name contains 'XML')",
+                    q=f"'{folder_id}' in parents and trashed=false and name contains '.xml'",
                     spaces='drive',
                     fields="nextPageToken, files(id, name)",
                     pageToken=page_token,
@@ -96,19 +98,24 @@ def redenumeste_fisiere_pe_drive():
                 ).execute()
 
                 files = response.get('files', [])
+                if not files:
+                    print(f"   ℹ️ Niciun fișier XML găsit în această pagină.", flush=True)
+
                 for f in files:
                     nume_vechi = f['name']
-                    match = pattern_gresit.match(nume_vechi)
+                    count_drive_evaluate += 1
+                    total_evaluate += 1
 
-                    if match or (nume_vechi.lower().startswith("brut_xml_") and not nume_vechi.startswith("brut_XML_")):
+                    match = pattern_gresit.match(nume_vechi)
+                    m_generat = re.search(r"(\d+)_pag(\d+)", nume_vechi, re.IGNORECASE)
+
+                    if match or m_generat:
                         if match:
                             an = match.group(1)
                             pagina = match.group(2)
                         else:
-                            m2 = re.search(r"(\d+)_pag(\d+)", nume_vechi, re.IGNORECASE)
-                            if not m2:
-                                continue
-                            an, pagina = m2.group(1), m2.group(2)
+                            an = m_generat.group(1)
+                            pagina = m_generat.group(2)
 
                         nume_nou_standard = f"brut_XML_{an}_pag{pagina}.xml"
 
@@ -122,19 +129,22 @@ def redenumeste_fisiere_pe_drive():
                                 ).execute()
 
                                 print(f"   ✏️ [{total_redenumite + 1}] Redenumit: '{nume_vechi}' ➡️ '{nume_nou_standard}'", flush=True)
-                                count_drive += 1
+                                count_drive_redenumite += 1
                                 total_redenumite += 1
                                 actiuni_in_batch_curent += 1
 
-                                # VERIFICARE LIMITĂ BATCH (100 acțiuni)
+                                # BATCH LIMIT CHECK
                                 if actiuni_in_batch_curent >= DIMENSIUNE_BATCH:
-                                    print(f"☕ [BATCH {numar_batch} COMPLET] Procesate {DIMENSIUNE_BATCH} redenumiri. Pauză de {PAUZA_SECUENȚA_SEC} secunde...", flush=True)
-                                    time.sleep(PAUZA_SECUENȚA_SEC)
+                                    print(f"\n☕ [BATCH {numar_batch} COMPLET] Procesate {DIMENSIUNE_BATCH} redenumiri. Pauză de {PAUZA_SECUENTI_SEC}s...\n", flush=True)
+                                    time.sleep(PAUZA_SECUENTI_SEC)
                                     numar_batch += 1
                                     actiuni_in_batch_curent = 0
 
                             except Exception as e_red:
                                 print(f"   ⚠️ Eroare redenumire {f['id']} ({nume_vechi}): {e_red}", flush=True)
+
+                    if count_drive_evaluate % 1000 == 0:
+                        print(f"   ⏳ Evaluat {count_drive_evaluate:,} fișiere în Drive {idx} | Redenumite până acum: {count_drive_redenumite:,}", flush=True)
 
                 page_token = response.get('nextPageToken')
                 if not page_token:
@@ -143,10 +153,10 @@ def redenumeste_fisiere_pe_drive():
                 print(f"⚠️ Eroare la scanarea folderului {folder_id}: {e}", flush=True)
                 break
 
-        print(f"✅ Finalizat Drive {idx}! Total redenumite în acest folder: {count_drive}", flush=True)
+        print(f"✅ Finalizat Drive {idx}! Scaniat: {count_drive_evaluate:,} fișiere | Redenumite: {count_drive_redenumite:,}", flush=True)
 
     print("\n============================================================", flush=True)
-    print(f"🏁 REDENUMIRE FINALIZATĂ! Total fișiere corectate pe Drive: {total_redenumite} (în {numar_batch} batch-uri)", flush=True)
+    print(f"🏁 FINALIZAT! Total evaluate: {total_evaluate:,} | Total fișiere redenumite: {total_redenumite:,}", flush=True)
     print("============================================================", flush=True)
 
 
