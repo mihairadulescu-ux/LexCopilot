@@ -1,5 +1,5 @@
 name: Utilitar Matriceal - Curățare pe Discuri Shared Drive
-run-name: ✏️ Igienizare XML pe Discul ${{ matrix.drive_idx }}
+run-name: ✏️ Igienizare XML pe Discurile Drive
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 7  # Toate cele 7 discuri lucrează simultan!
+      max-parallel: 7  # Toate cele 7 discuri lucrează simultan
       matrix:
         drive_idx: [1, 2, 3, 4, 5, 6, 7]
 
