@@ -7,7 +7,7 @@ on:
       matrice_ani:
         description: 'Ani sau intervale (ex: 1990-1995, 2000, 2010-2015)'
         required: true
-        default: '1990-2026'
+        default: '1990-1999, 2000-2009, 2010-2015, 2016-2020, 2021-2026'
 
 jobs:
   generate-matrix:
@@ -19,11 +19,10 @@ jobs:
       - name: Expandare Interval în Ani Unici
         id: set-matrix
         run: |
-          INPUT_VAL="1990-2026}"
+          INPUT_VAL="${{ github.event.inputs.matrice_ani }}"
           
-          # Script Bash care extinde intervalele (ex: 1990-1992 -> 1990, 1991, 1992)
           python3 -c "
-          import json, sys
+          import json, re
 
           raw_input = '''$INPUT_VAL'''
           ani_unici = []
@@ -32,14 +31,19 @@ jobs:
               bucata = bucata.strip()
               if '-' in bucata:
                   parts = bucata.split('-')
-                  start, end = int(parts[0]), int(parts[1])
-                  if start > end:
-                      start, end = end, start
-                  ani_unici.extend(list(range(start, end + 1)))
-              elif bucata.isdigit():
-                  ani_unici.append(int(bucata))
+                  start_str = re.sub(r'\D', '', parts[0])
+                  end_str = re.sub(r'\D', '', parts[1])
+                  
+                  if start_str and end_str:
+                      start, end = int(start_str), int(end_str)
+                      if start > end:
+                          start, end = end, start
+                      ani_unici.extend(list(range(start, end + 1)))
+              else:
+                  clean_num = re.sub(r'\D', '', bucata)
+                  if clean_num:
+                      ani_unici.append(int(clean_num))
 
-          # Eliminăm duplicatele și sortăm crescător
           ani_finali = sorted(list(set(ani_unici)))
           print('matrix=' + json.dumps({'an': [str(a) for a in ani_finali]}))
           " >> $GITHUB_OUTPUT
@@ -50,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 30  # Poți ajusta numărul de joburi paralele (ex: 2 sau 3)
+      max-parallel: 3  # Rulăm maxim 3 ani simultan pentru ordine și stabilitate
       matrix: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
 
     env:
@@ -61,10 +65,10 @@ jobs:
       - name: Checkout cod
         uses: actions/checkout@v4
 
-      - name: Configurare Python 3.13
+      - name: Configurare Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.12'
 
       - name: Instalare dependențe
         run: |
