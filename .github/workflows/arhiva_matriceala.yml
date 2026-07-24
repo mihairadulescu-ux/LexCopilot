@@ -7,7 +7,7 @@ on:
       matrice_ani:
         description: 'Ani sau intervale separate prin virgulă'
         required: true
-        default: '1990-1999, 2000-2009, 2010-2015, 2016-2020, 2021-2026'
+        default: '1990-1994, 1995-1999, 2000-2004, 2005-2009, 2010-2014, 2015-2019, 2020-2014, 2015-2020, 2021-2016'
 
 jobs:
   generate-matrix:
@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 5
+      max-parallel: 9
       matrix: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
 
     env:
@@ -57,7 +57,7 @@ jobs:
       - name: Configurare Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.13'
 
       - name: Instalare dependențe
         run: |
