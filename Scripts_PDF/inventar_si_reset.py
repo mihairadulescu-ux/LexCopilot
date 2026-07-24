@@ -1,3 +1,6 @@
+# Filename: Scripts_PDF/inventar_si_reset.py
+# Scop
+
 import os
 import sys
 import json
