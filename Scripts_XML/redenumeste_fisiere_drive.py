@@ -25,6 +25,10 @@ from googleapiclient.discovery import build
 
 from drive_config import FOLDERE_XML_IDS
 
+# CONFIGURARE BATCH & PAUZĂ
+DIMENSIUNE_BATCH = 100
+PAUZA_SECUENȚA_SEC = 2.5  # pauză de 2.5 secunde între batch-uri
+
 
 def get_drive_service():
     creds_json = (
@@ -59,19 +63,20 @@ def get_drive_service():
 
 def redenumeste_fisiere_pe_drive():
     print("============================================================", flush=True)
-    print("🔄 UTILITAR REDENUMIRE STANDARD FISIERE XML PE GOOGLE DRIVE", flush=True)
+    print("🔄 UTILITAR REDENUMIRE BATCH (100 actiuni/batch) PE GOOGLE DRIVE", flush=True)
     print("============================================================", flush=True)
 
     service = get_drive_service()
 
     # Pattern pentru detectarea numelor greșite / nestandardizate
-    # Exemple detectate: brut_legislatie_1990_pag1.xml, XML_legislatie_1990_pag1.xml, Brut_XML_1990_pag1.xml etc.
     pattern_gresit = re.compile(
         r"(?:brut_legislatie|XML_legislatie|Brut_XML|XML_brut|legislatie_XML)_(\d+)_pag(\d+)\.xml", 
         re.IGNORECASE
     )
 
     total_redenumite = 0
+    actiuni_in_batch_curent = 0
+    numar_batch = 1
 
     for idx, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
         print(f"\n📂 [{idx}/{len(FOLDERE_XML_IDS)}] Scanare Shared Drive ID: {folder_id}...", flush=True)
@@ -80,7 +85,6 @@ def redenumeste_fisiere_pe_drive():
 
         while True:
             try:
-                # Căutăm fișierele din folder care conțin XML sau legislatie
                 response = service.files().list(
                     q=f"'{folder_id}' in parents and trashed=false and (name contains 'legislatie' or name contains 'Brut' or name contains 'XML')",
                     spaces='drive',
@@ -96,13 +100,11 @@ def redenumeste_fisiere_pe_drive():
                     nume_vechi = f['name']
                     match = pattern_gresit.match(nume_vechi)
 
-                    # Dacă numele nu este cel standard "brut_XML_AN_pagPAGINA.xml"
-                    if match or (nume_vechi.startswith("brut_XML_") and not nume_vechi.startswith("brut_XML_")):
+                    if match or (nume_vechi.lower().startswith("brut_xml_") and not nume_vechi.startswith("brut_XML_")):
                         if match:
                             an = match.group(1)
                             pagina = match.group(2)
                         else:
-                            # Re-extraserem an si pagina daca e doar o diferență de majuscule/minuscule
                             m2 = re.search(r"(\d+)_pag(\d+)", nume_vechi, re.IGNORECASE)
                             if not m2:
                                 continue
@@ -110,7 +112,6 @@ def redenumeste_fisiere_pe_drive():
 
                         nume_nou_standard = f"brut_XML_{an}_pag{pagina}.xml"
 
-                        # Dacă numele de pe Drive diferă de cel standardizat
                         if nume_vechi != nume_nou_standard:
                             try:
                                 service.files().update(
@@ -120,9 +121,18 @@ def redenumeste_fisiere_pe_drive():
                                     supportsTeamDrives=True
                                 ).execute()
 
-                                print(f"   ✏️ Redenumit: '{nume_vechi}' ➡️ '{nume_nou_standard}'", flush=True)
+                                print(f"   ✏️ [{total_redenumite + 1}] Redenumit: '{nume_vechi}' ➡️ '{nume_nou_standard}'", flush=True)
                                 count_drive += 1
                                 total_redenumite += 1
+                                actiuni_in_batch_curent += 1
+
+                                # VERIFICARE LIMITĂ BATCH (100 acțiuni)
+                                if actiuni_in_batch_curent >= DIMENSIUNE_BATCH:
+                                    print(f"☕ [BATCH {numar_batch} COMPLET] Procesate {DIMENSIUNE_BATCH} redenumiri. Pauză de {PAUZA_SECUENȚA_SEC} secunde...", flush=True)
+                                    time.sleep(PAUZA_SECUENȚA_SEC)
+                                    numar_batch += 1
+                                    actiuni_in_batch_curent = 0
+
                             except Exception as e_red:
                                 print(f"   ⚠️ Eroare redenumire {f['id']} ({nume_vechi}): {e_red}", flush=True)
 
@@ -136,7 +146,7 @@ def redenumeste_fisiere_pe_drive():
         print(f"✅ Finalizat Drive {idx}! Total redenumite în acest folder: {count_drive}", flush=True)
 
     print("\n============================================================", flush=True)
-    print(f"🏁 REDENUMIRE FINALIZATĂ! Total fișiere corectate pe Drive: {total_redenumite}", flush=True)
+    print(f"🏁 REDENUMIRE FINALIZATĂ! Total fișiere corectate pe Drive: {total_redenumite} (în {numar_batch} batch-uri)", flush=True)
     print("============================================================", flush=True)
 
 
