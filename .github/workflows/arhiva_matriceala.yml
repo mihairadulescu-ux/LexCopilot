@@ -7,7 +7,7 @@ on:
       matrice_ani:
         description: 'Ani sau intervale (ex: 1990-1995, 2000, 2010-2015)'
         required: true
-        default: '1990-1999, 2000-2009, 2010-2015, 2016-2020, 2021-2026'
+        default: '1990-2026'
 
 jobs:
   generate-matrix:
@@ -50,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 20  # Poți ajusta numărul de joburi paralele (ex: 2 sau 3)
+      max-parallel: 30  # Poți ajusta numărul de joburi paralele (ex: 2 sau 3)
       matrix: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
 
     env:
