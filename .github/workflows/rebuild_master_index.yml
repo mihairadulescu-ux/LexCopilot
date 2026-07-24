@@ -1,0 +1,37 @@
+name: Rebuild Master Index
+
+on:
+  workflow_dispatch:
+    inputs:
+      full_reset:
+        type: boolean
+        description: 'FULL RESET: Golire MasterIndex + Re-scanare arhive .tar.gz + Micro-Indecși'
+        default: false
+
+jobs:
+  rebuild-master:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout cod
+        uses: actions/checkout@v4
+
+      - name: Configurare Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalare dependențe
+        run: |
+          pip install google-api-python-client google-auth
+
+      - name: Reconstrucție / Unificare Master Index
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
+          XML_STORAGE_INDEX: ${{ secrets.XML_STORAGE_INDEX }}
+        run: |
+          if [ "${{ inputs.full_reset }}" = "true" ]; then
+            python Scripts_XML/rebuild_master_index.py reset
+          else
+            python Scripts_XML/rebuild_master_index.py
+          fi
