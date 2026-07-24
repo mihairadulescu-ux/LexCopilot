@@ -2,7 +2,6 @@ import os
 import sys
 import json
 import time
-import re
 import urllib.request
 from pathlib import Path
 
@@ -19,7 +18,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from drive_config import FOLDERE_XML_IDS, get_file_params
 
-PAUZA_SECUENTIALA = 0.5  # Secunde între descărcări pentru a nu bloca serverul sursă
+PAUZA_SECUENTIALA = 0.5  # Pauză între cereri pentru a proteja serverul sursă
 
 
 def get_drive_service():
@@ -53,39 +52,13 @@ def get_drive_service():
     sys.exit(1)
 
 
-def extrage_an_real_din_xml(continut_str, an_fallback=None):
+def descarca_si_salveaza_pagina(service, an_download, pagina, url_sursa):
     """
-    Scanează conținutul XML descărcat pentru a găsi anul real al actului.
-    Dacă nu găsește niciun an în XML, folosește an_fallback.
+    Descarcă XML-ul și îl salvează STRICT după anul de download și numărul paginii,
+    asigurând continuitate la reluarea rulărilor.
     """
-    # 1. Căutare în tag-urile specifice de an
-    m_tag = re.search(r"<(?:An|AnEmitere|AnPublicare|AnAparitie)>(\d{4})</", continut_str, re.IGNORECASE)
-    if m_tag:
-        return m_tag.group(1)
+    nume_fisier_final = f"brut_XML_{an_download}_pag{pagina}.xml"
 
-    # 2. Căutare în atribute de dată (ex: Data="2004-05-12")
-    m_data = re.search(r'(?:Data|DataEmitere|DataAparitie|DataPublicarii)=["\'](\d{4})-\d{2}-\d{2}', continut_str, re.IGNORECASE)
-    if m_data:
-        return m_data.group(1)
-
-    # 3. Căutare în textul actului (ex: "din anul 2004", "din 1993")
-    m_text = re.search(r"(?:din|anul)\s+(19\d\d|20\d\d)", continut_str, re.IGNORECASE)
-    if m_text:
-        return m_text.group(1)
-
-    # 4. Orice an valid cu 4 cifre
-    m_gen = re.search(r"\b(18\d\d|19\d\d|20[0-2]\d)\b", continut_str)
-    if m_gen:
-        return m_gen.group(1)
-
-    return str(an_fallback) if an_fallback else "0000"
-
-
-def descarca_si_salveaza_pagina(service, pagina, url_sursa, an_implicit=None):
-    """
-    Descarcă XML-ul de la URL, extrage anul real, îi dă numele corect
-    și îl încarcă direct pe unul din cele 7 Shared Drive-uri.
-    """
     try:
         req = urllib.request.Request(
             url_sursa, 
@@ -94,19 +67,11 @@ def descarca_si_salveaza_pagina(service, pagina, url_sursa, an_implicit=None):
         with urllib.request.urlopen(req, timeout=30) as response:
             continut_bytes = response.read()
 
-        continut_str = continut_bytes.decode('utf-8', errors='ignore')
-
-        if len(continut_str.strip()) < 50:
+        if len(continut_bytes.strip()) < 50:
             print(f"⚠️ [PAGINA {pagina}] Fișier XML gol sau invalid primit de la server.", flush=True)
             return False
 
-        # EXTRAGERE AN REAL DIN XML
-        an_real = extrage_an_real_din_xml(continut_str, an_fallback=an_implicit)
-
-        # GENERARE NUME CONFORM SINTAXEI STANDARD
-        nume_fisier_final = f"brut_XML_{an_real}_pag{pagina}.xml"
-
-        # Determinare Drive de stocare (folosind configurația din drive_config)
+        # Determinare Drive de stocare
         params_stocare = get_file_params(nume_fisier_final)
         folder_drive_id = params_stocare.get("drive_id") or FOLDERE_XML_IDS[0]
 
@@ -129,44 +94,44 @@ def descarca_si_salveaza_pagina(service, pagina, url_sursa, an_implicit=None):
             supportsTeamDrives=True
         ).execute()
 
-        # Ștergere fișier temporar local
+        # Ștergere temp local
         if cale_temp.exists():
             cale_temp.unlink()
 
-        print(f"✅ Descărcat & Salvat: '{nume_fisier_final}' pe Drive ID: {folder_drive_id[:12]}...", flush=True)
+        print(f"✅ Salvat: '{nume_fisier_final}' pe Drive ID: {folder_drive_id[:12]}...", flush=True)
         return True
 
     except Exception as e:
-        print(f"❌ Eroare la procesarea paginii {pagina}: {e}", flush=True)
+        print(f"❌ Eroare descărcare An {an_download} | Pagina {pagina}: {e}", flush=True)
         return False
 
 
 def main():
     service = get_drive_service()
 
-    # Exemplu utilizare din linia de comandă: python download_xml.py <PAGINA_START> <PAGINA_END>
-    if len(sys.argv) >= 3 and sys.argv[1].isdigit() and sys.argv[2].isdigit():
-        pag_start = int(sys.argv[1])
-        pag_end = int(sys.argv[2])
+    # Utilizare: python download_xml.py <AN_DOWNLOAD> <PAGINA_START> <PAGINA_END>
+    if len(sys.argv) >= 4 and sys.argv[1].isdigit() and sys.argv[2].isdigit() and sys.argv[3].isdigit():
+        an_download = int(sys.argv[1])
+        pag_start = int(sys.argv[2])
+        pag_end = int(sys.argv[3])
     else:
-        print("ℹ️ Utilizare: python download_xml.py <PAGINA_START> <PAGINA_END>", flush=True)
+        print("ℹ️ Utilizare: python download_xml.py <AN_DOWNLOAD> <PAGINA_START> <PAGINA_END>", flush=True)
         sys.exit(1)
 
     print("============================================================", flush=True)
-    print(f"🚀 PORNIRE DESCĂRCARE XML PENTRU PAGINILE {pag_start} ➡️ {pag_end}", flush=True)
+    print(f"🚀 PORNIRE DESCĂRCARE AN {an_download} | PAGINILE {pag_start} ➡️ {pag_end}", flush=True)
     print("============================================================", flush=True)
 
     succese = 0
     for pag in range(pag_start, pag_end + 1):
-        # Format URL sursă (ajustează URL-ul exact dacă folosești alt endpoint)
         url = f"https://legislatie.just.ro/Public/DetaliiDocumentAfis/{pag}"
         
-        ok = descarca_si_salveaza_pagina(service, pag, url)
+        ok = descarca_si_salveaza_pagina(service, an_download, pag, url)
         if ok:
             succese += 1
         time.sleep(PAUZA_SECUENTIALA)
 
-    print(f"\n🏁 Finalizat! Descărcate cu succes {succese}/{pag_end - pag_start + 1} pagini.", flush=True)
+    print(f"\n🏁 Finalizat! Descărcate cu succes {succese}/{pag_end - pag_start + 1} pagini pentru anul {an_download}.", flush=True)
 
 
 if __name__ == "__main__":
