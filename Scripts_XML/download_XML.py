@@ -30,11 +30,12 @@ from drive_config import (
     get_list_params
 )
 
-# Prag de sincronizare setat la 50 de pagini noi
-PRAG_SYNC_PAGINI = 50
+# Parametri de configurare
+PRAG_SYNC_PAGINI = 50             # Sincronizare pe Drive la 50 de pagini noi
 REZULTATE_PER_PAGINA = 10
-MAX_RETRY_PAGINA = 3
-PAUZA_RETRY_SECUNDE = 5
+MAX_RETRY_PAGINA = 3              # Reîncercări per pagină dacă dă 0 bytes
+PAUZA_RETRY_SECUNDE = 5           # Pauză între reîncercări
+MAX_PAGINI_GOALE_CONSECUTIVE = 20  # Oprește sesiunea dacă întâlnește 20 de pagini goale la rând
 
 
 def get_drive_service():
@@ -118,7 +119,7 @@ def incarca_micro_index(service, an):
 
 
 def salveaza_micro_index(service, file_id, index_data):
-    """Salvează/Actualizează micro-indexul pe Discul 0 și anunță explicit în consolă."""
+    """Salvează/Actualizează micro-indexul pe Discul 0."""
     an = index_data.get("an")
     nume_index = f"index_an_{an}.json"
     json_bytes = json.dumps(index_data, indent=2, ensure_ascii=False).encode('utf-8')
@@ -146,7 +147,8 @@ def salveaza_micro_index(service, file_id, index_data):
 
 
 def descarca_si_sincronizeaza(an_target):
-    """Procesul principal de descărcare SOAP și sincronizare arhivă + micro-index."""
+    """Procesul principal de descărcare SOAP cu raportare la final."""
+    timp_start = time.time()
     wsdl_url = os.getenv("JUST_RO_WSDL_URL") or "http://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
     service = get_drive_service()
 
@@ -157,18 +159,16 @@ def descarca_si_sincronizeaza(an_target):
     print("🌐 Inițializare client SOAP WSDL...", flush=True)
     print("🔑 Solicitare Token nou...", flush=True)
     token = primeste_token_soap(wsdl_url)
-    if token:
-        print("✅ Token obținut cu succes!", flush=True)
-    else:
+    if not token:
         print("❌ Nu s-a putut obține token-ul SOAP!", flush=True)
         sys.exit(1)
+    print("✅ Token obținut cu succes!", flush=True)
 
     print("============================================================", flush=True)
     print(f"🚀 START PROCESARE SOAP PENTRU ANUL {an_target}", flush=True)
     print(f"📂 Drive Destinație: Shared Drive #{drive_idx + 1} (ID: {shared_drive_id})", flush=True)
     print("============================================================", flush=True)
 
-    # Încărcare micro-index de pe Drive
     micro_index_id, micro_data = incarca_micro_index(service, an_target)
     pagini_ok = micro_data.get("pagini_descarcate", {})
 
@@ -187,7 +187,6 @@ def descarca_si_sincronizeaza(an_target):
     folder_xmls.mkdir(parents=True, exist_ok=True)
     cale_arhiva_local = Path(dir_temp) / nume_arhiva
 
-    # Descărcare și extragere arhivă existentă de pe Drive pe runner pentru pregătire
     if archive_file_id:
         try:
             print(f"📥 Descărcare și extragere arhivă existentă de pe Drive pe runner...", flush=True)
@@ -205,16 +204,20 @@ def descarca_si_sincronizeaza(an_target):
 
     pagina = 1
     fisiere_noi_in_pachet = 0
+    pagini_goale_consecutive = 0
+    
+    # Statistici pentru raport
+    pagini_noi_descarcate_sesiune = 0
+    total_erori_sesiune = 0
 
     while True:
         str_pag = str(pagina)
 
-        # Verificăm dacă pagina este deja descărcată valid
+        # Sare peste paginile validate anterior
         if pagini_ok.get(str_pag) == "OK":
             pagina += 1
             continue
 
-        # Mecanism local de Retry (maxim 3 încercări per pagină)
         pagina_descarcata_cu_succes = False
 
         for incercare in range(1, MAX_RETRY_PAGINA + 1):
@@ -243,19 +246,18 @@ def descarca_si_sincronizeaza(an_target):
                 continut_raw = resp.text.strip()
                 dimensiune_bytes = len(resp.content)
 
-                # 1. Verificare Token expirat
                 if "token" in continut_raw.lower() and ("expirat" in continut_raw.lower() or "invalid" in continut_raw.lower()):
                     print("🔄 Token expirat. Reîmprospătare...", flush=True)
                     token = primeste_token_soap(wsdl_url)
                     continue
 
-                # 2. Verificare strictă dimensiune și structură SOAP
                 if dimensiune_bytes == 0 or "<" not in continut_raw or "Envelope>" not in continut_raw:
-                    print(f"⚠️ [AN {an_target} | PAGINA {pagina}] Răspuns invalid (dimensiune {dimensiune_bytes} bytes). Încercarea {incercare}/{MAX_RETRY_PAGINA}. Reîncercare în {PAUZA_RETRY_SECUNDE}s...", flush=True)
+                    print(f"⚠️ [AN {an_target} | PAGINA {pagina}] Răspuns invalid/0 bytes ({incercare}/{MAX_RETRY_PAGINA}). Reîncercare în {PAUZA_RETRY_SECUNDE}s...", flush=True)
+                    total_erori_sesiune += 1
                     time.sleep(PAUZA_RETRY_SECUNDE)
                     continue
 
-                # 3. Salvare doar dacă răspunsul este un XML SOAP valid cu conținut
+                # Salvare fișier XML valid local
                 nume_xml = f"brut_XML_{an_target}_pag{pagina}.xml"
                 cale_xml = folder_xmls / nume_xml
                 with open(cale_xml, "w", encoding="utf-8") as f:
@@ -263,21 +265,30 @@ def descarca_si_sincronizeaza(an_target):
 
                 pagini_ok[str_pag] = "OK"
                 fisiere_noi_in_pachet += 1
+                pagini_noi_descarcate_sesiune += 1
                 pagina_descarcata_cu_succes = True
+                pagini_goale_consecutive = 0
                 print(f"   🟢 [AN {an_target} | PAGINA {pagina}] SOAP XML Valid | Dimensiune: {dimensiune_bytes:,} bytes", flush=True)
                 break
 
             except Exception as e:
+                total_erori_sesiune += 1
                 print(f"⚠️ [AN {an_target} | PAGINA {pagina}] Eroare rețea ({e}). Încercarea {incercare}/{MAX_RETRY_PAGINA}. Reîncercare în {PAUZA_RETRY_SECUNDE}s...", flush=True)
                 time.sleep(PAUZA_RETRY_SECUNDE)
 
-        # Dacă pagina nu s-a putut descărca valid după cele 3 încercări, se trece la următoarea fără a fi marcată ca OK
         if not pagina_descarcata_cu_succes:
-            print(f"❌ [AN {an_target} | PAGINA {pagina}] Nu s-a putut descărca după {MAX_RETRY_PAGINA} încercări. Se va reîncerca la următoarea rulare.", flush=True)
+            pagini_goale_consecutive += 1
+            print(f"⚠️ [AN {an_target} | PAGINA {pagina}] Pagină fără date. Contor pagini goale: {pagini_goale_consecutive}/{MAX_PAGINI_GOALE_CONSECUTIVE}", flush=True)
 
-        # Sincronizare pe Drive la fiecare 50 de pagini noi descărcate cu succes
+        # Oprire sesiune curentă la 20 de pagini goale consecutive
+        if pagini_goale_consecutive >= MAX_PAGINI_GOALE_CONSECUTIVE:
+            print(f"\n✋ [AN {an_target}] S-au înregistrat {MAX_PAGINI_GOALE_CONSECUTIVE} pagini goale consecutive.", flush=True)
+            print(f"🛑 Oprire sesiune curentă. Se salvează starea și se finalizează scriptul.", flush=True)
+            break
+
+        # Sincronizare intermediară pe Drive la 50 de pagini noi
         if fisiere_noi_in_pachet >= PRAG_SYNC_PAGINI:
-            print(f"\n📦 [SYNC TAR.GZ & INDEX] Împachetare incrementală (50 de pagini noi) pentru anul {an_target}...", flush=True)
+            print(f"\n📦 [SYNC TAR.GZ & INDEX] Împachetare incrementală (50 de pagini noi)...", flush=True)
             
             with tarfile.open(cale_arhiva_local, "w:gz") as tar:
                 for f in folder_xmls.glob("*.xml"):
@@ -300,9 +311,8 @@ def descarca_si_sincronizeaza(an_target):
                 archive_file_id = res.get("id")
                 micro_data["drive_archive_file_id"] = archive_file_id
 
-            print(f"   ☁️ Arhivă '{nume_arhiva}' ({marime_mb:.2f} MB) sincronizată pe Drive | File ID: {archive_file_id}", flush=True)
+            print(f"   ☁️ Arhivă '{nume_arhiva}' ({marime_mb:.2f} MB) sincronizată pe Drive!", flush=True)
 
-            # Salvare Micro-Index pe Discul 0
             micro_data["pagini_descarcate"] = pagini_ok
             micro_data["total_xml_valid"] = len(pagini_ok)
             micro_data["ultimul_update"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -313,15 +323,16 @@ def descarca_si_sincronizeaza(an_target):
 
         pagina += 1
 
-    # Sincronizare finală la încheierea procesului
+    # Sincronizare finală
+    marime_finala_mb = 0.0
     if any(folder_xmls.iterdir()):
-        print(f"\n🏁 [SYNC FINAL] Salvare finală arhivă și micro-index pentru anul {an_target}...", flush=True)
+        print(f"\n🏁 [SYNC FINAL] Salvare finală arhivă și micro-index...", flush=True)
         
         with tarfile.open(cale_arhiva_local, "w:gz") as tar:
             for f in folder_xmls.glob("*.xml"):
                 tar.add(f, arcname=f.name)
         
-        marime_mb = cale_arhiva_local.stat().st_size / (1024 * 1024)
+        marime_finala_mb = cale_arhiva_local.stat().st_size / (1024 * 1024)
         media = MediaFileUpload(str(cale_arhiva_local), mimetype="application/gzip", resumable=True)
 
         if archive_file_id:
@@ -338,15 +349,27 @@ def descarca_si_sincronizeaza(an_target):
             archive_file_id = res.get("id")
             micro_data["drive_archive_file_id"] = archive_file_id
 
-        print(f"   ☁️ Arhivă finală '{nume_arhiva}' ({marime_mb:.2f} MB) salvată pe Drive!", flush=True)
-
         micro_data["pagini_descarcate"] = pagini_ok
         micro_data["total_xml_valid"] = len(pagini_ok)
         micro_data["ultimul_update"] = time.strftime("%Y-%m-%d %H:%M:%S")
         salveaza_micro_index(service, micro_index_id, micro_data)
 
     shutil.rmtree(dir_temp, ignore_errors=True)
-    print(f"\n✨ PROCESARE COMPLETĂ PENTRU ANUL {an_target}! Total pagini XML salvate: {len(pagini_ok)}", flush=True)
+
+    # Calculare Raport de Sesiune
+    durata_secunde = time.time() - timp_start
+    viteza_pagini_pe_sec = pagini_noi_descarcate_sesiune / durata_secunde if durata_secunde > 0 else 0
+
+    print("\n" + "=" * 60, flush=True)
+    print(f"📊 RAPORT SESIUNE DESCĂRCARE — ANUL {an_target}", flush=True)
+    print("=" * 60, flush=True)
+    print(f"⏱️  Durată sesiune:               {durata_secunde / 60:.2f} minute ({durata_secunde:.1f}s)", flush=True)
+    print(f"🟢 Pagini noi salvate acum:       {pagini_noi_descarcate_sesiune} pagini", flush=True)
+    print(f"📦 Total pagini validate pe Drive: {len(pagini_ok)} pagini", flush=True)
+    print(f"⚠️  Erori / Reîncercări rețea:     {total_erori_sesiune}", flush=True)
+    print(f"⚡ Vitează medie:                 {viteza_pagini_pe_sec:.2f} pagini/secundă", flush=True)
+    print(f"💾 Dimensiune arhivă Drive:        {marime_finala_mb:.2f} MB", flush=True)
+    print("=" * 60 + "\n", flush=True)
 
 
 if __name__ == "__main__":
