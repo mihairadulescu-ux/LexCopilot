@@ -6,14 +6,21 @@ on:
       ani_input:
         description: 'Ani sau intervale (ex: 1990, 1992-1995, 2000, 2005-2010)'
         required: true
-        default: '1990-1995'
+        default: '1990-2010'
       max_paralel:
         description: 'Numarul maxim de ani procesati simultan in paralel'
         required: true
-        default: '5'
+        default: '20'
+
+  # Exemplu: Rulare automată în fiecare noapte la ora 02:00 (UTC)
+  schedule:
+ 
+    - cron: '0 21 * * *'
+    - cron: '0 3 * * *'
+    - cron: '0 9 * * *'
+    - cron: '0 15 * * *'
 
 jobs:
-  # 1. Job preliminar: Parsează input-ul și generează lista exactă de ani
   generate-matrix:
     runs-on: ubuntu-latest
     outputs:
@@ -22,7 +29,8 @@ jobs:
       - name: Calculare matrice ani
         id: set-matrix
         env:
-          INPUT_ANI: ${{ github.event.inputs.ani_input }}
+          # Dacă e rulat din Schedule, ia valoarea default '1990-1995'
+          INPUT_ANI: ${{ inputs.ani_input || '1990-1995' }}
         run: |
           python3 -c '
           import os, json, re
@@ -51,13 +59,13 @@ jobs:
               f.write(f"matrix_ani={output_json}\n")
           '
 
-  # 2. Jobul principal: Rulează câte un fir independent per an
   proceseaza-an:
     needs: generate-matrix
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJSON(github.event.inputs.max_paralel) }}
+      # Dacă e schedule, limitează la 5 paralel implicit
+      max-parallel: ${{ inputs.max_paralel != '' && fromJSON(inputs.max_paralel) || 5 }}
       matrix:
         an: ${{ fromJSON(needs.generate-matrix.outputs.matrix_ani) }}
 
