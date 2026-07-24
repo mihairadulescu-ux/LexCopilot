@@ -5,6 +5,216 @@ import gzip
 import time
 import re
 from pathlib import Path
+from collections import defaultdict
+
+# Live logging unbuffered
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
+# ==============================================================================
+# CONFIGURARE CĂI
+# ==============================================================================
+DIRECTOR_CURENT = Path(__file__).resolve().parent
+RADACINA_PROIECT = DIRECTOR_CURENT.parent
+
+if str(RADACINA_PROIECT) not in sys.path:
+    sys.path.insert(0, str(RADACINA_PROIECT))
+if str(DIRECTOR_CURENT) not in sys.path:
+    sys.path.insert(0, str(DIRECTOR_CURENT))
+
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from drive_config import FOLDERE_XML_IDS
+
+DIMENSIUNE_BATCH = 100
+PAUZA_SECUENTI_SEC = 2.5
+CHECKPOINT_SALVARE = 1000  # Salvează indexul incremental la fiecare 1000 elemente
+
+
+def get_drive_service():
+    creds_json = (
+        os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+        or os.getenv("GDRIVE_SERVICE_ACCOUNT_KEY")
+        or os.getenv("SERVICE_ACCOUNT_JSON")
+    )
+    if creds_json:
+        try:
+            info = json.loads(creds_json)
+            creds = service_account.Credentials.from_service_account_info(
+                info, scopes=["https://www.googleapis.com/auth/drive"]
+            )
+            return build("drive", "v3", credentials=creds)
+        except Exception as e:
+            print(f"❌ [AUTH] Eroare parsare Service Account JSON: {e}", flush=True)
+            sys.exit(1)
+            
+    cale_local = RADACINA_PROIECT / "service_account.json"
+    if cale_local.exists():
+        try:
+            creds = service_account.Credentials.from_service_account_file(
+                str(cale_local), scopes=["https://www.googleapis.com/auth/drive"]
+            )
+            return build("drive", "v3", credentials=creds)
+        except Exception as e:
+            print(f"❌ [AUTH] Eroare citire service_account.json local: {e}", flush=True)
+
+    print("❌ [AUTH] Nu s-a găsit secretul GOOGLE_SERVICE_ACCOUNT_JSON!", flush=True)
+    sys.exit(1)
+
+
+def salveaza_checkpoint_index(cale_file, index_dict):
+    """Scrie incremental starea curentă a indexului pe disc."""
+    try:
+        with gzip.open(cale_file, "wb") as f_gz:
+            f_gz.write(json.dumps(index_dict, ensure_ascii=False, indent=2).encode('utf-8'))
+        print(f"   💾 [CHECKPOINT] Index salvat pe disc ({len(index_dict)} ani înregistrați).", flush=True)
+    except Exception as e:
+        print(f"   ⚠️ Eroare salvare checkpoint: {e}", flush=True)
+
+
+def build_master_index():
+    print("============================================================", flush=True)
+    print("🚀 MASTER INDEX XML + ELIMINARE DUPLICATE CU SALVARE INCREMENTALĂ", flush=True)
+    print("============================================================", flush=True)
+
+    service = get_drive_service()
+    cale_index_local = RADACINA_PROIECT / "index_xml.json.gz"
+
+    # ÎNCĂRCARE INDEX EXISTENT PENTRU APPEND / UPDATE
+    index_dict = {}
+    if cale_index_local.exists():
+        try:
+            with gzip.open(cale_index_local, "rb") as f_gz:
+                index_dict = json.loads(f_gz.read().decode('utf-8'))
+            print(f"📦 Index existent încărcat ({len(index_dict)} ani existenți). Se va face append.", flush=True)
+        except Exception as e:
+            print(f"⚠️ Nu s-a putut citi indexul vechi (se re-creează de la zero): {e}", flush=True)
+
+    harta_fisiere = defaultdict(list)
+    total_fisiere_brute = 0
+    pattern_xml = re.compile(r"brut_XML_(\d+)_pag(\d+)\.xml", re.IGNORECASE)
+
+    # --------------------------------------------------------------------------
+    # PAS 1: CARTOGRAFIERE SHARED DRIVE-URI
+    # --------------------------------------------------------------------------
+    print("\n🔍 [PAS 1] Cartografiere fișiere XML din toate cele 7 Shared Drive-uri...", flush=True)
+
+    for idx, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
+        page_token = None
+        count_drive = 0
+
+        while True:
+            try:
+                response = service.files().list(
+                    q=f"'{folder_id}' in parents and trashed=false and name contains '.xml'",
+                    spaces='drive',
+                    fields="nextPageToken, files(id, name, createdTime)",
+                    pageToken=page_token,
+                    pageSize=1000,
+                    includeItemsFromAllDrives=True,
+                    supportsAllDrives=True
+                ).execute()
+
+                files = response.get('files', [])
+                for f in files:
+                    harta_fisiere[f['name']].append({
+                        'id': f['id'],
+                        'drive_idx': idx,
+                        'createdTime': f.get('createdTime', '')
+                    })
+                    total_fisiere_brute += 1
+                    count_drive += 1
+
+                page_token = response.get('nextPageToken')
+                if not page_token:
+                    break
+            except Exception as e:
+                print(f"⚠️ Eroare la scanare Drive {idx}: {e}", flush=True)
+                break
+
+        print(f"   📂 Drive [{idx}/{len(FOLDERE_XML_IDS)}]: Găsite {count_drive:,} fișiere XML.", flush=True)
+
+    print(f"\n✅ Cartografiere gata: {total_fisiere_brute:,} fișiere brute ({len(harta_fisiere):,} denumiri unice).", flush=True)
+
+    # --------------------------------------------------------------------------
+    # PAS 2: DEDUPLICARE & SALVARE INCREMENTALĂ ÎN INDEX
+    # --------------------------------------------------------------------------
+    print("\n🗑️ [PAS 2] Deduplicare pe Drive & actualizare incrementală a indexului...", flush=True)
+    
+    total_duplicate_sterse = 0
+    actiuni_batch = 0
+    numar_batch = 1
+    fisiere_procesate = 0
+
+    for nume_fisier, lista_copii in harta_fisiere.items():
+        fisiere_procesate += 1
+
+        # 1. Ștergere duplicate dacă există mai multe copii
+        if len(lista_copii) > 1:
+            lista_copii.sort(key=lambda x: x['createdTime'], reverse=True)
+            copie_valida = lista_copii[0]
+
+            for dup in lista_copii[1:]:
+                try:
+                    service.files().delete(
+                        fileId=dup['id'],
+                        supportsAllDrives=True,
+                        supportsTeamDrives=True
+                    ).execute()
+
+                    total_duplicate_sterse += 1
+                    actiuni_batch += 1
+                    print(f"   🗑️ [{total_duplicate_sterse:,}] Șters duplicat '{nume_fisier}' [ID: {dup['id']}]", flush=True)
+
+                    if actiuni_batch >= DIMENSIUNE_BATCH:
+                        print(f"\n☕ [BATCH {numar_batch} DUPLICATE COMPLET] Pauză {PAUZA_SECUENTI_SEC}s...", flush=True)
+                        salveaza_checkpoint_index(cale_index_local, index_dict)
+                        time.sleep(PAUZA_SECUENTI_SEC)
+                        numar_batch += 1
+                        actiuni_batch = 0
+
+                except Exception as e_del:
+                    print(f"   ⚠️ Eroare ștergere duplicat {dup['id']}: {e_del}", flush=True)
+        else:
+            copie_valida = lista_copii[0]
+
+        # 2. Adăugare/Append în structura de index
+        m = pattern_xml.match(nume_fisier)
+        if m:
+            an = str(m.group(1))
+            pagina = str(m.group(2))
+            
+            if an not in index_dict:
+                index_dict[an] = {}
+
+            index_dict[an][pagina] = {
+                "id": copie_valida['id'],
+                "drive_idx": copie_valida['drive_idx'],
+                "nume": nume_fisier
+            }
+
+        # 3. Checkpoint automat din N în N fișiere
+        if fisiere_procesate % CHECKPOINT_SALVARE == 0:
+            salveaza_checkpoint_index(cale_index_local, index_dict)
+
+    # SALVARE FINALĂ
+    salveaza_checkpoint_index(cale_index_local, index_dict)
+
+    print("\n============================================================", flush=True)
+    print(f"🏁 PROCES FINALIZAT CU SUCCES!", flush=True)
+    print(f"📄 Fișier index: {cale_index_local.name}", flush=True)
+    print(f"📊 Ani indexați: {len(index_dict)} | Duplicate eliminate: {total_duplicate_sterse:,}", flush=True)
+    print("============================================================", flush=True)
+
+
+if __name__ == "__main__":
+    build_master_index()import os
+import sys
+import json
+import gzip
+import time
+import re
+from pathlib import Path
 
 # Logare live instantanee (unbuffered output)
 sys.stdout.reconfigure(line_buffering=True)
