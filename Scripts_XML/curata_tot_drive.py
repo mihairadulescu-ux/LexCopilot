@@ -3,14 +3,13 @@ import sys
 import json
 from pathlib import Path
 
-# Stream live unbuffered pentru GitHub Actions
+# Stream live FĂRĂ BUFFER (forțează afișarea instantanee în GitHub log)
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
-# LISTA TA REALĂ DE DRIVE-URI (puse și ca fallback direct în cod)
 RAW_DRIVE_STRING = os.getenv("DRIVE_FOLDER_XML") or (
     "1O9c1S2QgRk85DrfigMsneRiQ2E7bq-0m,"
     "1G7CkaoivnTR0O8mZceB0143Q6956C1-1,"
@@ -21,7 +20,6 @@ RAW_DRIVE_STRING = os.getenv("DRIVE_FOLDER_XML") or (
     "1kLmRsgMwM00TOQXzvJuK4YwJ6FJeLRxB"
 )
 
-# Parsăm lista curată de ID-uri (split după virgulă)
 FOLDERE_XML_IDS = [fid.strip() for fid in RAW_DRIVE_STRING.split(",") if fid.strip()]
 
 
@@ -46,28 +44,29 @@ def get_drive_service():
     sys.exit(1)
 
 
-def curata_toate_discurile_reale():
+def curata_toate_discurile_rapid():
     service = get_drive_service()
 
     print("============================================================", flush=True)
-    print(f"⚠️ PORNIRE CURĂȚENIE TOTALĂ PE CELE {len(FOLDERE_XML_IDS)} SHARED DRIVE-URI REALE", flush=True)
+    print(f"⚠️ CURĂȚARE RAPIDĂ PE CELE {len(FOLDERE_XML_IDS)} SHARED DRIVE-URI", flush=True)
     print("============================================================", flush=True)
 
     total_sterse = 0
 
     for idx, folder_id in enumerate(FOLDERE_XML_IDS, start=1):
-        print(f"\n📂 Curățare Shared Drive #{idx} (ID: {folder_id})...", flush=True)
+        print(f"\n📂 [Drive #{idx}/7] Start scanare folder: {folder_id[:12]}...", flush=True)
         sterse_drive = 0
         page_token = None
 
         while True:
             try:
+                # Citim doar pachete de 250 pentru eficiență
                 response = service.files().list(
                     q=f"'{folder_id}' in parents and trashed=false",
                     spaces='drive',
                     fields="nextPageToken, files(id, name)",
                     pageToken=page_token,
-                    pageSize=1000,
+                    pageSize=250,
                     includeItemsFromAllDrives=True,
                     supportsAllDrives=True
                 ).execute()
@@ -77,21 +76,27 @@ def curata_toate_discurile_reale():
                     print(f"   ✨ Drive-ul #{idx} este deja gol.", flush=True)
                     break
 
+                print(f"   🔎 Găsit lot de {len(files)} fișiere. Începe eliminarea...", flush=True)
+
                 for f in files:
                     try:
-                        service.files().delete(
+                        # Mutăm în Trash (mult mai rapid decât delete definitiv)
+                        service.files().update(
                             fileId=f['id'],
+                            body={'trashed': True},
                             supportsAllDrives=True,
                             supportsTeamDrives=True
                         ).execute()
+                        
                         sterse_drive += 1
                         total_sterse += 1
 
-                        if sterse_drive % 200 == 0:
-                            print(f"   🗑️ Șterse până acum pe Drive #{idx}: {sterse_drive:,} fișiere...", flush=True)
+                        # Log live la fiecare 50 de fișiere
+                        if sterse_drive % 50 == 0:
+                            print(f"   🗑️ [Drive #{idx}] Eliminat {sterse_drive:,} fișiere... (Ultimul: {f['name']})", flush=True)
 
                     except Exception as e_del:
-                        print(f"   ⚠️ Eroare la ștergerea fișierului {f['name']}: {e_del}", flush=True)
+                        print(f"   ⚠️ Eroare eliminare {f['name']}: {e_del}", flush=True)
 
                 page_token = response.get('nextPageToken')
                 if not page_token:
@@ -101,12 +106,12 @@ def curata_toate_discurile_reale():
                 print(f"❌ Eroare la scanarea Drive #{idx}: {e}", flush=True)
                 break
 
-        print(f"✅ Drive #{idx} curățat complet! Total fișiere șterse: {sterse_drive:,}", flush=True)
+        print(f"✅ Drive #{idx} curățat! Total fișiere eliminate: {sterse_drive:,}", flush=True)
 
     print("\n============================================================", flush=True)
-    print(f"🏁 CURĂȚENIE TOTALĂ FINALIZATĂ! Total fișiere eliminate: {total_sterse:,}", flush=True)
+    print(f"🏁 CURĂȚENIE FINALIZATĂ! Total fișiere eliminate: {total_sterse:,}", flush=True)
     print("============================================================", flush=True)
 
 
 if __name__ == "__main__":
-    curata_toate_discurile_reale()
+    curata_toate_discurile_rapid()
