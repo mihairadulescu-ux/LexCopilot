@@ -8,7 +8,7 @@ on:
         required: true
         default: '1990-1995'
       max_paralel:
-        description: 'Numărul maxim de ani procesați simultan în paralel'
+        description: 'Numarul maxim de ani procesati simultan in paralel'
         required: true
         default: '5'
 
@@ -28,7 +28,6 @@ jobs:
           input_str = "${{ github.event.inputs.ani_input }}"
           ani_set = set()
 
-          # Parsează bucăți separate prin virgulă sau spațiu
           parti = re.split(r"[,\s]+", input_str.strip())
           for parte in parti:
               if not parte:
@@ -43,9 +42,8 @@ jobs:
                   ani_set.add(int(parte))
 
           ani_sortati = sorted(list(ani_set))
-          print(f"Ani rezultați pentru procesare: {ani_sortati}")
+          print(f"Ani rezultati pentru procesare: {ani_sortati}")
           
-          # Salvează matricea JSON ca output
           output_json = json.dumps(ani_sortati)
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"matrix_ani={output_json}\n")
@@ -56,10 +54,10 @@ jobs:
     needs: generate-matrix
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false  # Dacă un an eșuează, celelalte fire continuă nestingherite
-      max-parallel: ${{ integers(github.event.inputs.max_paralel) }}
+      fail-fast: false
+      max-parallel: ${{ fromJSON(github.event.inputs.max_paralel) }}
       matrix:
-        an: ${{ json(needs.matrix_ani.outputs.matrix_ani) }}
+        an: ${{ fromJSON(needs.generate-matrix.outputs.matrix_ani) }}
 
     steps:
       - name: Checkout cod
@@ -70,23 +68,24 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Instalare dependențe Python
+      - name: Instalare dependente Python
         run: |
           pip install google-api-python-client google-auth requests suds-py3
 
-      - name: Descărcare și Arhivare XML pentru Anul ${{ matrix.an }}
+      - name: Descarcare si Arhivare XML pentru Anul ${{ matrix.an }}
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
           XML_STORAGE_INDEX: ${{ secrets.XML_STORAGE_INDEX }}
+          FOLDER_INDEX_ID: ${{ secrets.XML_STORAGE_INDEX }}
           JUST_RO_WSDL_URL: ${{ secrets.JUST_RO_WSDL_URL }}
         run: |
           python Scripts_XML/download_xml.py ${{ matrix.an }}
 
-  # 3. Job final de unificare în MasterIndex (rulat automat după ce toți anii s-au terminat)
+  # 3. Job final de unificare în MasterIndex (rulat automat la final)
   unificare-master-index:
     needs: proceseaza-an
-    if: always()  # Se execută chiar dacă unele fire au avut atenționări
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Checkout cod
@@ -97,13 +96,15 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Instalare dependențe
+      - name: Instalare dependente
         run: |
           pip install google-api-python-client google-auth
 
-      - name: Unificare Micro-Indecși în MasterIndex.json.gz
+      - name: Unificare Micro-Indecsi in MasterIndex.json.gz
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML }}
           XML_STORAGE_INDEX: ${{ secrets.XML_STORAGE_INDEX }}
+          FOLDER_INDEX_ID: ${{ secrets.XML_STORAGE_INDEX }}
         run: |
           python Scripts_XML/rebuild_master_index.py
