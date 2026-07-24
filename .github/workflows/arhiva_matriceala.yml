@@ -1,0 +1,69 @@
+name: Utilitar Matriceal - Arhivare Anuală TAR.GZ
+
+on:
+  workflow_dispatch:
+    inputs:
+      matrice_ani:
+        description: 'Introduceți anii și intervalele separate prin virgulă'
+        required: true
+        default: '1990, 1993, 1995-1999, 2004, 2010-2015, 2026'
+
+jobs:
+  generate-matrix:
+    name: Generare Matrice Ani
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Calculare Bucle de Ani
+        id: set-matrix
+        run: |
+          INPUT_VAL="${{ github.event.inputs.matrice_ani }}"
+          
+          # Separă după virgulă și curăță spațiile
+          IFS=',' read -ra ADDR <<< "$INPUT_VAL"
+          JSON_ARR="["
+          FIRST=true
+          for i in "${ADDR[@]}"; do
+            CLEAN_VAL=$(echo "$i" | xargs)
+            if [ "$FIRST" = true ]; then
+              JSON_ARR="${JSON_ARR}\"${CLEAN_VAL}\""
+              FIRST=false
+            else
+              JSON_ARR="${JSON_ARR},\"${CLEAN_VAL}\""
+            fi
+          done
+          JSON_ARR="${JSON_ARR}]"
+
+          echo "matrix={\"interval\": ${JSON_ARR}}" >> $GITHUB_OUTPUT
+
+  arhiva-xml:
+    name: Arhivare XML (${{ matrix.interval }})
+    needs: generate-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ json(needs.generate-matrix.outputs.matrix) }}
+
+    env:
+      DRIVE_FOLDER_XML: ${{ secrets.DRIVE_FOLDER_XML || vars.DRIVE_FOLDER_XML }}
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+
+    steps:
+      - name: Checkout cod
+        uses: actions/checkout@v4
+
+      - name: Configurare Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalare dependențe
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
+
+      - name: Execuție Arhivare Anuală
+        run: |
+          python Scripts_XML/arhiva_anuala_xml.py ${{ matrix.interval }}
