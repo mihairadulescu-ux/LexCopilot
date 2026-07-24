@@ -1,4 +1,4 @@
-name: Re-Indexare & Consolidare Master Index XML
+name: #Re-Indexare & Consolidare Master Index XML
 
 on:
   schedule:
