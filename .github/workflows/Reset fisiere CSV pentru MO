@@ -1,7 +1,7 @@
 # Filename: .github/workflows/Reset fisiere CSV pentru MO
 # Scop
-
 name: Refacere Inventar MO si restare fisiere CSV
+
 on:
   workflow_dispatch:
 
