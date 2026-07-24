@@ -6,10 +6,13 @@ import time
 import re
 from pathlib import Path
 
-# Logare live instantanee
+# Logare live instantanee (unbuffered output)
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
+# ==============================================================================
+# CONFIGURARE CĂI DE IMPORT
+# ==============================================================================
 DIRECTOR_CURENT = Path(__file__).resolve().parent
 RADACINA_PROIECT = DIRECTOR_CURENT.parent
 
@@ -141,7 +144,7 @@ def colecteaza_toti_micro_indecsii(service, master_dict):
         print("ℹ️ [MICRO-INDEX] TEMPORARY_XML_INDEXES nu este setat.", flush=True)
         return master_dict, []
 
-    print(f"🔍 [MICRO-INDEX] Căutare paginată a TUTROR micro-indecșilor în folderul temp (ID: {FOLDER_TEMP_INDEXES_ID})...", flush=True)
+    print(f"🔍 [MICRO-INDEX] Căutare paginată a TUTUROR micro-indecșilor în folderul temp (ID: {FOLDER_TEMP_INDEXES_ID})...", flush=True)
     fisiere_temp_de_sters = []
     total_micro_gasite = 0
     page_token = None
@@ -190,17 +193,19 @@ def colecteaza_toti_micro_indecsii(service, master_dict):
 
 
 def trimite_micro_indecsii_la_trash(service, lista_id_uri):
-    """Mută garantat la Trash toți micro-indecșii procesați."""
+    """Mută la Trash toți micro-indecșii procesați în batch-uri de 100 cu pauze."""
     total = len(lista_id_uri)
     if total == 0:
         print("ℹ️ [TRASH] Nu există micro-indecși de curățat.", flush=True)
         return
 
-    print(f"🧹 [TRASH] Se mută la Trash TOȚI cei {total} micro-indecși procesați...", flush=True)
+    print(f"🧹 [TRASH] Se mută la Trash TOȚI cei {total} micro-indecși procesați (în batch-uri de 100)...", flush=True)
     curatati = 0
+    actiuni_batch = 0
+    numar_batch = 1
+
     for idx, fid in enumerate(lista_id_uri, start=1):
         try:
-            # Apel direct de mutare în Trash compatibil 100% cu Shared Drives & Content Manager
             service.files().update(
                 fileId=fid,
                 body={'trashed': True},
@@ -208,10 +213,15 @@ def trimite_micro_indecsii_la_trash(service, lista_id_uri):
                 supportsTeamDrives=True
             ).execute()
             curatati += 1
+            actiuni_batch += 1
 
-            if idx % 50 == 0 or idx == total:
-                print(f"   🧹 Trimisi la Trash {idx}/{total} micro-indecși...", flush=True)
-        except Exception as e:
+            if actiuni_batch >= 100:
+                print(f"   ☕ [BATCH TRASH {numar_batch}] Mutați 100 micro-indecși în Trash ({curatati}/{total}). Pauză 2.5s...", flush=True)
+                time.sleep(2.5)
+                numar_batch += 1
+                actiuni_batch = 0
+
+        except Exception:
             pass
 
     print(f"✅ [TRASH COMPLET] Curățare finalizată! {curatati}/{total} micro-indecși mutați în Trash.\n", flush=True)
@@ -239,7 +249,6 @@ def salveaza_si_urca_master_index_gz(service, master_dict):
             resumable=True
         )
         
-        # Forțăm metadatele să fie de tip GZIP real
         file_metadata = {
             "name": "index_xml.json.gz",
             "mimeType": "application/gzip"
