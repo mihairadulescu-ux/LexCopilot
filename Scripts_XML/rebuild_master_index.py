@@ -151,7 +151,7 @@ def unifica_in_master_index(reset_complet=False):
         "total_ani_procesati": 0,
         "total_xml_valide": 0,
         "arhive": {},
-        "fisiere": {}  # Structură de dicționar pentru deduplicare automată
+        "fisiere": {}  # Dicționar pentru deduplicare automată
     }
 
     if files_master and not reset_complet:
