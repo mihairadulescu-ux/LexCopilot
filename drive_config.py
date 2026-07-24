@@ -1,3 +1,5 @@
+# Filename: /drive_config.py
+# Scop
 import os
 
 # 1. Stocare XML - split dinamic din variabila DRIVE_FOLDER_XML
